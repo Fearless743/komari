@@ -29,6 +29,7 @@ import (
 	"github.com/komari-monitor/komari/database"
 	"github.com/komari-monitor/komari/database/accounts"
 	"github.com/komari-monitor/komari/database/auditlog"
+	"github.com/komari-monitor/komari/database/clients"
 	"github.com/komari-monitor/komari/database/dbcore"
 	"github.com/komari-monitor/komari/database/models"
 	d_notification "github.com/komari-monitor/komari/database/notification"
@@ -37,6 +38,7 @@ import (
 	"github.com/komari-monitor/komari/public"
 	"github.com/komari-monitor/komari/utils"
 	"github.com/komari-monitor/komari/utils/cloudflared"
+	"github.com/komari-monitor/komari/utils/ddns"
 	"github.com/komari-monitor/komari/utils/geoip"
 	logutil "github.com/komari-monitor/komari/utils/log"
 	"github.com/komari-monitor/komari/utils/messageSender"
@@ -81,6 +83,7 @@ func RunServer() {
 	go geoip.InitGeoIp()
 	go DoScheduledWork()
 	go messageSender.Initialize()
+	go ddns.Initialize()
 	// oidcInit
 	go oauth.Initialize()
 
@@ -151,6 +154,9 @@ func RunServer() {
 
 		if event.IsChanged(config.NotificationMethodKey) {
 			go messageSender.Initialize()
+		}
+		if event.IsChanged(config.DdnsProviderKey) || event.IsChanged(config.DdnsEnabledKey) {
+			go ddns.Initialize()
 		}
 
 	})
@@ -231,6 +237,7 @@ func RunServer() {
 			updateGroup.POST("/user", update.UpdateUser)
 			updateGroup.PUT("/favicon", update.UploadFavicon)
 			updateGroup.POST("/favicon", update.DeleteFavicon)
+			updateGroup.POST("/ddns", admin.SyncDdns)
 		}
 		// tasks
 		taskGroup := adminAuthrized.Group("/task")
@@ -251,6 +258,9 @@ func RunServer() {
 			settingsGroup.GET("/oidc", admin.GetOidcProvider)
 			settingsGroup.POST("/message-sender", admin.SetMessageSenderProvider)
 			settingsGroup.GET("/message-sender", admin.GetMessageSenderProvider)
+			settingsGroup.POST("/ddns", admin.SetDdnsProvider)
+			settingsGroup.GET("/ddns", admin.GetDdnsProvider)
+			settingsGroup.POST("/ddns/cloudflare/zones", admin.GetCloudflareZones)
 		}
 		// themes
 		themeGroup := adminAuthrized.Group("/theme")
@@ -396,6 +406,7 @@ func InitDatabase() {
 func DoScheduledWork() {
 	tasks.ReloadPingSchedule()
 	d_notification.ReloadLoadNotificationSchedule()
+	ddnsTicker := time.NewTicker(10 * time.Minute)
 	ticker := time.NewTicker(time.Minute * 30)
 	minute := time.NewTicker(60 * time.Second)
 	//records.DeleteRecordBefore(time.Now().Add(-time.Hour * 24 * 30))
@@ -403,7 +414,16 @@ func DoScheduledWork() {
 	go notifier.CheckExpireScheduledWork()
 	for {
 		cfg, _ := config.GetManyAs[config.Legacy]()
+		interval := cfg.DdnsSyncInterval
+		if interval <= 0 {
+			interval = 10
+		}
 		select {
+		case <-ddnsTicker.C:
+			if allClients, err := clients.GetAllClientBasicInfo(); err == nil {
+				go ddns.SyncAll(allClients, "schedule", false)
+			}
+			ddnsTicker.Reset(time.Duration(interval) * time.Minute)
 		case <-ticker.C:
 			records.DeleteRecordBefore(time.Now().Add(-time.Hour * time.Duration(cfg.RecordPreserveTime)))
 			records.CompactRecord()

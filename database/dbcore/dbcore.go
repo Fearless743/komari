@@ -12,12 +12,12 @@ import (
 	"sync"
 	"time"
 
+	"github.com/glebarez/sqlite"
 	"github.com/komari-monitor/komari/cmd/flags"
 	"github.com/komari-monitor/komari/common"
 	"github.com/komari-monitor/komari/config"
 	"github.com/komari-monitor/komari/database/models"
 	logutil "github.com/komari-monitor/komari/utils/log"
-	"gorm.io/driver/sqlite"
 	"gorm.io/gorm"
 )
 
@@ -232,17 +232,17 @@ func MergeDatabase(db *gorm.DB) {
 	}
 	if !db.Migrator().HasTable(&models.OidcProvider{}) && db.Migrator().HasTable(&models.Config{}) {
 		log.Println("[>1.0.2] Merge OidcProvider table....")
-		var config struct {
+		var oidcConfig struct {
 			OAuthClientID     string `json:"o_auth_client_id" gorm:"type:varchar(255)"`
 			OAuthClientSecret string `json:"o_auth_client_secret" gorm:"type:varchar(255)"`
 		}
-		if err := db.Raw("SELECT * FROM configs LIMIT 1").Scan(&config).Error; err != nil {
+		if err := db.Raw("SELECT * FROM configs LIMIT 1").Scan(&oidcConfig).Error; err != nil {
 			log.Println("Failed to get config for OIDC provider migration:", err)
 		}
 		db.AutoMigrate(&models.OidcProvider{})
 		j, err := json.Marshal(&map[string]string{
-			"client_id":     config.OAuthClientID,
-			"client_secret": config.OAuthClientSecret,
+			"client_id":     oidcConfig.OAuthClientID,
+			"client_secret": oidcConfig.OAuthClientSecret,
 		})
 		if err != nil {
 			log.Println("Failed to marshal OIDC provider config:", err)
@@ -252,8 +252,10 @@ func MergeDatabase(db *gorm.DB) {
 			Name:     "github",
 			Addition: string(j),
 		})
-		db.AutoMigrate(&models.Config{})
-		db.Model(&models.Config{}).Where("id = 1").Update("o_auth_provider", "github")
+		if !db.Migrator().HasColumn(&config.ConfigItem{}, "key") {
+			db.AutoMigrate(&models.Config{})
+			db.Model(&models.Config{}).Where("id = 1").Update("o_auth_provider", "github")
+		}
 	}
 	if !db.Migrator().HasTable(&models.MessageSenderProvider{}) && db.Migrator().HasTable(&models.Config{}) {
 		log.Println("[>1.0.2] Migrate MessageSender configuration....")
@@ -459,6 +461,7 @@ func GetDBInstance() *gorm.DB {
 			&models.PingTask{},
 			&models.OidcProvider{},
 			&models.MessageSenderProvider{},
+			&models.DdnsProvider{},
 			&models.ThemeConfiguration{},
 		)
 		if err != nil {

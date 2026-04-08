@@ -9,6 +9,7 @@ import (
 	"github.com/komari-monitor/komari/common"
 	"github.com/komari-monitor/komari/database/dbcore"
 	"github.com/komari-monitor/komari/database/models"
+	"github.com/komari-monitor/komari/utils/ddns"
 
 	"gorm.io/gorm"
 )
@@ -204,6 +205,10 @@ func SaveClientReport(clientUUID string, report common.Report) (err error) {
 
 	if err != nil {
 		return err
+	}
+
+	if client, getErr := GetClientByUUID(clientUUID); getErr == nil {
+		go ddns.SyncClient(client, "report", false)
 	}
 
 	return nil

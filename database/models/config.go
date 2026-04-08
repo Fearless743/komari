@@ -18,6 +18,10 @@ type Config struct {
 	// Nezha 兼容（Agent gRPC）
 	NezhaCompatEnabled bool   `json:"nezha_compat_enabled" gorm:"default:false"`
 	NezhaCompatListen  string `json:"nezha_compat_listen" gorm:"type:varchar(100);default:''"` // 例如 0.0.0.0:5555
+	// DDNS 配置
+	DdnsEnabled      bool   `json:"ddns_enabled" gorm:"default:false"`
+	DdnsProvider     string `json:"ddns_provider" gorm:"type:varchar(50);default:'none'"`
+	DdnsSyncInterval int    `json:"ddns_sync_interval" gorm:"default:10"`
 	// OAuth 配置
 	OAuthEnabled         bool   `json:"o_auth_enabled" gorm:"default:false"`
 	OAuthProvider        string `json:"o_auth_provider" gorm:"type:varchar(50);default:'github'"`

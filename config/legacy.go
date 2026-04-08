@@ -21,6 +21,10 @@ type Legacy struct {
 	// Nezha 兼容（Agent gRPC）
 	NezhaCompatEnabled bool   `json:"nezha_compat_enabled" default:"false"`
 	NezhaCompatListen  string `json:"nezha_compat_listen" default:""` // 例如 0.0.0.0:5555
+	// DDNS 配置
+	DdnsEnabled      bool   `json:"ddns_enabled" default:"false"`
+	DdnsProvider     string `json:"ddns_provider" default:"none"`
+	DdnsSyncInterval int    `json:"ddns_sync_interval" default:"10"` // 分钟
 	// OAuth 配置
 	OAuthEnabled         bool   `json:"o_auth_enabled" default:"false"`
 	OAuthProvider        string `json:"o_auth_provider" default:"github"`
@@ -59,6 +63,9 @@ const (
 	GeoIpProviderKey              = "geo_ip_provider"
 	NezhaCompatEnabledKey         = "nezha_compat_enabled"
 	NezhaCompatListenKey          = "nezha_compat_listen"
+	DdnsEnabledKey                = "ddns_enabled"
+	DdnsProviderKey               = "ddns_provider"
+	DdnsSyncIntervalKey           = "ddns_sync_interval"
 	OAuthEnabledKey               = "o_auth_enabled"
 	OAuthProviderKey              = "o_auth_provider"
 	DisablePasswordLoginKey       = "disable_password_login"

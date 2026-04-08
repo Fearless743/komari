@@ -1,19 +1,18 @@
 package clients
 
 import (
+	"fmt"
 	"math"
 	"time"
 
+	"github.com/google/uuid"
 	"github.com/komari-monitor/komari/common"
 	"github.com/komari-monitor/komari/database/dbcore"
 	"github.com/komari-monitor/komari/database/models"
 	"github.com/komari-monitor/komari/utils"
+	"github.com/komari-monitor/komari/utils/ddns"
 	"gorm.io/gorm"
 	"gorm.io/gorm/clause"
-
-	"fmt"
-
-	"github.com/google/uuid"
 )
 
 // Deprecated: DeleteClientConfig is deprecated and will be removed in a future release. Use DeleteClient instead.
@@ -322,6 +321,11 @@ func SaveClient(updates map[string]interface{}) error {
 	err := db.Model(&models.Client{}).Where("uuid = ?", clientUUID).Updates(updates).Error
 	if err != nil {
 		return err
+	}
+	if client, err := GetClientByUUID(clientUUID); err == nil {
+		go func() {
+			_ = ddns.SyncClient(client, "client_edit", false)
+		}()
 	}
 	return nil
 }
