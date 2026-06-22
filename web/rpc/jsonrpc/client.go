@@ -4,6 +4,7 @@ import (
 	"context"
 	"time"
 
+	"github.com/komari-monitor/komari/database/auditlog"
 	"github.com/komari-monitor/komari/database/models"
 	"github.com/komari-monitor/komari/database/tasks"
 	"github.com/komari-monitor/komari/pkg/rpc"
@@ -82,5 +83,10 @@ func clientTaskResult(ctx context.Context, req *rpc.JsonRpcRequest) (any, *rpc.J
 	if err := tasks.SaveTaskResult(params.TaskId, uuid, params.Result, params.ExitCode, models.FromTime(params.FinishedAt)); err != nil {
 		return nil, rpc.MakeError(rpc.InternalError, "Failed to update task result: "+err.Error(), nil)
 	}
+	command := ""
+	if task, err := tasks.GetTaskByTaskId(params.TaskId); err == nil && task != nil {
+		command = task.Command
+	}
+	auditlog.RecordExecResult(params.TaskId, uuid, command, params.Result, params.ExitCode)
 	return map[string]any{"status": "success", "message": "Task result updated successfully"}, nil
 }

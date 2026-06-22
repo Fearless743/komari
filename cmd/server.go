@@ -14,6 +14,7 @@ import (
 	"github.com/komari-monitor/komari/cmd/flags"
 	"github.com/komari-monitor/komari/pkg/corn"
 	"github.com/komari-monitor/komari/web/api"
+	"github.com/komari-monitor/komari/web/api/terminal"
 
 	"github.com/komari-monitor/komari/database"
 	"github.com/komari-monitor/komari/database/accounts"
@@ -211,6 +212,8 @@ func cleanupScheduledData() {
 	tasks.ClearTaskResultsByTimeBefore(time.Now().Add(-time.Hour * time.Duration(cfg.RecordPreserveTime)))
 	tasks.DeletePingRecordsBefore(time.Now().Add(-time.Hour * time.Duration(cfg.PingRecordPreserveTime)))
 	auditlog.RemoveOldLogs()
+	auditlog.RemoveOldAuditTraces(90)
+	terminal.CleanupOldRecords(90)
 	accounts.RemoveExpiredSessions()
 }
 

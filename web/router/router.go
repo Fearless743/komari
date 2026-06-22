@@ -84,6 +84,8 @@ func registerAdminRoutes(r *gin.Engine) {
 
 	// --- 二进制/流/重定向类，保留 REST handler ---
 	g.GET("/download/backup", admin.DownloadBackup)
+	g.GET("/audit/export", admin.ExportAuditTraces)
+	g.GET("/audit/terminal/record", admin.DownloadTerminalRecord)
 	g.POST("/upload/backup", admin.UploadBackup)
 	g.GET("/test/geoip", jsonRpc.Bind("admin:testGeoip", jsonRpc.WithQuery("ip")))
 	g.POST("/test/sendMessage", jsonRpc.Bind("admin:testSendMessage"))
@@ -178,6 +180,11 @@ func registerAdminRoutes(r *gin.Engine) {
 	}
 
 	g.GET("/logs", jsonRpc.Bind("admin:getLogs", jsonRpc.WithQuery("limit", "page")))
+
+	// 终端 / 远程执行日志溯源
+	g.GET("/audit", jsonRpc.Bind("admin:getAuditTraces", jsonRpc.WithQuery(
+		"category", "action", "client_uuid", "actor_uuid", "session_id", "keyword", "start_time", "end_time", "limit", "page",
+	)))
 
 	// clipboard
 	clipboardGroup := g.Group("/clipboard")

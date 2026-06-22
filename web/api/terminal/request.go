@@ -6,6 +6,7 @@ import (
 	"time"
 
 	"github.com/gin-gonic/gin"
+	"github.com/komari-monitor/komari/database/auditlog"
 	"github.com/komari-monitor/komari/database/clients"
 	"github.com/komari-monitor/komari/utils"
 	agent_runtime "github.com/komari-monitor/komari/web/agent"
@@ -80,6 +81,7 @@ func RequestTerminal(c *gin.Context) {
 	// 如果没有连接上，则关闭连接
 	time.AfterFunc(30*time.Second, func() {
 		TerminalSessionsMutex.Lock()
+		timedOut := false
 		if session.Agent == nil {
 			if session.Browser != nil {
 				session.Browser.WriteMessage(1, []byte("被控端连接超时 timeout\n"))
@@ -87,8 +89,12 @@ func RequestTerminal(c *gin.Context) {
 			}
 			conn.Close()
 			delete(TerminalSessions, id)
+			timedOut = true
 		}
 		TerminalSessionsMutex.Unlock()
+		if timedOut {
+			auditlog.RecordTerminalTimeout(id, session.UserUUID, session.RequesterIp, session.UUID)
+		}
 	})
 	//auditlog.Log(c.ClientIP(), user_uuid.(string), "request, terminal id:"+id+",client:"+session.UUID, "terminal")
 }

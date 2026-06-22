@@ -195,9 +195,11 @@ func adminExec(ctx context.Context, req *rpc.JsonRpcRequest) (any, *rpc.JsonRpcE
 	}
 	actor, ip := auditActor(ctx)
 	auditlog.Log(ip, actor, "REC, task id: "+taskId, "warn")
+	auditlog.RecordExecDispatch(taskId, actor, ip, params.Command, taskClients)
 	if len(offlineClients) > 0 {
 		for _, uuid := range offlineClients {
 			tasks.SaveTaskResult(taskId, uuid, "Client offline!", -1, models.FromTime(time.Now()))
+			auditlog.RecordExecResult(taskId, uuid, params.Command, "Client offline!", -1)
 		}
 	}
 	return map[string]any{
