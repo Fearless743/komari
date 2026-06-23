@@ -2,14 +2,22 @@ package terminal
 
 import (
 	"reflect"
+	"strings"
 	"testing"
 )
 
+// collect 驱动 parseInputLines 并收集所有“非空、去空白后”的命令行，
+// 与 sessionRecorder.commit 的提交语义保持一致。
 func collect(inputs ...[]byte) []string {
 	var got []string
-	r := newCommandRecorder(func(cmd string) { got = append(got, cmd) })
+	var buf []rune
+	onLine := func(line string) {
+		if cmd := strings.TrimSpace(line); cmd != "" {
+			got = append(got, cmd)
+		}
+	}
 	for _, in := range inputs {
-		r.Feed(in)
+		buf = parseInputLines(buf, in, onLine)
 	}
 	return got
 }

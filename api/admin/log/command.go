@@ -78,7 +78,7 @@ func ExportCommandLogs(c *gin.Context) {
 
 	w := csv.NewWriter(c.Writer)
 	defer w.Flush()
-	w.Write([]string{"id", "time", "source", "user_uuid", "user_ip", "client_uuid", "session_id", "exit_code", "command"})
+	w.Write([]string{"id", "time", "source", "user_uuid", "user_ip", "client_uuid", "session_id", "exit_code", "command", "output"})
 	for _, l := range logs {
 		exitCode := ""
 		if l.ExitCode != nil {
@@ -94,6 +94,7 @@ func ExportCommandLogs(c *gin.Context) {
 			l.SessionID,
 			exitCode,
 			l.Command,
+			l.Output,
 		})
 	}
 }

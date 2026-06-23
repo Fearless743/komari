@@ -32,8 +32,8 @@ func TaskResult(c *gin.Context) {
 		c.JSON(500, gin.H{"status": "error", "message": "Failed to update task result: " + err.Error()})
 		return
 	}
-	// 回填命令溯源日志中的退出码
-	auditlog.UpdateExecExitCode(req.TaskId, clientId, req.ExitCode)
+	// 回填命令溯源日志中的退出码与执行结果
+	auditlog.UpdateExecResult(req.TaskId, clientId, req.ExitCode, req.Result)
 
 	c.JSON(200, gin.H{"status": "success", "message": "Task result updated successfully"})
 }
