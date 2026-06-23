@@ -26,6 +26,9 @@ type MethodMeta struct {
 	Params      []ParamMeta `json:"params,omitempty"`
 	Returns     string      `json:"returns,omitempty"`
 	Example     any         `json:"example,omitempty"`
+	// Sensitive 标记该方法为敏感操作（如远程执行命令），调用前需通过步进式 2FA 校验。
+	// 校验在统一的 Dispatch 层强制执行，覆盖所有传输入口（REST 桥接 / /api/rpc2 直连）。
+	Sensitive bool `json:"sensitive,omitempty"`
 }
 
 var (
@@ -39,6 +42,15 @@ func getMetaUnsafe(name string) *MethodMeta {
 	m := methodMetas[name]
 	muMetas.RUnlock()
 	return m
+}
+
+// IsSensitiveMethod 报告已注册方法是否被标记为敏感操作（需步进式 2FA）。
+// 未注册或无元数据的方法返回 false。
+func IsSensitiveMethod(name string) bool {
+	if m := getMetaUnsafe(name); m != nil {
+		return m.Sensitive
+	}
+	return false
 }
 
 // ensureMeta 确保存在基本元数据（最少 Name）。

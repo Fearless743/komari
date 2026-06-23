@@ -36,6 +36,12 @@ func reg(name string, h rpc.Handler, summary string) {
 	RegisterWithGroupAndMeta(name, rpc.RoleAdmin, h, &rpc.MethodMeta{Name: "admin:" + name, Summary: summary})
 }
 
+// regSensitive 与 reg 相同，但额外把方法标记为敏感操作（需步进式 2FA）。
+// 校验由统一的 Dispatch 层执行，覆盖 REST 桥接与 /api/rpc2 直连两条入口。
+func regSensitive(name string, h rpc.Handler, summary string) {
+	RegisterWithGroupAndMeta(name, rpc.RoleAdmin, h, &rpc.MethodMeta{Name: "admin:" + name, Summary: summary, Sensitive: true})
+}
+
 func adminAddLoadNotification(_ context.Context, req *rpc.JsonRpcRequest) (any, *rpc.JsonRpcError) {
 	var params struct {
 		Clients   []string `json:"clients"`

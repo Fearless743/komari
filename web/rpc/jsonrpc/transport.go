@@ -173,7 +173,37 @@ func buildContextMeta(c *gin.Context, permissionGroup string) *rpc.ContextMeta {
 	meta.RemoteIP = c.ClientIP()
 	meta.UserAgent = c.GetHeader("User-Agent")
 	meta.TempShareValid = hasTempShareAccess(c)
+	meta.IsAPIKey = isAPIKeyAdmin(c)
+	meta.TwoFactorCode = extractTwoFactorCode(c)
 	return meta
+}
+
+// isAPIKeyAdmin 报告本次请求的 admin 身份是否来自 API Key（机器对机器凭据）。
+// 与 detectPermissionGroup 中的 API Key 判定保持一致。
+func isAPIKeyAdmin(c *gin.Context) bool {
+	apiKey := c.GetHeader("Authorization")
+	if len(apiKey) <= len("Bearer ") {
+		return false
+	}
+	cfg, _ := config.GetAs[string](config.ApiKeyKey, "")
+	return len(cfg) > 8 && apiKey == "Bearer "+cfg
+}
+
+// extractTwoFactorCode 从请求头或查询参数读取一次性 2FA 验证码，供敏感方法步进式校验。
+// 仅取头/查询，不读取请求体——/api/rpc2 的请求体已被 JSON-RPC 信封消费，统一从此处取以保证各入口一致。
+func extractTwoFactorCode(c *gin.Context) string {
+	if code := c.GetHeader("X-2FA-Code"); code != "" {
+		return code
+	}
+	if code := c.GetHeader("X-Two-Factor-Code"); code != "" {
+		return code
+	}
+	for _, key := range []string{"2fa_code", "two_factor_code", "otp"} {
+		if code := c.Query(key); code != "" {
+			return code
+		}
+	}
+	return ""
 }
 
 // hasTempShareAccess 校验 temp_key cookie 是否为有效的临时分享访问许可。

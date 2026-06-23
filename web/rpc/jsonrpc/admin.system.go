@@ -35,7 +35,7 @@ func init() {
 	reg("startCloudflared", adminStartCloudflared, "Start cloudflared tunnel")
 	reg("stopCloudflared", adminStopCloudflared, "Stop cloudflared tunnel")
 	reg("removeCloudflaredToken", adminRemoveCloudflaredToken, "Remove cloudflared token")
-	reg("exec", adminExec, "Execute a command on clients")
+	regSensitive("exec", adminExec, "Execute a command on clients")
 	reg("testSendMessage", adminTestSendMessage, "Send a test notification")
 	reg("testGeoip", adminTestGeoip, "Test GeoIP lookup")
 }

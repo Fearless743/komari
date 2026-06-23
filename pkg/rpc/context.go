@@ -32,6 +32,12 @@ type ContextMeta struct {
 	UserAgent string
 	// TempShareValid 临时分享访问许可是否有效（基于 temp_key cookie 校验，由传输层填充）
 	TempShareValid bool
+	// IsAPIKey 标记当前 admin 身份是否来自 API Key（而非用户会话）。
+	// API Key 为服务端机器对机器凭据，调用敏感方法时豁免步进式 2FA。
+	IsAPIKey bool
+	// TwoFactorCode 调用方随请求提供的一次性 2FA 验证码（取自请求头/查询参数），
+	// 供敏感方法在 Dispatch 层做步进式校验。
+	TwoFactorCode string
 }
 
 // 私有类型做 key，避免外部冲突

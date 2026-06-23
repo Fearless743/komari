@@ -3,6 +3,7 @@ package jsonrpc
 import (
 	"context"
 
+	"github.com/komari-monitor/komari/database/accounts"
 	"github.com/komari-monitor/komari/pkg/config"
 	"github.com/komari-monitor/komari/pkg/rpc"
 )
@@ -34,7 +35,45 @@ func Dispatch(ctx context.Context, meta *rpc.ContextMeta, req *rpc.JsonRpcReques
 		return rpc.ErrorResponse(req.ID, rpc.PermissionDenied, "Permission denied", nil)
 	}
 
+	// 敏感方法（如远程执行命令）的步进式 2FA 校验。集中在此处执行，
+	// 覆盖所有传输入口（REST 桥接 / /api/rpc2 直连 / WebSocket），避免依赖 REST 中间件而被旁路。
+	if rpc.IsSensitiveMethod(req.Method) {
+		if jerr := verifySensitive2FA(meta); jerr != nil {
+			return jerr.ResponseWithID(req.ID)
+		}
+	}
+
 	return rpc.CallWithContext(rpc.NewContextWithMeta(ctx, meta), req.ID, req.Method, req.Params)
+}
+
+// verifySensitive2FA 对敏感方法执行步进式 2FA 校验，语义与 REST 中间件 api.VerifySensitive2FA 一致：
+//   - API Key（机器对机器凭据）豁免；
+//   - 用户未配置 2FA 时放行；
+//   - 否则要求随请求提供有效的一次性验证码（取自请求头/查询参数）。
+//
+// 校验不通过返回 PermissionDenied 错误。
+func verifySensitive2FA(meta *rpc.ContextMeta) *rpc.JsonRpcError {
+	if meta.IsAPIKey {
+		return nil
+	}
+	if meta.UserUUID == "" {
+		return rpc.MakeError(rpc.PermissionDenied, "2FA code is required", nil)
+	}
+	user, err := accounts.GetUserByUUID(meta.UserUUID)
+	if err != nil {
+		return rpc.MakeError(rpc.PermissionDenied, "Failed to verify identity", nil)
+	}
+	if user.TwoFactor == "" {
+		return nil
+	}
+	if meta.TwoFactorCode == "" {
+		return rpc.MakeError(rpc.PermissionDenied, "2FA code is required", nil)
+	}
+	valid, err := accounts.Verify2Fa(meta.UserUUID, meta.TwoFactorCode)
+	if err != nil || !valid {
+		return rpc.MakeError(rpc.PermissionDenied, "Invalid 2FA code", nil)
+	}
+	return nil
 }
 
 // OnInternalRequest 内部调用 RPC 方法（如服务端代码代发请求），仅携带权限分组。

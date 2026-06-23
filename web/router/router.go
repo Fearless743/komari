@@ -127,7 +127,9 @@ func registerAdminRoutes(r *gin.Engine) {
 	task := g.Group("/task")
 	{
 		task.GET("/all", jsonRpc.Bind("admin:getTasks"))
-		task.POST("/exec", api.RequireSensitive2FA(), jsonRpc.Bind("admin:exec"))
+		// 敏感操作（远程执行）的步进式 2FA 校验已统一下沉到 RPC Dispatch 层，
+		// 覆盖本 REST 桥接与 /api/rpc2 直连两条入口，无需在此重复挂中间件。
+		task.POST("/exec", jsonRpc.Bind("admin:exec"))
 		task.GET("/:task_id", jsonRpc.Bind("admin:getTaskById", jsonRpc.WithPath("task_id")))
 		task.GET("/:task_id/result", jsonRpc.Bind("admin:getTaskResultsByTaskId", jsonRpc.WithPath("task_id")))
 		task.GET("/:task_id/result/:uuid", jsonRpc.Bind("admin:getSpecificTaskResult", jsonRpc.WithPath("task_id", "uuid")))
