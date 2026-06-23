@@ -10,5 +10,6 @@ type CommandAudit struct {
 	ClientUUID string    `json:"client_uuid" gorm:"type:varchar(36);index"`     // 被控端 UUID
 	SessionID  string    `json:"session_id" gorm:"type:varchar(64);index"`      // 终端会话 ID 或远程执行任务 ID
 	Command    string    `json:"command" gorm:"type:text;not null"`             // 执行的命令
+	Output     string    `json:"output" gorm:"type:longtext"`                   // 命令对应的返回结果/输出（终端为该命令运行期间的回显流，远程执行为命令结果）
 	ExitCode   *int      `json:"exit_code" gorm:"type:int"`                     // 退出码（仅远程执行有意义，nil 表示未完成/未知）
 }

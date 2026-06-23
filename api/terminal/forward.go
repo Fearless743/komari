@@ -17,10 +17,9 @@ func ForwardTerminal(id string) {
 	established_time := time.Now()
 	errChan := make(chan error, 1)
 
-	// 记录终端中执行的每一条命令，用于日志溯源
-	recorder := newCommandRecorder(func(cmd string) {
-		auditlog.RecordTerminalCommand(session.UserUUID, session.RequesterIp, session.UUID, id, cmd)
-	})
+	// 录制终端会话：记录每条命令及其对应输出，用于日志溯源
+	recorder := newSessionRecorder(session.UserUUID, session.RequesterIp, session.UUID, id)
+	defer recorder.Close()
 
 	go func() {
 		for {
@@ -32,7 +31,7 @@ func ForwardTerminal(id string) {
 
 			// 控制类消息（如 resize，以 '{' 开头的 JSON）不计入命令记录，其余视为键盘输入
 			if messageType != websocket.TextMessage || len(data) == 0 || data[0] != '{' {
-				recorder.Feed(data)
+				recorder.FeedInput(data)
 			}
 
 			if messageType == websocket.TextMessage {
@@ -60,6 +59,8 @@ func ForwardTerminal(id string) {
 				errChan <- err
 				return
 			}
+			// 将被控端输出归属到当前正在运行的命令
+			recorder.FeedOutput(data)
 			if session.Browser != nil {
 				err = session.Browser.WriteMessage(websocket.BinaryMessage, data)
 				if err != nil {
