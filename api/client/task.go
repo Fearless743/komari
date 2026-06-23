@@ -4,6 +4,7 @@ import (
 	"time"
 
 	"github.com/gin-gonic/gin"
+	"github.com/Fearless743/komari/database/auditlog"
 	"github.com/Fearless743/komari/database/clients"
 	"github.com/Fearless743/komari/database/models"
 	"github.com/Fearless743/komari/database/tasks"
@@ -31,6 +32,8 @@ func TaskResult(c *gin.Context) {
 		c.JSON(500, gin.H{"status": "error", "message": "Failed to update task result: " + err.Error()})
 		return
 	}
+	// 回填命令溯源日志中的退出码
+	auditlog.UpdateExecExitCode(req.TaskId, clientId, req.ExitCode)
 
 	c.JSON(200, gin.H{"status": "success", "message": "Task result updated successfully"})
 }

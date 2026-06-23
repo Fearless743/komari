@@ -454,6 +454,7 @@ func GetDBInstance() *gorm.DB {
 			&models.GPURecord{},
 			// &models.Config{},
 			&models.Log{},
+			&models.CommandAudit{},
 			&models.Clipboard{},
 			&models.LoadNotification{},
 			&models.OfflineNotification{},

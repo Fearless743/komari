@@ -17,12 +17,22 @@ func ForwardTerminal(id string) {
 	established_time := time.Now()
 	errChan := make(chan error, 1)
 
+	// 记录终端中执行的每一条命令，用于日志溯源
+	recorder := newCommandRecorder(func(cmd string) {
+		auditlog.RecordTerminalCommand(session.UserUUID, session.RequesterIp, session.UUID, id, cmd)
+	})
+
 	go func() {
 		for {
 			messageType, data, err := session.Browser.ReadMessage()
 			if err != nil {
 				errChan <- err
 				return
+			}
+
+			// 控制类消息（如 resize，以 '{' 开头的 JSON）不计入命令记录，其余视为键盘输入
+			if messageType != websocket.TextMessage || len(data) == 0 || data[0] != '{' {
+				recorder.Feed(data)
 			}
 
 			if messageType == websocket.TextMessage {

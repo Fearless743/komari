@@ -77,6 +77,10 @@ func Exec(c *gin.Context) {
 	}
 	uuid, _ := c.Get("uuid")
 	auditlog.Log(c.ClientIP(), uuid.(string), "REC, task id: "+taskId, "warn")
+	// 为每个目标被控端记录一条命令溯源日志
+	for _, clientUUID := range req.Clients {
+		auditlog.RecordExecCommand(uuid.(string), c.ClientIP(), clientUUID, taskId, req.Command)
+	}
 	api.RespondSuccess(c, gin.H{
 		"task_id": taskId,
 		"clients": onlineClients,
