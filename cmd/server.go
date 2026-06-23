@@ -314,6 +314,9 @@ func RunServer() {
 			two_factorGroup.POST("/disable", admin.Disable2FA)
 		}
 		adminAuthrized.GET("/logs", log_api.GetLogs)
+		// 命令溯源日志（终端 / 远程执行）
+		adminAuthrized.GET("/logs/commands", log_api.GetCommandLogs)
+		adminAuthrized.GET("/logs/commands/export", log_api.ExportCommandLogs)
 
 		// clipboard
 		clipboardGroup := adminAuthrized.Group("/clipboard")
@@ -438,6 +441,7 @@ func DoScheduledWork() {
 			tasks.ClearTaskResultsByTimeBefore(time.Now().Add(-time.Hour * time.Duration(cfg.RecordPreserveTime)))
 			tasks.DeletePingRecordsBefore(time.Now().Add(-time.Hour * time.Duration(cfg.PingRecordPreserveTime)))
 			auditlog.RemoveOldLogs()
+			auditlog.RemoveOldCommandAudits()
 		case <-minute.C:
 			api.SaveClientReportToDB()
 			if !cfg.RecordEnabled {
