@@ -33,7 +33,6 @@ import (
 	"github.com/Fearless743/komari/database/models"
 	d_notification "github.com/Fearless743/komari/database/notification"
 	"github.com/Fearless743/komari/database/records"
-	"github.com/Fearless743/komari/database/tasks"
 	"github.com/Fearless743/komari/public"
 	"github.com/Fearless743/komari/utils"
 	"github.com/Fearless743/komari/utils/cloudflared"
@@ -86,15 +85,6 @@ func RunServer() {
 	// oidcInit
 	go oauth.Initialize()
 
-	if conf.NezhaCompatEnabled {
-		go func() {
-			if err := StartNezhaCompat(conf.NezhaCompatListen); err != nil {
-				log.Printf("Nezha compat server error: %v", err)
-				auditlog.EventLog("error", fmt.Sprintf("Nezha compat server error: %v", err))
-			}
-		}()
-	}
-
 	config.Subscribe(func(event config.ConfigEvent) {
 		if ok, t := config.IsChangedT[string](event, config.OAuthProviderKey); ok {
 			if t == "" || t == "none" {
@@ -109,21 +99,6 @@ func RunServer() {
 			err = oauth.LoadProvider(oidcProvider.Name, oidcProvider.Addition)
 			if err != nil {
 				auditlog.EventLog("error", fmt.Sprintf("Failed to load OIDC provider: %v", err))
-			}
-		}
-
-		if ok, t := config.IsChangedT[bool](event, config.NezhaCompatEnabledKey); ok {
-			if t {
-				l, _ := config.GetAs[string](config.NezhaCompatListenKey)
-				if err := StartNezhaCompat(l); err != nil {
-					log.Printf("start Nezha compat server error: %v", err)
-					auditlog.EventLog("error", fmt.Sprintf("start Nezha compat server error: %v", err))
-				}
-			} else {
-				if err := StopNezhaCompat(); err != nil {
-					log.Printf("stop Nezha compat server error: %v", err)
-					auditlog.EventLog("error", fmt.Sprintf("stop Nezha compat server error: %v", err))
-				}
 			}
 		}
 
@@ -201,8 +176,6 @@ func RunServer() {
 	r.GET("/api/recent/:uuid", public_api.GetClientRecentRecords)
 
 	r.GET("/api/records/load", public_api.GetRecordsByUUID)
-	r.GET("/api/records/ping", public_api.GetPingRecords)
-	r.GET("/api/task/ping", public_api.GetPublicPingTasks)
 	r.GET("/api/rpc2", jsonRpc.OnRpcRequest)
 	r.POST("/api/rpc2", jsonRpc.OnRpcRequest)
 	r.GET("/api/mjpeg_live", public_api.MjpegLiveHandler)
@@ -213,8 +186,6 @@ func RunServer() {
 		tokenAuthrized.GET("/report", client.WebSocketReport) // websocket
 		tokenAuthrized.POST("/uploadBasicInfo", client.UploadBasicInfo)
 		tokenAuthrized.POST("/report", client.UploadReport)
-		tokenAuthrized.GET("/ping/tasks", client.GetPingTasks)
-		tokenAuthrized.POST("/ping/result", client.UploadPingResult)
 	}
 	// #region 管理员
 	adminAuthrized := r.Group("/api/admin", api.RequireRole(api.RoleAdmin))
@@ -299,9 +270,6 @@ func RunServer() {
 			two_factorGroup.POST("/disable", admin.Disable2FA)
 		}
 		adminAuthrized.GET("/logs", log_api.GetLogs)
-		// 命令溯源日志（终端 / 远程执行）
-		adminAuthrized.GET("/logs/commands", log_api.GetCommandLogs)
-		adminAuthrized.GET("/logs/commands/export", log_api.ExportCommandLogs)
 
 		// clipboard
 		clipboardGroup := adminAuthrized.Group("/clipboard")
@@ -328,16 +296,6 @@ func RunServer() {
 				loadAlertGroup.POST("/delete", notification.DeleteLoadNotification)
 				loadAlertGroup.POST("/edit", notification.EditLoadNotification)
 			}
-		}
-
-		pingTaskGroup := adminAuthrized.Group("/ping")
-		{
-			pingTaskGroup.GET("/", admin.GetAllPingTasks)
-			pingTaskGroup.POST("/add", admin.AddPingTask)
-			pingTaskGroup.POST("/delete", admin.DeletePingTask)
-			pingTaskGroup.POST("/edit", admin.EditPingTask)
-			pingTaskGroup.POST("/order", admin.OrderPingTask)
-
 		}
 
 	}
@@ -394,7 +352,6 @@ func InitDatabase() {
 
 // #region 定时任务
 func DoScheduledWork() {
-	tasks.ReloadPingSchedule()
 	d_notification.ReloadLoadNotificationSchedule()
 	ticker := time.NewTicker(time.Minute * 30)
 	minute := time.NewTicker(60 * time.Second)
@@ -423,13 +380,11 @@ func DoScheduledWork() {
 		case <-ticker.C:
 			records.DeleteRecordBefore(time.Now().Add(-time.Hour * time.Duration(cfg.RecordPreserveTime)))
 			records.CompactRecord()
-			tasks.DeletePingRecordsBefore(time.Now().Add(-time.Hour * time.Duration(cfg.PingRecordPreserveTime)))
 			auditlog.RemoveOldLogs()
 		case <-minute.C:
 			api.SaveClientReportToDB()
 			if !cfg.RecordEnabled {
 				records.DeleteAll()
-				tasks.DeleteAllPingRecords()
 			}
 			// 每分钟检查一次流量提醒
 			go notifier.CheckTraffic()

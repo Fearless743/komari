@@ -7,10 +7,10 @@ import (
 	"path/filepath"
 	"strings"
 
-	"github.com/gin-gonic/gin"
 	"github.com/Fearless743/komari/config"
 	"github.com/Fearless743/komari/database/dbcore"
 	"github.com/Fearless743/komari/database/models"
+	"github.com/gin-gonic/gin"
 )
 
 func GetPublicInfo() (map[string]interface{}, error) {
@@ -47,9 +47,6 @@ func GetPublicInfo() (map[string]interface{}, error) {
 	}
 	if !hasKey("record_preserve_time") {
 		cst.RecordPreserveTime = 720
-	}
-	if !hasKey("ping_record_preserve_time") {
-		cst.PingRecordPreserveTime = 24
 	}
 
 	// Fallback defaults if we couldn't enumerate keys.
@@ -127,19 +124,18 @@ func GetPublicInfo() (map[string]interface{}, error) {
 	}
 
 	return gin.H{
-		"sitename":                  cst.Sitename,
-		"description":               cst.Description,
-		"custom_head":               cst.CustomHead,
-		"custom_body":               cst.CustomBody,
-		"oauth_enable":              cst.OAuthEnabled,
-		"oauth_provider":            cst.OAuthProvider,
-		"disable_password_login":    cst.DisablePasswordLogin,
-		"allow_cors":                cst.AllowCors,
-		"record_enabled":            cst.RecordEnabled,
-		"record_preserve_time":      cst.RecordPreserveTime,
-		"ping_record_preserve_time": cst.PingRecordPreserveTime,
-		"private_site":              cst.PrivateSite,
-		"theme":                     cst.Theme,
-		"theme_settings":            tc_data,
+		"sitename":               cst.Sitename,
+		"description":            cst.Description,
+		"custom_head":            cst.CustomHead,
+		"custom_body":            cst.CustomBody,
+		"oauth_enable":           cst.OAuthEnabled,
+		"oauth_provider":         cst.OAuthProvider,
+		"disable_password_login": cst.DisablePasswordLogin,
+		"allow_cors":             cst.AllowCors,
+		"record_enabled":         cst.RecordEnabled,
+		"record_preserve_time":   cst.RecordPreserveTime,
+		"private_site":           cst.PrivateSite,
+		"theme":                  cst.Theme,
+		"theme_settings":         tc_data,
 	}, nil
 }

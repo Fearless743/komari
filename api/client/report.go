@@ -11,15 +11,13 @@ import (
 	"log"
 	"net/http"
 
-	"github.com/gin-gonic/gin"
-	"github.com/gorilla/websocket"
 	"github.com/Fearless743/komari/api"
 	"github.com/Fearless743/komari/common"
 	"github.com/Fearless743/komari/database/clients"
-	"github.com/Fearless743/komari/database/models"
-	"github.com/Fearless743/komari/database/tasks"
 	"github.com/Fearless743/komari/utils/notifier"
 	"github.com/Fearless743/komari/ws"
+	"github.com/gin-gonic/gin"
+	"github.com/gorilla/websocket"
 	"github.com/patrickmn/go-cache"
 )
 
@@ -178,25 +176,19 @@ func WebSocketReport(c *gin.Context) {
 	data := map[string]interface{}{}
 	err = json.Unmarshal(message, &data)
 	if err != nil {
-		conn.WriteJSON(gin.H{"status": "error", "error": "Invalid JSON"})
+		log.Println("Invalid initial agent message:", err)
 		return
 	}
 	// it should ok,token was verfied in the middleware
-	token := ""
-	var errMsg string
-
-	// 优先检查查询参数中的 token
-	token = c.Query("token")
-
-	// 如果 token 为空，返回错误
+	token := c.Query("token")
 	if token == "" {
-		conn.WriteJSON(gin.H{"status": "error", "error": errMsg})
+		log.Println("Client connection is missing token")
 		return
 	}
 
 	uuid, err := clients.GetClientUUIDByToken(token)
 	if err != nil {
-		conn.WriteJSON(gin.H{"status": "error", "error": errMsg})
+		log.Printf("Failed to resolve client token: %v", err)
 		return
 	}
 
@@ -216,7 +208,7 @@ func WebSocketReport(c *gin.Context) {
 	}()
 
 	// 首先处理第一次ws conn收到的消息
-	processMessage(conn, message, uuid)
+	processMessage(message, uuid)
 
 	for {
 		conn.SetReadDeadline(time.Now().Add(readWait))
@@ -228,19 +220,19 @@ func WebSocketReport(c *gin.Context) {
 			}
 			break // 任何读错误（包括超时）都意味着连接已断开，退出循环
 		}
-		processMessage(conn, message, uuid)
+		processMessage(message, uuid)
 	}
 }
 
 // 将消息处理逻辑提取到一个函数中，方便复用
-func processMessage(conn *ws.SafeConn, message []byte, uuid string) {
+func processMessage(message []byte, uuid string) {
 	type MessageType struct {
 		Type string `json:"type"`
 	}
 	var msgType MessageType
 	err := json.Unmarshal(message, &msgType)
 	if err != nil {
-		conn.WriteJSON(gin.H{"status": "error", "error": "Invalid JSON"})
+		log.Printf("Invalid message from client %s: %v", uuid, err)
 		return
 	}
 
@@ -249,38 +241,18 @@ func processMessage(conn *ws.SafeConn, message []byte, uuid string) {
 		report := common.Report{}
 		err = json.Unmarshal(message, &report)
 		if err != nil {
-			conn.WriteJSON(gin.H{"status": "error", "error": "Invalid report format"})
+			log.Printf("Invalid report from client %s: %v", uuid, err)
 			return
 		}
 		report.UpdatedAt = time.Now()
 		err = SaveClientReport(uuid, report)
 		if err != nil {
-			conn.WriteJSON(gin.H{"status": "error", "error": fmt.Sprintf("%v", err)})
+			log.Printf("Failed to save report from client %s: %v", uuid, err)
 			return
 		}
 		ws.SetLatestReport(uuid, &report)
-	case "ping_result":
-		var reqBody struct {
-			PingTaskID uint      `json:"task_id"`
-			PingResult int       `json:"value"`
-			PingType   string    `json:"ping_type"`
-			FinishedAt time.Time `json:"finished_at"`
-		}
-		err = json.Unmarshal(message, &reqBody)
-		if err != nil {
-			conn.WriteJSON(gin.H{"status": "error", "error": "Invalid ping result format"})
-			return
-		}
-		pingResult := models.PingRecord{
-			Client: uuid,
-			TaskId: reqBody.PingTaskID,
-			Value:  reqBody.PingResult,
-			Time:   models.FromTime(reqBody.FinishedAt),
-		}
-		tasks.SavePingRecord(pingResult)
 	default:
-		log.Printf("Unknown message type: %s", msgType.Type)
-		conn.WriteJSON(gin.H{"status": "error", "error": "Unknown message type"})
+		log.Printf("Unknown message type from client %s: %s", uuid, msgType.Type)
 	}
 }
 

@@ -2,7 +2,6 @@ package jsonRpc
 
 import (
 	"context"
-	"fmt"
 	"math"
 	"sort"
 	"time"
@@ -11,7 +10,6 @@ import (
 	"github.com/Fearless743/komari/database/dbcore"
 	"github.com/Fearless743/komari/database/models"
 	recordsdb "github.com/Fearless743/komari/database/records"
-	"github.com/Fearless743/komari/database/tasks"
 	"github.com/Fearless743/komari/utils/rpc"
 )
 
@@ -22,13 +20,12 @@ func init() {
 func getRecords(ctx context.Context, req *rpc.JsonRpcRequest) (any, *rpc.JsonRpcError) {
 	meta := rpc.MetaFromContext(ctx)
 	var params struct {
-		Type     string `json:"type"`      // "load" | "ping"; default "load"
+		Type     string `json:"type"`      // "load"; default "load"
 		UUID     string `json:"uuid"`      // client uuid; empty = all clients
 		Hours    int    `json:"hours"`     // time window in hours; default 1 if start/end not provided
 		Start    string `json:"start"`     // RFC3339 start time (optional)
 		End      string `json:"end"`       // RFC3339 end time (optional)
 		LoadType string `json:"load_type"` // for type=load: cpu|gpu|ram|swap|load|temp|disk|network|process|connections|all
-		TaskID   int    `json:"task_id"`   // for type=ping: optional task id; -1 or omitted means all
 		MaxCount int    `json:"maxCount"`  // max number of points; -1 unlimited; default 4000
 	}
 	req.BindParams(&params)
@@ -189,321 +186,8 @@ func getRecords(ctx context.Context, req *rpc.JsonRpcRequest) (any, *rpc.JsonRpc
 			To      models.LocalTime           `json:"to"`
 		}{Count: total, Records: grouped, From: models.FromTime(startTime), To: models.FromTime(endTime)}, nil
 
-	case "ping":
-		taskId := params.TaskID
-		if taskId == 0 {
-			taskId = -1
-		}
-		recs, err := tasks.GetPingRecords(params.UUID, taskId, startTime, endTime)
-		if err != nil {
-			return nil, rpc.MakeError(rpc.InternalError, "Failed to fetch ping records", err.Error())
-		}
-		// hidden filter
-		if !isAdmin {
-			filtered := recs[:0]
-			for _, r := range recs {
-				if r.Client != "" && hidden[r.Client] {
-					continue
-				}
-				filtered = append(filtered, r)
-			}
-			recs = filtered
-		}
-
-		type RecordsResp struct {
-			TaskId uint             `json:"task_id,omitempty"`
-			Time   models.LocalTime `json:"time"`
-			Value  int              `json:"value"`
-			Client string           `json:"client,omitempty"`
-		}
-		type ClientBasicInfo struct {
-			Client string  `json:"client"`
-			Loss   float64 `json:"loss"`
-			Min    int     `json:"min"`
-			Max    int     `json:"max"`
-		}
-		type Resp struct {
-			Count     int               `json:"count"`
-			BasicInfo []ClientBasicInfo `json:"basic_info,omitempty"`
-			Records   []RecordsResp     `json:"records"`
-			Tasks     []map[string]any  `json:"tasks"`
-			From      models.LocalTime  `json:"from"`
-			To        models.LocalTime  `json:"to"`
-		}
-
-		response := &Resp{Count: 0, Records: []RecordsResp{}, From: models.FromTime(startTime), To: models.FromTime(endTime)}
-
-		// stats per client
-		clientStats := make(map[string]struct {
-			total int
-			loss  int
-			min   int
-			max   int
-		})
-
-		for _, r := range recs {
-			rr := RecordsResp{
-				TaskId: r.TaskId,
-				Time:   r.Time,
-				Value:  r.Value,
-				Client: r.Client,
-			}
-			st := clientStats[r.Client]
-			st.total++
-			if r.Value < 0 {
-				st.loss++
-			} else {
-				if st.min == 0 || r.Value < st.min {
-					st.min = r.Value
-				}
-				if r.Value > st.max {
-					st.max = r.Value
-				}
-			}
-			clientStats[r.Client] = st
-			response.Records = append(response.Records, rr)
-		}
-
-		if len(clientStats) > 0 {
-			response.BasicInfo = make([]ClientBasicInfo, 0, len(clientStats))
-			for client, st := range clientStats {
-				if client != "" && !isAdmin && hidden[client] {
-					continue
-				}
-				loss := float64(0)
-				if st.total > 0 {
-					loss = float64(st.loss) / float64(st.total) * 100
-				}
-				response.BasicInfo = append(response.BasicInfo, ClientBasicInfo{
-					Client: client,
-					Loss:   loss,
-					Min:    st.min,
-					Max:    st.max,
-				})
-			}
-		}
-
-		// tasks summary (always included for ping type; do not expose target field)
-		pingTasks, err := tasks.GetAllPingTasks()
-		if err != nil {
-			return nil, rpc.MakeError(rpc.InternalError, "Failed to fetch ping tasks", err.Error())
-		}
-		toList := make([]map[string]any, 0, len(pingTasks))
-		for _, t := range pingTasks {
-			if taskId != -1 && t.Id != uint(taskId) {
-				continue
-			}
-			if params.UUID != "" { // ensure task assigned to specific client when filtering by uuid
-				assigned := false
-				for _, c := range t.Clients {
-					if c == params.UUID {
-						assigned = true
-						break
-					}
-				}
-				if !assigned {
-					continue
-				}
-			}
-			total := 0
-			lossCount := 0
-			minLat := 0
-			maxLat := 0
-			sum := 0
-			valid := 0
-			latestVal := -1
-			var latestTs time.Time
-			// 收集该任务的所有有效(非丢包)延迟值以计算百分位
-			latencies := make([]int, 0, 64)
-			for _, r := range recs {
-				if r.TaskId != t.Id {
-					continue
-				}
-				if params.UUID != "" && r.Client != params.UUID {
-					continue
-				}
-				total++
-				if r.Value < 0 { // 丢包
-					lossCount++
-					continue
-				}
-				valid++
-				sum += r.Value
-				latencies = append(latencies, r.Value)
-				if minLat == 0 || r.Value < minLat {
-					minLat = r.Value
-				}
-				if r.Value > maxLat {
-					maxLat = r.Value
-				}
-				// track latest non-negative value
-				ts := r.Time.ToTime()
-				if latestTs.IsZero() || ts.After(latestTs) {
-					latestTs = ts
-					latestVal = r.Value
-				}
-			}
-
-			// 计算 P50 / P99
-			p50 := 0
-			p99 := 0
-			if len(latencies) > 0 {
-				sort.Ints(latencies)
-				getPercentileInt := func(values []int, percentile float64) int {
-					if len(values) == 0 {
-						return 0
-					}
-					if percentile <= 0 {
-						return values[0]
-					}
-					if percentile >= 1 {
-						return values[len(values)-1]
-					}
-					pos := (float64(len(values) - 1)) * percentile
-					lo := int(math.Floor(pos))
-					hi := int(math.Ceil(pos))
-					if lo == hi {
-						return values[lo]
-					}
-					frac := pos - float64(lo)
-					v := float64(values[lo]) + (float64(values[hi])-float64(values[lo]))*frac
-					return int(math.Round(v))
-				}
-				p50 = getPercentileInt(latencies, 0.50)
-				p99 = getPercentileInt(latencies, 0.99)
-			}
-			ratio := 0.0
-			if p50 > 0 && p99 >= p50 {
-				jitterMs := float64(p99 - p50)
-				adjustedBase := math.Max(math.Min(float64(p50), 50.0), 10.0)
-				ratio = jitterMs / adjustedBase
-			}
-			lossRate := 0.0
-			if total > 0 {
-				lossRate = float64(lossCount) / float64(total) * 100
-			}
-			avg := 0
-			if valid > 0 {
-				avg = sum / valid
-			}
-			info := map[string]any{
-				"id":            t.Id,
-				"name":          t.Name,
-				"type":          t.Type,
-				"interval":      t.Interval,
-				"loss":          lossRate,
-				"min":           minLat,
-				"max":           maxLat,
-				"avg":           avg,
-				"latest":        latestVal,
-				"total":         total,
-				"p50":           p50,
-				"p99":           p99,
-				"p99_p50_ratio": ratio,
-			}
-			if params.UUID == "" && taskId != -1 { // retain existing behavior of exposing clients only when filtering by task
-				info["clients"] = t.Clients
-			}
-			toList = append(toList, info)
-		}
-		response.Tasks = toList
-		// apply maxCount for ping
-		maxCount := params.MaxCount
-		if maxCount == 0 {
-			maxCount = 4000
-		}
-		if maxCount != -1 && len(response.Records) > maxCount {
-			// group records by TaskId for proportional downsampling
-			taskGroups := make(map[uint][]RecordsResp)
-			for _, r := range response.Records {
-				taskGroups[r.TaskId] = append(taskGroups[r.TaskId], r)
-			}
-
-			// sort each group by time
-			for taskId := range taskGroups {
-				sort.Slice(taskGroups[taskId], func(i, j int) bool {
-					return taskGroups[taskId][i].Time.ToTime().Before(taskGroups[taskId][j].Time.ToTime())
-				})
-			}
-
-			// calculate proportional allocation for each task
-			type taskMeta struct {
-				taskId uint
-				length int
-			}
-			groupsMeta := make([]taskMeta, 0, len(taskGroups))
-			for taskId, records := range taskGroups {
-				groupsMeta = append(groupsMeta, taskMeta{
-					taskId: taskId,
-					length: len(records),
-				})
-			}
-
-			// use existing allocateTargets function (create compatible struct)
-			strTargets := allocateTargets(
-				func() []struct {
-					name   string
-					length int
-				} {
-					result := make([]struct {
-						name   string
-						length int
-					}, len(groupsMeta))
-					for i, meta := range groupsMeta {
-						result[i] = struct {
-							name   string
-							length int
-						}{name: fmt.Sprintf("%d", meta.taskId), length: meta.length}
-					}
-					return result
-				}(),
-				maxCount,
-			)
-
-			// downsample each task group
-			downsampledRecords := make([]RecordsResp, 0, maxCount)
-			samplePingRecords := func(in []RecordsResp, k int) []RecordsResp {
-				n := len(in)
-				if k <= 0 || n == 0 {
-					return []RecordsResp{}
-				}
-				if k >= n {
-					return in
-				}
-				out := make([]RecordsResp, 0, k)
-				if k == 1 {
-					out = append(out, in[n-1])
-					return out
-				}
-				for i := 0; i < k; i++ {
-					idx := int(math.Round(float64(i) * float64(n-1) / float64(k-1)))
-					if idx < 0 {
-						idx = 0
-					} else if idx >= n {
-						idx = n - 1
-					}
-					out = append(out, in[idx])
-				}
-				return out
-			}
-
-			for taskId, records := range taskGroups {
-				targetKey := fmt.Sprintf("%d", taskId)
-				targetCount := strTargets[targetKey]
-				sampled := samplePingRecords(records, targetCount)
-				downsampledRecords = append(downsampledRecords, sampled...)
-			}
-
-			response.Records = downsampledRecords
-		}
-		response.Count = len(response.Records)
-		// sort by time asc
-		sort.Slice(response.Records, func(i, j int) bool {
-			return response.Records[i].Time.ToTime().Before(response.Records[j].Time.ToTime())
-		})
-		return response, nil
 	default:
-		return nil, rpc.MakeError(rpc.InvalidParams, "Invalid type, expected 'load' or 'ping'", params.Type)
+		return nil, rpc.MakeError(rpc.InvalidParams, "Invalid type, expected 'load'", params.Type)
 	}
 }
 

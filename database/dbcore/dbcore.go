@@ -12,12 +12,12 @@ import (
 	"sync"
 	"time"
 
-	"github.com/glebarez/sqlite"
 	"github.com/Fearless743/komari/cmd/flags"
 	"github.com/Fearless743/komari/common"
 	"github.com/Fearless743/komari/config"
 	"github.com/Fearless743/komari/database/models"
 	logutil "github.com/Fearless743/komari/utils/log"
+	"github.com/glebarez/sqlite"
 	"gorm.io/gorm"
 )
 
@@ -454,12 +454,9 @@ func GetDBInstance() *gorm.DB {
 			&models.GPURecord{},
 			// &models.Config{},
 			&models.Log{},
-			&models.CommandAudit{},
 			&models.Clipboard{},
 			&models.LoadNotification{},
 			&models.OfflineNotification{},
-			&models.PingRecord{},
-			&models.PingTask{},
 			&models.OidcProvider{},
 			&models.MessageSenderProvider{},
 			&models.DdnsProvider{},
@@ -487,14 +484,6 @@ func GetDBInstance() *gorm.DB {
 		if err != nil {
 			log.Printf("Failed to create Session table, it may already exist: %v", err)
 		}
-		err = instance.AutoMigrate(
-			&models.Task{},
-			&models.TaskResult{},
-		)
-		if err != nil {
-			log.Printf("Failed to create Task and TaskResult table, it may already exist: %v", err)
-		}
-
 	})
 
 	return instance

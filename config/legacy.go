@@ -18,9 +18,6 @@ type Legacy struct {
 	// GeoIP 配置
 	GeoIpEnabled  bool   `json:"geo_ip_enabled" default:"true"`
 	GeoIpProvider string `json:"geo_ip_provider" default:"ipinfo"` // empty, mmdb, ip-api, geojs
-	// Nezha 兼容（Agent gRPC）
-	NezhaCompatEnabled bool   `json:"nezha_compat_enabled" default:"false"`
-	NezhaCompatListen  string `json:"nezha_compat_listen" default:""` // 例如 0.0.0.0:5555
 	// DDNS 配置
 	DdnsEnabled      bool   `json:"ddns_enabled" default:"false"`
 	DdnsProvider     string `json:"ddns_provider" default:"none"`
@@ -41,10 +38,9 @@ type Legacy struct {
 	LoginNotification          bool    `json:"login_notification" default:"true"`          // 登录通知
 	TrafficLimitPercentage     float64 `json:"traffic_limit_percentage" default:"80.00"`   // 流量限制百分比，默认80.00%
 	// Record
-	RecordEnabled          bool `json:"record_enabled" default:"true"`          // 是否启用记录功能
-	RecordPreserveTime     int  `json:"record_preserve_time" default:"720"`     // 记录保留时间，单位小时，默认30天
-	PingRecordPreserveTime int  `json:"ping_record_preserve_time" default:"24"` // Ping 记录保留时间，单位小时，默认1天
-	UpdatedAt              time.Time
+	RecordEnabled      bool `json:"record_enabled" default:"true"`      // 是否启用记录功能
+	RecordPreserveTime int  `json:"record_preserve_time" default:"720"` // 记录保留时间，单位小时，默认30天
+	UpdatedAt          time.Time
 }
 
 const (
@@ -61,8 +57,6 @@ const (
 	BaseScriptsURLKey             = "base_scripts_url"
 	GeoIpEnabledKey               = "geo_ip_enabled"
 	GeoIpProviderKey              = "geo_ip_provider"
-	NezhaCompatEnabledKey         = "nezha_compat_enabled"
-	NezhaCompatListenKey          = "nezha_compat_listen"
 	DdnsEnabledKey                = "ddns_enabled"
 	DdnsProviderKey               = "ddns_provider"
 	DdnsSyncIntervalKey           = "ddns_sync_interval"
@@ -80,7 +74,6 @@ const (
 	TrafficLimitPercentageKey     = "traffic_limit_percentage"
 	RecordEnabledKey              = "record_enabled"
 	RecordPreserveTimeKey         = "record_preserve_time"
-	PingRecordPreserveTimeKey     = "ping_record_preserve_time"
 	UpdatedAtKey                  = "updated_at"
 )
 

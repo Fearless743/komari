@@ -5,7 +5,6 @@ import (
 	"github.com/Fearless743/komari/config"
 	"github.com/Fearless743/komari/database/auditlog"
 	"github.com/Fearless743/komari/database/records"
-	"github.com/Fearless743/komari/database/tasks"
 
 	"github.com/gin-gonic/gin"
 )
@@ -47,7 +46,6 @@ func EditSettings(c *gin.Context) {
 
 func ClearAllRecords(c *gin.Context) {
 	records.DeleteAll()
-	tasks.DeleteAllPingRecords()
 	uuid, _ := c.Get("uuid")
 	auditlog.Log(c.ClientIP(), uuid.(string), "clear all records", "info")
 	api.RespondSuccess(c, nil)

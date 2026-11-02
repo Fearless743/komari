@@ -4,15 +4,15 @@ import (
 	"sync"
 	"time"
 
-	"github.com/gorilla/websocket"
 	"github.com/Fearless743/komari/common"
+	"github.com/gorilla/websocket"
 )
 
 var (
 	connectedClients = make(map[string]*SafeConn)
 	ConnectedUsers   = []*websocket.Conn{}
 	latestReport     = make(map[string]*common.Report)
-	// presenceOnly stores online state for non-WebSocket agents (e.g., Nezha gRPC)
+	// presenceOnly stores online state for agents that report over HTTP POST.
 	// value keeps connectionID and a soft expiration to avoid flicker
 	presenceOnly = make(map[string]struct {
 		id     int64
@@ -66,7 +66,7 @@ func KeepAlivePresence(uuid string, connectionID int64, ttl time.Duration) {
 
 var defaultPresenceTTL = 20 * time.Second
 
-// SetPresence keeps compatibility with existing callers.
+// SetPresence sets or clears presence for agents that report over HTTP POST.
 func SetPresence(uuid string, connectionID int64, present bool) {
 	mu.Lock()
 	defer mu.Unlock()
@@ -82,7 +82,7 @@ func SetPresence(uuid string, connectionID int64, present bool) {
 	}
 }
 
-// GetAllOnlineUUIDs returns a de-duplicated list of online UUIDs from both WebSocket and non-WebSocket agents.
+// GetAllOnlineUUIDs returns a de-duplicated list of online UUIDs from both WebSocket and HTTP POST agents.
 func GetAllOnlineUUIDs() []string {
 	mu.RLock()
 	defer mu.RUnlock()
