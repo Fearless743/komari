@@ -11,7 +11,6 @@ import (
 	"syscall"
 	"time"
 
-	"github.com/gin-gonic/gin"
 	"github.com/Fearless743/komari/api"
 	"github.com/Fearless743/komari/api/admin"
 	"github.com/Fearless743/komari/api/admin/clipboard"
@@ -22,8 +21,8 @@ import (
 	"github.com/Fearless743/komari/api/client"
 	"github.com/Fearless743/komari/api/jsonRpc"
 	public_api "github.com/Fearless743/komari/api/public"
-	"github.com/Fearless743/komari/api/terminal"
 	"github.com/Fearless743/komari/cmd/flags"
+	"github.com/gin-gonic/gin"
 
 	"github.com/Fearless743/komari/config"
 	"github.com/Fearless743/komari/database"
@@ -214,8 +213,6 @@ func RunServer() {
 		tokenAuthrized.GET("/report", client.WebSocketReport) // websocket
 		tokenAuthrized.POST("/uploadBasicInfo", client.UploadBasicInfo)
 		tokenAuthrized.POST("/report", client.UploadReport)
-		tokenAuthrized.GET("/terminal", terminal.EstablishConnection)
-		tokenAuthrized.POST("/task/result", client.TaskResult)
 		tokenAuthrized.GET("/ping/tasks", client.GetPingTasks)
 		tokenAuthrized.POST("/ping/result", client.UploadPingResult)
 	}
@@ -238,16 +235,6 @@ func RunServer() {
 			updateGroup.PUT("/favicon", update.UploadFavicon)
 			updateGroup.POST("/favicon", update.DeleteFavicon)
 			updateGroup.POST("/ddns", admin.SyncDdns)
-		}
-		// tasks
-		taskGroup := adminAuthrized.Group("/task")
-		{
-			taskGroup.GET("/all", admin.GetTasks)
-			taskGroup.POST("/exec", admin.Exec)
-			taskGroup.GET("/:task_id", admin.GetTaskById)
-			taskGroup.GET("/:task_id/result", admin.GetTaskResultsByTaskId)
-			taskGroup.GET("/:task_id/result/:uuid", admin.GetSpecificTaskResult)
-			taskGroup.GET("/client/:uuid", admin.GetTasksByClientId)
 		}
 		// settings
 		settingsGroup := adminAuthrized.Group("/settings")
@@ -285,8 +272,6 @@ func RunServer() {
 			clientGroup.POST("/:uuid/remove", admin.RemoveClient)
 			clientGroup.GET("/:uuid/token", admin.GetClientToken)
 			clientGroup.POST("/order", admin.OrderWeight)
-			// client terminal
-			clientGroup.GET("/:uuid/terminal", terminal.RequestTerminal)
 		}
 
 		// records
@@ -438,10 +423,8 @@ func DoScheduledWork() {
 		case <-ticker.C:
 			records.DeleteRecordBefore(time.Now().Add(-time.Hour * time.Duration(cfg.RecordPreserveTime)))
 			records.CompactRecord()
-			tasks.ClearTaskResultsByTimeBefore(time.Now().Add(-time.Hour * time.Duration(cfg.RecordPreserveTime)))
 			tasks.DeletePingRecordsBefore(time.Now().Add(-time.Hour * time.Duration(cfg.PingRecordPreserveTime)))
 			auditlog.RemoveOldLogs()
-			auditlog.RemoveOldCommandAudits()
 		case <-minute.C:
 			api.SaveClientReportToDB()
 			if !cfg.RecordEnabled {

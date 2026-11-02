@@ -9,22 +9,6 @@ import (
 	"gorm.io/gorm"
 )
 
-const (
-	CommandSourceTerminal = "terminal"
-	CommandSourceExec     = "exec"
-
-	// MaxCommandOutputBytes 单条命令记录保存的最大输出字节数，超出截断，避免单行过大。
-	MaxCommandOutputBytes = 64 * 1024
-)
-
-// TruncateOutput 将输出裁剪到最大长度，并在被截断时追加提示。
-func TruncateOutput(output string) string {
-	if len(output) <= MaxCommandOutputBytes {
-		return output
-	}
-	return output[:MaxCommandOutputBytes] + "\n...[output truncated]"
-}
-
 // CommandAuditFilter 描述命令溯源日志的查询过滤条件。
 type CommandAuditFilter struct {
 	Source     string
@@ -33,66 +17,6 @@ type CommandAuditFilter struct {
 	Keyword    string // 模糊匹配命令内容
 	StartTime  *time.Time
 	EndTime    *time.Time
-}
-
-// RecordTerminalCommand 记录一条终端会话中执行的命令，返回新建记录的 ID，
-// 以便随后通过 UpdateTerminalOutput 回填该命令运行期间产生的输出。
-func RecordTerminalCommand(userUUID, userIP, clientUUID, sessionID, command string) uint {
-	entry := &models.CommandAudit{
-		Source:     CommandSourceTerminal,
-		UserUUID:   userUUID,
-		UserIP:     userIP,
-		ClientUUID: clientUUID,
-		SessionID:  sessionID,
-		Command:    command,
-	}
-	createCommandAudit(entry)
-	return entry.ID
-}
-
-// UpdateTerminalOutput 回填某条终端命令记录的输出（命令运行期间的终端回显流）。
-func UpdateTerminalOutput(id uint, output string) {
-	if id == 0 {
-		return
-	}
-	db := dbcore.GetDBInstance()
-	if err := db.Model(&models.CommandAudit{}).
-		Where("id = ?", id).
-		Update("output", TruncateOutput(output)).Error; err != nil {
-		log.Println("Failed to update terminal command output:", err)
-	}
-}
-
-// RecordExecCommand 记录一条远程执行（REC）下发到某个被控端的命令。
-func RecordExecCommand(userUUID, userIP, clientUUID, taskID, command string) {
-	createCommandAudit(&models.CommandAudit{
-		Source:     CommandSourceExec,
-		UserUUID:   userUUID,
-		UserIP:     userIP,
-		ClientUUID: clientUUID,
-		SessionID:  taskID,
-		Command:    command,
-	})
-}
-
-// UpdateExecResult 在被控端回报远程执行结果后，回填对应命令记录的退出码与输出结果。
-func UpdateExecResult(taskID, clientUUID string, exitCode int, output string) {
-	db := dbcore.GetDBInstance()
-	if err := db.Model(&models.CommandAudit{}).
-		Where("source = ? AND session_id = ? AND client_uuid = ?", CommandSourceExec, taskID, clientUUID).
-		Updates(map[string]interface{}{
-			"exit_code": exitCode,
-			"output":    TruncateOutput(output),
-		}).Error; err != nil {
-		log.Println("Failed to update command audit result:", err)
-	}
-}
-
-func createCommandAudit(entry *models.CommandAudit) {
-	entry.Time = models.FromTime(time.Now())
-	if err := dbcore.GetDBInstance().Create(entry).Error; err != nil {
-		log.Println("Failed to write command audit log:", err)
-	}
 }
 
 // QueryCommandAudits 按过滤条件分页查询命令溯源日志，返回当前页数据与符合条件的总数。
