@@ -256,7 +256,7 @@ docker run -d --name komari \
 The working directory is `/app`, so downloaded GeoIP data
 (`data/GeoLite2-Country.mmdb`) and installed themes live under the `/app/data`
 volume, matching the Go backend's relative paths. The default theme is embedded
-in the binary; no `/app/web` directory is used.
+in the binary; no separate web-assets directory is shipped in the image.
 
 `docker-compose.yml` starts the same image with a named volume, restart policy,
 port mapping and environment examples:
