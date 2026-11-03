@@ -38,7 +38,10 @@ fn columns(db: &Db, table: &str) -> Vec<ColumnInfo> {
     .unwrap()
 }
 
-fn indexes(db: &Db, table: &str) -> Vec<(String, i64, String)> {
+type IndexInfo = (String, i64, String);
+type IndexSnapshot = Vec<(String, Vec<IndexInfo>)>;
+
+fn indexes(db: &Db, table: &str) -> Vec<IndexInfo> {
     db.with_connection(|conn| {
         let mut stmt = conn.prepare(&format!("PRAGMA index_list(`{table}`)"))?;
         let rows = stmt.query_map([], |row| {
@@ -53,7 +56,7 @@ fn indexes(db: &Db, table: &str) -> Vec<(String, i64, String)> {
     .unwrap()
 }
 
-fn index_snapshot(db: &Db) -> Vec<(String, Vec<(String, i64, String)>)> {
+fn index_snapshot(db: &Db) -> IndexSnapshot {
     db.table_names()
         .unwrap()
         .into_iter()
