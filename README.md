@@ -94,3 +94,5 @@ deletes all login sessions, so the Go fallback can still authenticate. Without
 username is given. `permit-login` sets `disable_password_login` to `false`.
 `disable-2fa`/`permit-login` create and migrate a missing database like Go;
 `chpasswd` keeps Go's "Database file does not exist." message instead.
+`permit-login` writes the current key/value `configs` row; the Go command's
+legacy single-row column update only matters for pre-1.1.4 schemas.

@@ -2,8 +2,8 @@ use std::path::{Path, PathBuf};
 use std::process::{Command, Output};
 use std::sync::atomic::{AtomicU64, Ordering};
 
-use komari_auth::verify_password;
 use komari_db::Db;
+use komari_db::models::User;
 
 static COUNTER: AtomicU64 = AtomicU64::new(0);
 
@@ -28,6 +28,10 @@ impl TempDb {
 
     fn path(&self) -> &Path {
         &self.path
+    }
+
+    fn missing_path(&self, name: &str) -> PathBuf {
+        self.dir.join(name)
     }
 
     fn open(&self) -> Db {
@@ -64,16 +68,20 @@ fn bin() -> Command {
     command
 }
 
-fn run(args: &[&str], db: &TempDb) -> Output {
+fn run_path(args: &[&str], path: &Path) -> Output {
     bin()
         .args(args)
-        .args(["--database", db.path().to_str().unwrap()])
+        .args(["--database", path.to_str().unwrap()])
         .output()
         .expect("run komari")
 }
 
+fn run(args: &[&str], db: &TempDb) -> Output {
+    run_path(args, db.path())
+}
+
 #[test]
-fn chpasswd_updates_the_password_and_revokes_sessions() {
+fn chpasswd_writes_the_go_sha256_hash_and_revokes_sessions() {
     let temp = TempDb::new("chpasswd");
     let uuid = {
         let db = temp.open();
@@ -103,8 +111,8 @@ fn chpasswd_updates_the_password_and_revokes_sessions() {
 
     let db = temp.open();
     let user = db.accounts().require_by_uuid(&uuid).unwrap();
-    assert!(verify_password("new-password", &user.passwd));
-    assert!(!verify_password("old-password", &user.passwd));
+    // Independent Go algorithm: base64(SHA-256(password + "06Wm4Jv1Hkxx")).
+    assert_eq!(user.passwd, "yqyhBswdm4vh/vRYv8vY9m3+t+ZQPxLQLv0FlN6FArI=");
     assert_eq!(db.sessions().count().unwrap(), 0);
 }
 
@@ -131,8 +139,61 @@ fn chpasswd_accepts_an_explicit_username() {
     let db = temp.open();
     let admin = db.accounts().require_by_username("admin").unwrap();
     let bob = db.accounts().require_by_uuid(&bob.uuid).unwrap();
-    assert!(verify_password("admin-password", &admin.passwd));
-    assert!(verify_password("bob-new", &bob.passwd));
+    assert_eq!(admin.passwd, "l0isLy2rszAhXvhh8d9+ndAgUxCApxhUS7Arq4HRgPU=");
+    assert_eq!(bob.passwd, "qr2DzO238DNJ8XTChn94XrVKnQcoy4x6NYzY2pNE+gQ=");
+}
+
+#[test]
+fn chpasswd_defaults_to_the_lowest_uuid_not_insertion_order() {
+    let temp = TempDb::new("chpasswd-default");
+    {
+        let db = temp.open();
+        let mut inserted_first = User::new("first", "first-password");
+        inserted_first.uuid = "ffffffff-ffff-4fff-8fff-ffffffffffff".to_owned();
+        db.accounts().insert(&inserted_first).unwrap();
+
+        let mut inserted_second = User::new("second", "second-password");
+        inserted_second.uuid = "11111111-1111-4111-8111-111111111111".to_owned();
+        db.accounts().insert(&inserted_second).unwrap();
+    }
+
+    let output = run(&["chpasswd", "--password", "changed"], &temp);
+    assert!(output.status.success());
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    assert!(
+        stdout.contains("Changing password for user: second"),
+        "{stdout}"
+    );
+
+    let db = temp.open();
+    let first = db.accounts().require_by_username("first").unwrap();
+    let second = db.accounts().require_by_username("second").unwrap();
+    assert_eq!(
+        first.passwd,
+        komari_auth::legacy_hash_password("first-password")
+    );
+    assert_eq!(second.passwd, komari_auth::legacy_hash_password("changed"));
+}
+
+#[test]
+fn chpasswd_with_no_users_matches_go_exit_and_message() {
+    let temp = TempDb::new("chpasswd-empty");
+    let output = run(&["chpasswd", "--password", "whatever"], &temp);
+    assert!(output.status.success());
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    assert!(stdout.contains("Changing password for user:"), "{stdout}");
+    assert!(stdout.contains("Error: 无法找到用户名"), "{stdout}");
+}
+
+#[test]
+fn chpasswd_missing_or_empty_password_prints_help_and_exits_zero() {
+    let temp = TempDb::new("chpasswd-help");
+    for args in [vec!["chpasswd"], vec!["chpasswd", "--password", ""]] {
+        let output = run(&args, &temp);
+        assert!(output.status.success(), "{args:?}");
+        let stdout = String::from_utf8_lossy(&output.stdout);
+        assert!(stdout.contains("Usage:"), "{args:?}:\n{stdout}");
+    }
 }
 
 #[test]
@@ -197,6 +258,25 @@ fn disable_2fa_without_username_clears_every_secret() {
 }
 
 #[test]
+fn disable_2fa_creates_and_migrates_a_missing_database() {
+    let temp = TempDb::new("disable-2fa-create");
+    let path = temp.missing_path("created-2fa.db");
+    assert!(!path.exists());
+
+    let output = run_path(&["disable-2fa"], &path);
+    assert!(
+        output.status.success(),
+        "disable-2fa failed: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert!(path.exists());
+
+    let db = Db::open(&path).unwrap();
+    assert!(db.table_exists("users").unwrap());
+    assert!(db.table_exists("configs").unwrap());
+}
+
+#[test]
 fn permit_login_enables_password_authentication() {
     let temp = TempDb::new("permit-login");
     {
@@ -226,18 +306,39 @@ fn permit_login_enables_password_authentication() {
 }
 
 #[test]
-fn missing_database_matches_the_go_message() {
+fn permit_login_creates_and_migrates_a_missing_database() {
+    let temp = TempDb::new("permit-login-create");
+    let path = temp.missing_path("created-login.db");
+    assert!(!path.exists());
+
+    let output = run_path(&["permit-login"], &path);
+    assert!(
+        output.status.success(),
+        "permit-login failed: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert!(path.exists());
+
+    let db = Db::open(&path).unwrap();
+    assert!(db.table_exists("configs").unwrap());
+    let disabled = db
+        .config()
+        .get_as::<bool>("disable_password_login")
+        .unwrap()
+        .unwrap();
+    assert!(!disabled);
+}
+
+#[test]
+fn chpasswd_missing_database_matches_the_go_message() {
     let temp = TempDb::new("missing");
-    let missing = temp.path().with_file_name("missing.db");
-    let output = bin()
-        .args(["chpasswd", "--password", "whatever"])
-        .args(["--database", missing.to_str().unwrap()])
-        .output()
-        .expect("run komari");
+    let missing = temp.missing_path("missing.db");
+    let output = run_path(&["chpasswd", "--password", "whatever"], &missing);
     assert!(output.status.success());
     assert!(
         String::from_utf8_lossy(&output.stdout).contains("Database file does not exist."),
         "{}",
         String::from_utf8_lossy(&output.stdout)
     );
+    assert!(!missing.exists());
 }
