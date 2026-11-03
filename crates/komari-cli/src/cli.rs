@@ -146,7 +146,7 @@ pub enum Command {
 
     /// Force disable 2FA
     #[command(name = "disable-2fa", visible_alias = "disable2FA")]
-    Disable2fa,
+    Disable2fa(Disable2faArgs),
 
     /// Force permit password login
     #[command(name = "permit-login", visible_alias = "permitPasswordLogin")]
@@ -167,10 +167,29 @@ pub struct ServerArgs {
 #[derive(Debug, Clone, Default, Args)]
 pub struct ChpasswdArgs {
     #[arg(
+        short = 'u',
+        long = "username",
+        value_name = "USERNAME",
+        help = "User whose password to change (defaults to the first account)"
+    )]
+    pub username: Option<String>,
+
+    #[arg(
         short = 'p',
         long = "password",
         value_name = "PASSWORD",
         help = "New password"
     )]
     pub password: Option<String>,
+}
+
+#[derive(Debug, Clone, Default, Args)]
+pub struct Disable2faArgs {
+    #[arg(
+        short = 'u',
+        long = "username",
+        value_name = "USERNAME",
+        help = "Only disable 2FA for this user (defaults to all users)"
+    )]
+    pub username: Option<String>,
 }

@@ -81,11 +81,14 @@ logging by default, matching the Go backend's `utils.VersionHash` behavior.
 
 ```text
 komari server
-komari chpasswd -p <password>
-komari disable-2fa     # alias: disable2FA
-komari permit-login    # alias: permitPasswordLogin
+komari chpasswd -p <password> [-u <username>]
+komari disable-2fa [-u <username>]     # alias: disable2FA
+komari permit-login                    # alias: permitPasswordLogin
 ```
 
-Only `server` produces startup output in this task. `chpasswd`,
-`disable-2fa`, and `permit-login` are present with `--help` but intentionally
-return a "not implemented yet" message until their follow-up tasks land.
+`chpasswd` writes a bcrypt hash to the SQLite database and deletes all login
+sessions. Without `--username` it changes the first account, matching the Go
+command. `disable-2fa` clears one user's TOTP secret, or every user's secret
+when no username is given. `permit-login` sets `disable_password_login` to
+`false`. All three use `--database` / `KOMARI_DB_FILE` and do not create a
+missing database file.
