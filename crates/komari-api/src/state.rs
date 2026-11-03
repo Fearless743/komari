@@ -1,7 +1,7 @@
 //! Shared application state for the API routers.
 
 use std::path::PathBuf;
-use std::sync::Arc;
+use std::sync::{Arc, RwLock};
 use std::time::Duration;
 
 use axum::extract::FromRef;
@@ -10,6 +10,7 @@ use komari_config::keys;
 use komari_db::{Db, DbError};
 use komari_ddns::DdnsService;
 use komari_geoip::GeoIpService;
+use komari_oauth::OAuthProvider;
 use komari_web::{WebAssets, WebConfig};
 
 use crate::cache::ReportCache;
@@ -37,6 +38,8 @@ pub struct ApiConfig {
     pub report_flush_interval: Duration,
     /// Top fraction used by `AverageReport` (Go passes 0.3).
     pub report_top_percentage: f64,
+    /// Delay between MJPEG frames (Go's `refreshInterval`, 2 seconds).
+    pub mjpeg_frame_interval: Duration,
 }
 
 impl Default for ApiConfig {
@@ -50,6 +53,7 @@ impl Default for ApiConfig {
             report_retention: Duration::from_secs(60),
             report_flush_interval: Duration::from_secs(60),
             report_top_percentage: 0.3,
+            mjpeg_frame_interval: Duration::from_secs(2),
         }
     }
 }
@@ -81,6 +85,9 @@ pub struct ApiState {
     /// DDNS service used by the admin sync endpoint. The server assembly can
     /// install an initialized instance with [`ApiState::with_ddns_service`].
     pub ddns: Arc<DdnsService>,
+    /// Active OAuth provider. It is `None` until the server assembly loads the
+    /// configured provider (see `komari_api::public::initialize_oauth`).
+    oauth_provider: Arc<RwLock<Option<Arc<dyn OAuthProvider>>>>,
     config: Arc<ApiConfig>,
 }
 
@@ -129,6 +136,7 @@ impl ApiState {
             geoip,
             web,
             ddns,
+            oauth_provider: Arc::new(RwLock::new(None)),
             config: Arc::new(config),
         };
         state.spawn_presence_sweeper();
@@ -161,6 +169,28 @@ impl ApiState {
     /// Directory that holds `komari.db`, installed themes and the favicon.
     pub fn data_dir(&self) -> PathBuf {
         self.web.config().data_dir.clone()
+    }
+
+    /// The active OAuth provider, if the server assembly installed one.
+    pub fn oauth_provider(&self) -> Option<Arc<dyn OAuthProvider>> {
+        self.oauth_provider
+            .read()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .clone()
+    }
+
+    /// Install or replace the active OAuth provider.
+    pub fn set_oauth_provider(&self, provider: Option<Arc<dyn OAuthProvider>>) {
+        *self
+            .oauth_provider
+            .write()
+            .unwrap_or_else(|poisoned| poisoned.into_inner()) = provider;
+    }
+
+    /// Builder variant of [`ApiState::set_oauth_provider`].
+    pub fn with_oauth_provider(self, provider: Arc<dyn OAuthProvider>) -> Self {
+        self.set_oauth_provider(Some(provider));
+        self
     }
 
     fn spawn_presence_sweeper(&self) {

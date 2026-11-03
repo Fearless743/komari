@@ -1,8 +1,35 @@
-# komari-api — agent API parity notes
+# komari-api — API parity notes
 
-This crate implements the agent-facing routes and the WebSocket hub used by
-`komari-api`. The following intentional differences from the Go backend are
-tracked here so later tasks can adapt them.
+This crate implements the public/browser routes, the agent-facing routes and
+the WebSocket hub used by `komari-api`. The following intentional differences
+from the Go backend are tracked here so later tasks can adapt them.
+
+## Public API (`public_router`)
+
+Ports of Go `api/public/*.go` plus the route table in `cmd/server.go`:
+
+| Route | Notes |
+| --- | --- |
+| `ANY /ping` | Plain-text `pong`, matching Go's `r.Any("/ping", ...)`. |
+| `GET /api/nodes` | Hidden clients are filtered for guests; `ipv4`, `ipv6`, `remark`, `version` and `token` are always cleared. |
+| `GET /api/public` | Defaults match `database.GetPublicInfo`; a valid `temp_key` cookie reports `private_site=false`. |
+| `GET /api/version` | `{"version": ..., "hash": ...}` from `KOMARI_VERSION` / `KOMARI_VERSION_HASH` (same as `komari-cli`). |
+| `POST /api/login` | Password + optional `2fa_code`; `disable_password_login` returns 403. |
+| `GET /api/me` | Raw `{username, logged_in, uuid?, sso_type?, sso_id?, 2fa_enabled?}` (no envelope). |
+| `GET /api/logout` | Deletes the session, clears the cookie and redirects to `/`. |
+| `GET /api/recent/{uuid}` | Reads the B05 in-memory report buffer (`api.Records`); omits `data` when nothing is buffered. |
+| `GET /api/records/load` | `uuid`/`hours`/`load_type` validation, per-metric projection and GPU device grouping. |
+| `GET /api/oauth`, `GET /api/oauth_callback` | Uses the B13 provider installed with `ApiState::set_oauth_provider`; error bodies use Go's `error` key. |
+| `GET /api/mjpeg_live` | `multipart/x-mixed-replace; boundary=frame` JPEG stream rendered from the latest `records` rows with a built-in bitmap font. Frame interval is `ApiConfig::mjpeg_frame_interval` (2 s by default). |
+
+`public_router_with_state` additionally installs `komari_auth::PrivateSite`,
+matching the global private-site middleware in `cmd/server.go`. Server
+assemblies that already apply `PrivateSite` globally can use
+`public_router()` directly.
+
+OAuth is not loaded automatically. Call
+`komari_api::public::initialize_oauth(&state).await` (which seeds default
+provider rows and loads `o_auth_provider`) before serving requests.
 
 ## Implemented Go semantics
 
@@ -33,6 +60,28 @@ tracked here so later tasks can adapt them.
 
 ## Known differences / follow-up work
 
+- `/api/mjpeg_live` renders from the `records` table instead of the JSON-RPC
+  node snapshot, uses the built-in 5x7 bitmap font instead of the downloaded
+  MiSans font, and drops hidden clients like Go's guest `common:getNodes` call.
+  The `lang` and `tz_offset` query parameters are accepted but the frame text is
+  English and uses the application timezone.
+- `/api/records/load` rejects `hours` outside `±2_562_047` (the largest whole
+  hour offset that fits in Go's `time.Duration`) with 400. Go silently wraps the
+  duration for larger values.
+- `/api/public` persists missing defaults with `get_as_or`, matching Go's
+  `GetManyAs[config.Legacy]` write-back. One value differs: Rust stores the
+  `GetPublicInfo` description default (`Komari Monitor, a simple server
+  monitoring tool.`), while Go first writes the `Legacy` struct-tag default
+  (`A simple server monitor tool.`) and then reads it back. Subsequent calls in
+  both implementations return the stored value.
+- `client_ip` falls back to `ConnectInfo<SocketAddr>` after `X-Forwarded-For`
+  and `X-Real-IP`. The server assembly must use
+  `into_make_service_with_connect_info` to match Go's `RemoteAddr` fallback.
+- `/api/rpc2` and the admin API are separate tasks (B06/B07) and are not part of
+  this router.
+- `/api/oauth_callback` binding uses `komari_oauth::AccountLinker::bind`, which
+  also records `users.sso_type` and rejects an identity already owned by
+  another account. Go only writes `sso_id`.
 - `uploadBasicInfo` accepts a POST body `token` and an administrator body
   `uuid`. Go only reads the query token and returns 400 without it. This is an
   intentional extension for the B05 checklist; strict Go parity would reject

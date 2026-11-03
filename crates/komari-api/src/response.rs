@@ -22,6 +22,18 @@ pub fn success_no_data() -> Json<Value> {
     }))
 }
 
+/// Like [`success`], but omits `data` entirely when it is `None`.
+///
+/// Go's `Response.Data` uses `json:"data,omitempty"`, so handlers that pass a
+/// nil interface (for example `/api/recent/:uuid` with no buffered report)
+/// produce a body without a `data` key.
+pub fn success_optional(data: Option<Value>) -> Json<Value> {
+    match data {
+        Some(data) => success(data),
+        None => success_no_data(),
+    }
+}
+
 /// Go `RespondSuccessMessage`: a success envelope with a custom message.
 ///
 /// `data` follows Go's `json:"data,omitempty"`: a JSON `null` is omitted.

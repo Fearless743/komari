@@ -9,16 +9,19 @@
 //! * `GET  /api/clients` — browser WebSocket used by the dashboard.
 //! * `/api/admin/**` — administrative API (see [`admin`]).
 //! * `/api/rpc2` — JSON-RPC 2.0 over POST and WebSocket (see [`rpc`]).
+//! * Browser-facing public routes (`/api/nodes`, login, OAuth, records, …) live
+//!   in [`public`].
 //!
-//! Public routes and static assets intentionally live in other crates/tasks;
-//! [`client_router`], [`admin::admin_router`] and [`rpc::rpc_router`] can be
-//! merged into a larger router.
+//! [`client_router`], [`public::public_router`], [`admin::admin_router`] and
+//! [`rpc::rpc_router`] can be merged into a larger router sharing the same
+//! [`ApiState`].
 
 pub mod admin;
 mod agent;
 mod cache;
 mod clock;
 mod presence;
+pub mod public;
 mod report;
 mod response;
 pub mod rpc;
@@ -28,6 +31,7 @@ pub mod ws;
 pub use cache::{FlushSummary, ReportCache};
 pub use clock::{Clock, ManualClock, SystemClock};
 pub use presence::{PresenceExpiry, PresenceTracker, PresenceUpdate};
+pub use public::{initialize_oauth, public_router, public_router_with_state};
 pub use report::{
     ConnectionsReport, CpuReport, DiskReport, GpuDetailReport, GpuDeviceInfo, LoadReport,
     NetworkReport, RamReport, Report, aggregate_reports, save_report, verify_report,
