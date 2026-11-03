@@ -50,7 +50,7 @@ pub struct Method {
 static METHODS: LazyLock<Vec<Method>> = LazyLock::new(build_methods);
 
 fn build_methods() -> Vec<Method> {
-    vec![
+    let mut methods = vec![
         Method {
             name: "common:getNodes",
             meta: MethodMeta {
@@ -195,6 +195,78 @@ fn build_methods() -> Vec<Method> {
             handler: common::get_records,
         },
         Method {
+            name: "rpc.methods",
+            meta: MethodMeta {
+                name: "rpc.methods",
+                summary: "List methods",
+                description: "Return the list of currently callable methods. By default, internal methods are not included. Pass internal=true to include them.",
+                params: vec![ParamMeta {
+                    name: "internal",
+                    param_type: "bool",
+                    required: false,
+                    description: "Whether to include internal rpc.* methods",
+                }],
+                returns: "[]string",
+            },
+            handler: rpc_methods,
+        },
+        Method {
+            name: "rpc.version",
+            meta: MethodMeta {
+                name: "rpc.version",
+                summary: "Return the RPC version",
+                description: "",
+                params: Vec::new(),
+                returns: "string",
+            },
+            handler: rpc_version,
+        },
+        Method {
+            name: "rpc.ping",
+            meta: MethodMeta {
+                name: "rpc.ping",
+                summary: "Health check, returns pong",
+                description: "",
+                params: Vec::new(),
+                returns: "string",
+            },
+            handler: rpc_ping,
+        },
+        Method {
+            name: "rpc.help",
+            meta: MethodMeta {
+                name: "rpc.help",
+                summary: "Get method help",
+                description: "Returns detailed metadata for the specified method if given.",
+                params: vec![ParamMeta {
+                    name: "method",
+                    param_type: "string",
+                    required: false,
+                    description: "Target method name",
+                }],
+                returns: "MethodMeta",
+            },
+            handler: rpc_help,
+        },
+    ];
+    if admin_rpc_enabled() {
+        methods.extend(admin_methods());
+    }
+    methods
+}
+
+/// The Go backend has no `admin:*` RPC methods. They are an opt-in extension
+/// enabled with `KOMARI_RPC_ADMIN_METHODS=true`, so the default `rpc.methods`
+/// list matches Go.
+fn admin_rpc_enabled() -> bool {
+    std::env::var("KOMARI_RPC_ADMIN_METHODS")
+        .map(|value| value.eq_ignore_ascii_case("true"))
+        .unwrap_or(false)
+}
+
+fn admin_methods() -> Vec<Method> {
+    vec![
+        Method {
             name: "admin:getClients",
             meta: MethodMeta {
                 name: "admin:getClients",
@@ -291,60 +363,6 @@ fn build_methods() -> Vec<Method> {
             },
             handler: admin::remove_client,
         },
-        Method {
-            name: "rpc.methods",
-            meta: MethodMeta {
-                name: "rpc.methods",
-                summary: "List methods",
-                description: "Return the list of currently callable methods. By default, internal methods are not included. Pass internal=true to include them.",
-                params: vec![ParamMeta {
-                    name: "internal",
-                    param_type: "bool",
-                    required: false,
-                    description: "Whether to include internal rpc.* methods",
-                }],
-                returns: "[]string",
-            },
-            handler: rpc_methods,
-        },
-        Method {
-            name: "rpc.version",
-            meta: MethodMeta {
-                name: "rpc.version",
-                summary: "Return the RPC version",
-                description: "",
-                params: Vec::new(),
-                returns: "string",
-            },
-            handler: rpc_version,
-        },
-        Method {
-            name: "rpc.ping",
-            meta: MethodMeta {
-                name: "rpc.ping",
-                summary: "Health check, returns pong",
-                description: "",
-                params: Vec::new(),
-                returns: "string",
-            },
-            handler: rpc_ping,
-        },
-        Method {
-            name: "rpc.help",
-            meta: MethodMeta {
-                name: "rpc.help",
-                summary: "Get method help",
-                description: "Returns detailed metadata for the specified method if given.",
-                params: vec![ParamMeta {
-                    name: "method",
-                    param_type: "string",
-                    required: false,
-                    description: "Target method name",
-                }],
-                returns: "MethodMeta",
-            },
-            handler: rpc_help,
-        },
     ]
 }
 
@@ -390,10 +408,59 @@ pub fn dispatch(context: &RpcContext, request: &RpcRequest) -> RpcResponse {
         );
     };
 
-    match (method.handler)(context, request) {
+    let request = match normalize_params(method, request) {
+        Ok(request) => request,
+        Err(error) => return error.response(request.id.clone()),
+    };
+
+    match (method.handler)(context, &request) {
         Ok(result) => RpcResponse::success(request.id.clone(), result),
         Err(error) => error.response(request.id.clone()),
     }
+}
+
+/// Map positional/scalar params onto named object params.
+///
+/// Go `BindParams` fills struct fields in declaration order. The registry keeps
+/// the same order in `MethodMeta::params`, so arrays are zipped with those
+/// names and a scalar fills the first field. Extra array elements are ignored,
+/// matching Go. Methods without declared params ignore non-object params.
+fn normalize_params(method: &Method, request: &RpcRequest) -> Result<RpcRequest, RpcError> {
+    let Some(params) = request.params.as_ref() else {
+        return Ok(request.clone());
+    };
+    let names = method
+        .meta
+        .params
+        .iter()
+        .map(|param| param.name)
+        .collect::<Vec<_>>();
+    let mut normalized = request.clone();
+    match params {
+        Value::Object(_) => {}
+        Value::Null => normalized.params = None,
+        Value::Array(values) => {
+            if names.is_empty() {
+                normalized.params = None;
+            } else {
+                let mut object = serde_json::Map::new();
+                for (name, value) in names.iter().zip(values.iter()) {
+                    object.insert((*name).to_owned(), value.clone());
+                }
+                normalized.params = Some(Value::Object(object));
+            }
+        }
+        scalar => {
+            if names.is_empty() {
+                normalized.params = None;
+            } else {
+                let mut object = serde_json::Map::new();
+                object.insert(names[0].to_owned(), scalar.clone());
+                normalized.params = Some(Value::Object(object));
+            }
+        }
+    }
+    Ok(normalized)
 }
 
 fn rpc_methods(_context: &RpcContext, request: &RpcRequest) -> Result<Value, RpcError> {
