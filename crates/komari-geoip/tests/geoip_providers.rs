@@ -41,6 +41,17 @@ fn temp_mmdb_path() -> std::path::PathBuf {
     ))
 }
 
+fn temp_mmdb_path_nested() -> std::path::PathBuf {
+    let nanos = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .expect("system time")
+        .as_nanos();
+    std::env::temp_dir()
+        .join(format!("komari-geoip-test-{}-{nanos}", std::process::id()))
+        .join("nested")
+        .join("data.mmdb")
+}
+
 fn database() -> Arc<Db> {
     let db = Arc::new(Db::open_in_memory().expect("in-memory database"));
     db.migrate().expect("migrate");
@@ -87,7 +98,7 @@ async fn mmdb_downloads_missing_database_and_reloads() {
     assert!(!provider.is_loaded());
     assert!(!path.exists());
 
-    provider.update_database().await.expect("download database");
+    provider.prepare().await.expect("download database");
     assert!(provider.is_loaded());
     assert!(path.exists());
     assert_eq!(server.request_count(), 1);
@@ -101,19 +112,33 @@ async fn mmdb_downloads_missing_database_and_reloads() {
 }
 
 #[tokio::test]
-async fn mmdb_existing_database_is_loaded_without_download() {
+async fn mmdb_existing_database_prepare_loads_but_update_forces_download() {
+    let database_bytes = std::fs::read(MMDB_FIXTURE).expect("fixture");
     let path = temp_mmdb_path();
     std::fs::copy(MMDB_FIXTURE, &path).expect("copy fixture");
-    let server = MockServer::start(|_| MockResponse::text(500, "must not be called")).await;
+    let server = MockServer::start(move |_| {
+        MockResponse::bytes(200, database_bytes.clone(), "application/octet-stream")
+    })
+    .await;
 
     let provider = MaxMindProvider::with_download_url(&path, server.url());
-    provider.update_database().await.expect("load existing");
-    assert_eq!(server.request_count(), 0);
 
+    // Initialization reuses the existing file and must not hit the network.
+    provider.prepare().await.expect("load existing");
+    assert_eq!(server.request_count(), 0);
     let info = provider
         .get_geo_info(ip("89.160.20.112"))
         .await
         .expect("lookup");
+    assert_eq!(info.iso_code, "SE");
+
+    // The admin update path always downloads, even when already loaded.
+    provider.update_database().await.expect("force download");
+    assert_eq!(server.request_count(), 1);
+    let info = provider
+        .get_geo_info(ip("89.160.20.112"))
+        .await
+        .expect("lookup after update");
     assert_eq!(info.iso_code, "SE");
     let _ = std::fs::remove_file(&path);
 }
@@ -156,6 +181,49 @@ async fn service_initialize_downloads_configured_mmdb_provider() {
     let info = service.lookup(ip("89.160.20.112")).await;
     assert_eq!(info.iso_code, "SE");
     assert!(path.exists());
+    assert_eq!(server.request_count(), 1);
+    let _ = std::fs::remove_file(&path);
+}
+
+#[tokio::test]
+async fn service_initialize_reuses_existing_mmdb_and_update_forces_download() {
+    let database_bytes = std::fs::read(MMDB_FIXTURE).expect("fixture");
+    let server = MockServer::start(move |_| {
+        MockResponse::bytes(200, database_bytes.clone(), "application/octet-stream")
+    })
+    .await;
+    let path = temp_mmdb_path();
+    std::fs::copy(MMDB_FIXTURE, &path).expect("copy fixture");
+
+    let db = database();
+    db.config().set(GEO_IP_ENABLED_KEY, &true).expect("enable");
+    db.config()
+        .set(GEO_IP_PROVIDER_KEY, "mmdb")
+        .expect("provider");
+
+    let factory = GeoIpFactory::new();
+    let constructor_path = path.clone();
+    let constructor_url = server.url();
+    factory.register_provider(
+        "mmdb",
+        Arc::new(move || {
+            Ok(Box::new(MaxMindProvider::with_download_url(
+                constructor_path.clone(),
+                constructor_url.clone(),
+            )) as Box<_>)
+        }),
+    );
+
+    let service = GeoIpService::new()
+        .with_factory(factory)
+        .with_database(Arc::clone(&db));
+    service.initialize().await.expect("initialize");
+
+    assert_eq!(service.provider_key(), "mmdb");
+    assert_eq!(server.request_count(), 0);
+    assert_eq!(service.lookup(ip("89.160.20.112")).await.iso_code, "SE");
+
+    service.update_database().await.expect("force download");
     assert_eq!(server.request_count(), 1);
     let _ = std::fs::remove_file(&path);
 }
@@ -544,6 +612,139 @@ async fn cache_capacity_evicts_old_entries() {
 
     let _ = service.lookup(ip("8.8.8.8")).await;
     assert_eq!(calls.load(Ordering::SeqCst), 4);
+}
+
+#[tokio::test]
+async fn explicit_empty_provider_is_installed_during_initialize() {
+    let db = database();
+    db.config().set(GEO_IP_ENABLED_KEY, &true).expect("enable");
+    db.config()
+        .set(GEO_IP_PROVIDER_KEY, "empty")
+        .expect("provider");
+    let service = GeoIpService::new().with_database(Arc::clone(&db));
+    service.initialize().await.expect("initialize");
+
+    assert_eq!(service.provider_key(), "empty");
+    assert_eq!(service.provider_name().as_deref(), Some("EmptyProvider"));
+    assert_eq!(service.lookup(ip("8.8.8.8")).await, GeoInfo::default());
+}
+
+#[tokio::test]
+async fn service_initialize_falls_back_when_mmdb_download_fails() {
+    let server = MockServer::start(|_| MockResponse::text(500, "download failed")).await;
+    let path = temp_mmdb_path();
+    let _ = std::fs::remove_file(&path);
+
+    let db = database();
+    db.config().set(GEO_IP_ENABLED_KEY, &true).expect("enable");
+    db.config()
+        .set(GEO_IP_PROVIDER_KEY, "mmdb")
+        .expect("provider");
+
+    let factory = GeoIpFactory::new();
+    let constructor_path = path.clone();
+    let constructor_url = server.url();
+    factory.register_provider(
+        "mmdb",
+        Arc::new(move || {
+            Ok(Box::new(MaxMindProvider::with_download_url(
+                constructor_path.clone(),
+                constructor_url.clone(),
+            )) as Box<_>)
+        }),
+    );
+
+    let service = GeoIpService::new()
+        .with_factory(factory)
+        .with_database(Arc::clone(&db));
+    service
+        .initialize()
+        .await
+        .expect("initialize must not fail");
+
+    assert_eq!(service.provider_key(), "empty");
+    assert_eq!(service.provider_name(), None);
+    assert_eq!(service.lookup(ip("8.8.8.8")).await, GeoInfo::default());
+    assert!(!path.exists());
+}
+
+#[tokio::test]
+async fn service_initialize_creates_missing_parent_directories() {
+    let database_bytes = std::fs::read(MMDB_FIXTURE).expect("fixture");
+    let server = MockServer::start(move |_| {
+        MockResponse::bytes(200, database_bytes.clone(), "application/octet-stream")
+    })
+    .await;
+    let path = temp_mmdb_path_nested();
+    let root = path
+        .parent()
+        .and_then(std::path::Path::parent)
+        .expect("root directory")
+        .to_path_buf();
+    let _ = std::fs::remove_dir_all(&root);
+    assert!(!root.exists());
+
+    let db = database();
+    db.config().set(GEO_IP_ENABLED_KEY, &true).expect("enable");
+    db.config()
+        .set(GEO_IP_PROVIDER_KEY, "mmdb")
+        .expect("provider");
+
+    let factory = GeoIpFactory::new();
+    let constructor_path = path.clone();
+    let constructor_url = server.url();
+    factory.register_provider(
+        "mmdb",
+        Arc::new(move || {
+            Ok(Box::new(MaxMindProvider::with_download_url(
+                constructor_path.clone(),
+                constructor_url.clone(),
+            )) as Box<_>)
+        }),
+    );
+
+    let service = GeoIpService::new()
+        .with_factory(factory)
+        .with_database(Arc::clone(&db));
+    service.initialize().await.expect("initialize");
+
+    assert!(root.exists());
+    assert!(path.exists());
+    assert_eq!(service.provider_key(), "mmdb");
+    assert_eq!(service.lookup(ip("89.160.20.112")).await.iso_code, "SE");
+    let _ = std::fs::remove_dir_all(&root);
+}
+
+#[tokio::test]
+async fn zero_ttl_disables_cache() {
+    let db = database();
+    db.config().set(GEO_IP_ENABLED_KEY, &true).expect("enable");
+    db.config()
+        .set(GEO_IP_PROVIDER_KEY, "counting")
+        .expect("provider");
+
+    let calls = Arc::new(AtomicUsize::new(0));
+    let factory = GeoIpFactory::new();
+    let constructor_calls = Arc::clone(&calls);
+    factory.register_provider(
+        "counting",
+        Arc::new(move || {
+            Ok(Box::new(CountingProvider {
+                calls: Arc::clone(&constructor_calls),
+            }) as Box<_>)
+        }),
+    );
+
+    let service = GeoIpService::new()
+        .with_factory(factory)
+        .with_database(Arc::clone(&db))
+        .with_cache_ttl(Duration::ZERO);
+    service.initialize().await.expect("initialize");
+
+    let _ = service.lookup(ip("8.8.8.8")).await;
+    let _ = service.lookup(ip("8.8.8.8")).await;
+    assert_eq!(calls.load(Ordering::SeqCst), 2);
+    assert_eq!(service.cache_len(), 0);
 }
 
 #[tokio::test]
