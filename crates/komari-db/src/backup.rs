@@ -196,7 +196,7 @@ impl Db {
     /// Prefer [`Db::export_backup_to`] for large installations.
     pub fn export_backup(&self, options: &BackupOptions) -> Result<Vec<u8>> {
         let mut cursor = io::Cursor::new(Vec::new());
-        self.write_backup(options, &mut cursor, &[])?;
+        self.write_backup(options, &mut cursor, &[], false)?;
         Ok(cursor.into_inner())
     }
 
@@ -211,12 +211,22 @@ impl Db {
         options: &BackupOptions,
         destination: impl AsRef<Path>,
     ) -> Result<BackupReport> {
-        let destination = destination.as_ref();
-        ensure_safe_destination(self, options, destination)?;
+        self.write_backup_to(options, destination.as_ref(), false)
+    }
+
+    fn write_backup_to(
+        &self,
+        options: &BackupOptions,
+        destination: &Path,
+        pre_restore: bool,
+    ) -> Result<BackupReport> {
         let parent = non_empty_parent(destination);
         if !parent.as_os_str().is_empty() {
             fs::create_dir_all(parent)?;
         }
+        // Resolve symlinked parents after they exist so `link/komari.db`
+        // cannot be used to overwrite the live database through `link -> data`.
+        ensure_safe_destination(self, options, destination)?;
 
         let temp_zip = unique_path(parent, ".komari-backup-export");
         let mut guard = TempFileGuard::new(temp_zip.clone());
@@ -226,6 +236,7 @@ impl Db {
             options,
             file,
             &[normalize_path(destination), normalize_path(&temp_zip)],
+            pre_restore,
         )?;
 
         match fs::rename(&temp_zip, destination) {
@@ -250,6 +261,7 @@ impl Db {
         options: &BackupOptions,
         writer: W,
         extra_excludes: &[PathBuf],
+        pre_restore: bool,
     ) -> Result<BackupReport> {
         validate_common_options(options)?;
 
@@ -273,7 +285,7 @@ impl Db {
         let mut data_entries = 0usize;
         let mut total_uncompressed_bytes = database_bytes;
         if options.include_data && options.data_dir.exists() {
-            let entries = collect_data_entries(options, &excludes)?;
+            let entries = collect_data_entries(options, &excludes, pre_restore)?;
             for entry in entries {
                 if entry.is_dir {
                     add_directory(&mut zip, &entry.name, 0o755)?;
@@ -389,6 +401,15 @@ fn create_pre_restore_archive(options: &BackupOptions) -> Option<PathBuf> {
         return None;
     }
 
+    if normalize_path(directory).starts_with(normalize_path(&options.data_dir)) {
+        eprintln!(
+            "komari-db backup: pre_restore_backup_dir {} is inside data_dir {}; skipping pre-restore archive",
+            directory.display(),
+            options.data_dir.display()
+        );
+        return None;
+    }
+
     fs::create_dir_all(directory).ok()?;
     let stamp = chrono::Local::now().format("%Y%m%d-%H%M%S").to_string();
     let mut archive = directory.join(format!("{stamp}.zip"));
@@ -406,7 +427,7 @@ fn create_pre_restore_archive(options: &BackupOptions) -> Option<PathBuf> {
     export_options.include_data = true;
     export_options.exclude.clear();
     export_options.pre_restore_backup_dir = None;
-    db.export_backup_to(&export_options, &archive).ok()?;
+    db.write_backup_to(&export_options, &archive, true).ok()?;
     Some(archive)
 }
 
@@ -798,9 +819,16 @@ fn exchange_directories(_left: &Path, _right: &Path) -> io::Result<()> {
 fn collect_data_entries(
     options: &BackupOptions,
     excludes: &HashSet<PathBuf>,
+    pre_restore: bool,
 ) -> Result<Vec<DataEntry>> {
     let mut entries = Vec::new();
-    walk_data_dir(&options.data_dir, &options.data_dir, excludes, &mut entries)?;
+    walk_data_dir(
+        &options.data_dir,
+        &options.data_dir,
+        excludes,
+        pre_restore,
+        &mut entries,
+    )?;
     entries.sort_by(|a, b| a.name.cmp(&b.name));
     Ok(entries)
 }
@@ -809,6 +837,7 @@ fn walk_data_dir(
     root: &Path,
     dir: &Path,
     excludes: &HashSet<PathBuf>,
+    pre_restore: bool,
     entries: &mut Vec<DataEntry>,
 ) -> Result<()> {
     let mut children: Vec<_> = fs::read_dir(dir)?.collect::<io::Result<Vec<_>>>()?;
@@ -851,9 +880,9 @@ fn walk_data_dir(
                     size: 0,
                 });
             }
-            walk_data_dir(root, &path, excludes, entries)?;
+            walk_data_dir(root, &path, excludes, pre_restore, entries)?;
         } else if file_type.is_file() {
-            if is_skipped_file_name(&name) {
+            if is_skipped_file_name(&name, pre_restore) {
                 continue;
             }
             entries.push(DataEntry {
@@ -873,12 +902,18 @@ fn is_database_name(name: &str) -> bool {
     lower.ends_with(".db") || lower.ends_with(".db-wal") || lower.ends_with(".db-shm")
 }
 
-fn is_skipped_file_name(name: &str) -> bool {
+fn is_skipped_file_name(name: &str, pre_restore: bool) -> bool {
     if is_database_name(name)
         || name == BACKUP_MARKUP_NAME
         || name.eq_ignore_ascii_case("backup.zip")
     {
         return true;
+    }
+
+    if pre_restore {
+        // Go's pre-restore archive only excludes the database sidecars and
+        // `backup.zip`; keep transient files so the safety copy is complete.
+        return false;
     }
 
     // Deliberately broader than Go (the task asks for temporary files to be
