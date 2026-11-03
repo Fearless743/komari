@@ -240,9 +240,7 @@ impl Records<'_> {
         start: LocalTime,
         end: LocalTime,
     ) -> Result<Vec<Record>> {
-        let four_hours_ago = LocalTime::from_naive(
-            LocalTime::now().to_naive() - chrono::TimeDelta::minutes(4 * 60 + 1),
-        );
+        let four_hours_ago = recent_window_start(chrono::Utc::now());
         if end <= four_hours_ago {
             return Ok(Vec::new());
         }
@@ -275,9 +273,7 @@ impl Records<'_> {
         start: LocalTime,
         end: LocalTime,
     ) -> Result<Vec<GPURecord>> {
-        let four_hours_ago = LocalTime::from_naive(
-            LocalTime::now().to_naive() - chrono::TimeDelta::minutes(4 * 60 + 1),
-        );
+        let four_hours_ago = recent_window_start(chrono::Utc::now());
 
         let mut records = Vec::new();
         if end > four_hours_ago {
@@ -549,4 +545,33 @@ fn downsample_recent_records(records: Vec<Record>) -> Vec<Record> {
     let mut result: Vec<Record> = grouped.into_values().collect();
     result.sort_by_key(|record| record.time);
     result
+}
+
+/// Start of the "recent" window: the absolute instant `now - (4h + 1m)`
+/// converted to the application timezone. Computing on the absolute instant
+/// (rather than subtracting from a naive wall clock) keeps the window correct
+/// across DST transitions, matching Go's `time.Now().Add(-4h-1m)`.
+fn recent_window_start(now: chrono::DateTime<chrono::Utc>) -> LocalTime {
+    LocalTime::from_instant(now - chrono::TimeDelta::minutes(4 * 60 + 1))
+}
+
+#[cfg(test)]
+mod tests {
+    use chrono::{TimeZone, Utc};
+
+    use super::*;
+
+    #[test]
+    fn recent_window_is_an_absolute_duration() {
+        // 2026-11-01 06:30 UTC is 01:30 EST after the US fall-back.
+        let now = Utc
+            .with_ymd_and_hms(2026, 11, 1, 6, 30, 0)
+            .single()
+            .unwrap();
+        let start = recent_window_start(now);
+        assert_eq!(
+            start.timestamp().unwrap(),
+            now.timestamp() - (4 * 60 + 1) * 60
+        );
+    }
 }
