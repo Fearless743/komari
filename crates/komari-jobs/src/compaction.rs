@@ -58,7 +58,7 @@ impl Default for CompactionOptions {
         Self {
             now: Utc::now(),
             batch_size: DEFAULT_BATCH_SIZE,
-            vacuum: false,
+            vacuum: true,
         }
     }
 }
@@ -300,7 +300,13 @@ pub fn compact(db: &Db, options: &CompactionOptions) -> Result<CompactionReport>
         write_records(db, &compressed_records, &compressed_gpus, five_hours_ago)?;
 
     if options.vacuum {
-        db.vacuum()?;
+        // Go runs this for SQLite and ignores the checkpoint result.
+        let _ = db.execute_batch("PRAGMA wal_checkpoint(TRUNCATE);");
+        // Go only logs a VACUUM failure; maintenance must not abort because of
+        // an unavailable compaction step (for example a locked database).
+        if let Err(error) = db.vacuum() {
+            tracing::warn!(%error, "record compaction VACUUM failed");
+        }
     }
 
     Ok(CompactionReport {

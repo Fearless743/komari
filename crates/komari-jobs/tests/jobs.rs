@@ -32,6 +32,15 @@ fn insert(db: &Db, time: LocalTime, values: &[f32]) -> LocalTime {
 }
 
 #[test]
+fn defaults_enable_vacuum_and_checkpoint() {
+    assert!(CompactionOptions::default().vacuum);
+    assert!(JobOptions::default().vacuum);
+    let db = db();
+    // An empty database with VACUUM enabled must still complete.
+    compact(&db, &CompactionOptions::at(now())).unwrap();
+}
+
+#[test]
 fn percentile_interpolates_like_go() {
     assert_eq!(percentile(&[], 0.7), 0.0);
     assert_eq!(percentile(&[10.0], 0.7), 10.0);
