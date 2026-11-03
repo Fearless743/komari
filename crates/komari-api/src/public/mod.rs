@@ -1,15 +1,26 @@
 //! Public (browser / unauthenticated) API routes.
 //!
 //! This module ports the handlers in Go `api/public/*.go` and the route table
-//! from `cmd/server.go`. The router is extended by later commits in this
-//! series; [`public_router`] always mirrors the Go route table.
+//! from `cmd/server.go`:
+//!
+//! * `GET  /api/nodes` — node list with hidden-client filtering.
+//! * `GET  /api/public` — public site settings.
+//! * `GET  /api/version` — build version and commit hash.
+//! * `GET  /api/me`, `POST /api/login`, `GET /api/logout` — session handling.
+//! * `GET  /api/recent/{uuid}` — buffered (in-memory) reports.
+//! * `GET  /api/records/load` — historical metric records.
+//! * `GET  /api/oauth`, `GET /api/oauth_callback` — OAuth login and binding.
+//! * `GET  /api/mjpeg_live` — explicit not-implemented response.
+//! * `ANY  /ping` — health check (`pong`).
 //!
 //! [`public_router`] returns the routes with `ApiState` state, matching
 //! [`crate::client_router`]. [`public_router_with_state`] also installs B03's
 //! private-site middleware, which is the Go server's global behaviour.
 
 mod login;
+mod mjpeg;
 mod nodes;
+mod oauth;
 mod records;
 mod settings;
 mod version;
@@ -62,6 +73,9 @@ pub fn public_router() -> Router<ApiState> {
         .route("/api/logout", get(login::logout))
         .route("/api/recent/{uuid}", get(records::get_recent))
         .route("/api/records/load", get(records::get_records))
+        .route("/api/oauth", get(oauth::authorize))
+        .route("/api/oauth_callback", get(oauth::callback))
+        .route("/api/mjpeg_live", get(mjpeg::mjpeg_live))
 }
 
 /// Public routes with state, including the private-site guard.
