@@ -13,14 +13,21 @@ http = { workspace = true }
 komari-auth = { workspace = true }
 komari-config = { workspace = true }
 komari-db = { workspace = true }
+komari-ddns = { workspace = true }
 komari-geoip = { workspace = true }
+komari-notify = { workspace = true }
+komari-oauth = { workspace = true }
+komari-web = { workspace = true }
+reqwest = { workspace = true }
 serde = { workspace = true }
 serde_json = { workspace = true }
 thiserror = { workspace = true }
 tokio = { workspace = true }
 tracing = { workspace = true }
+zip = { version = "2.4", default-features = false, features = ["deflate"] }
 
 [dev-dependencies]
 async-trait = { workspace = true }
+tempfile = "3"
 tokio-tungstenite = { workspace = true }
 tower = { workspace = true }

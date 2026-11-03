@@ -1,5 +1,6 @@
 //! Shared application state for the API routers.
 
+use std::path::PathBuf;
 use std::sync::Arc;
 use std::time::Duration;
 
@@ -7,7 +8,9 @@ use axum::extract::FromRef;
 use komari_auth::AuthState;
 use komari_config::keys;
 use komari_db::{Db, DbError};
+use komari_ddns::DdnsService;
 use komari_geoip::GeoIpService;
+use komari_web::{WebAssets, WebConfig};
 
 use crate::cache::ReportCache;
 use crate::clock::{Clock, SystemClock};
@@ -72,6 +75,12 @@ pub struct ApiState {
     /// server assembly can call `initialize()` and install it with
     /// [`ApiState::with_geoip_service`].
     pub geoip: Option<Arc<GeoIpService>>,
+    /// Embedded/static web assets. Admin theme routes use the same handle as
+    /// the static router so a switch takes effect immediately.
+    pub web: Arc<WebAssets>,
+    /// DDNS service used by the admin sync endpoint. The server assembly can
+    /// install an initialized instance with [`ApiState::with_ddns_service`].
+    pub ddns: Arc<DdnsService>,
     config: Arc<ApiConfig>,
 }
 
@@ -109,6 +118,8 @@ impl ApiState {
         ));
         let auth = AuthState::new(Arc::clone(&db));
         let geoip = Some(Arc::new(GeoIpService::new().with_database(Arc::clone(&db))));
+        let web = Arc::new(WebAssets::new(WebConfig::default()));
+        let ddns = Arc::new(DdnsService::new(Arc::clone(&db)));
         let state = Self {
             db,
             auth,
@@ -116,6 +127,8 @@ impl ApiState {
             presence,
             report_cache,
             geoip,
+            web,
+            ddns,
             config: Arc::new(config),
         };
         state.spawn_presence_sweeper();
@@ -131,6 +144,23 @@ impl ApiState {
     pub fn with_geoip_service(mut self, service: Arc<GeoIpService>) -> Self {
         self.geoip = Some(service);
         self
+    }
+
+    /// Share the static router's [`WebAssets`] with the admin theme routes.
+    pub fn with_web_assets(mut self, assets: Arc<WebAssets>) -> Self {
+        self.web = assets;
+        self
+    }
+
+    /// Install an initialized DDNS service.
+    pub fn with_ddns_service(mut self, service: Arc<DdnsService>) -> Self {
+        self.ddns = service;
+        self
+    }
+
+    /// Directory that holds `komari.db`, installed themes and the favicon.
+    pub fn data_dir(&self) -> PathBuf {
+        self.web.config().data_dir.clone()
     }
 
     fn spawn_presence_sweeper(&self) {

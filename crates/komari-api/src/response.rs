@@ -1,6 +1,8 @@
 //! JSON response helpers matching the Go `api.Response` envelope.
 
 use axum::Json;
+use axum::http::StatusCode;
+use axum::response::{IntoResponse, Response};
 use serde_json::{Value, json};
 
 /// `{"status":"success","message":"","data":...}` — Go `RespondSuccess`.
@@ -12,6 +14,15 @@ pub fn success(data: Value) -> Json<Value> {
     }))
 }
 
+/// Go `RespondSuccessMessage`: a success envelope with a custom message.
+pub fn success_message(message: impl Into<String>, data: Value) -> Json<Value> {
+    Json(json!({
+        "status": "success",
+        "message": message.into(),
+        "data": data,
+    }))
+}
+
 /// `{"status":"error","message":"..."}` — Go `RespondError` (nil `data` is
 /// omitted by `omitempty`).
 pub fn error(message: impl Into<String>) -> Json<Value> {
@@ -19,6 +30,11 @@ pub fn error(message: impl Into<String>) -> Json<Value> {
         "status": "error",
         "message": message.into(),
     }))
+}
+
+/// Error envelope with an explicit HTTP status code.
+pub fn error_status(status: StatusCode, message: impl Into<String>) -> Response {
+    (status, error(message)).into_response()
 }
 
 /// `{"error":"..."}` — used by the raw report handlers.

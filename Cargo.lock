@@ -1129,14 +1129,21 @@ dependencies = [
  "komari-auth",
  "komari-config",
  "komari-db",
+ "komari-ddns",
  "komari-geoip",
+ "komari-notify",
+ "komari-oauth",
+ "komari-web",
+ "reqwest",
  "serde",
  "serde_json",
+ "tempfile",
  "thiserror",
  "tokio",
  "tokio-tungstenite 0.26.2",
  "tower",
  "tracing",
+ "zip",
 ]
 
 [[package]]
