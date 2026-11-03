@@ -1,69 +1,59 @@
 # Parity deviations
 
-This file records intentional behavioural differences between the Rust rewrite
-and the Go backend. Unless stated otherwise, everything else follows the Go
-implementation.
+This file records deliberate differences between the Rust backend and the Go
+reference implementation. Each entry explains the reason and the compatibility
+impact.
 
-## Notification provider API redaction (B07)
+## DDNS provider configuration redaction
 
-**Difference:** the Go admin API returns `message_sender_providers.addition`
-verbatim, including tokens. The Rust API must return a redacted copy.
+**Status:** intentional security deviation.
 
-**Behaviour:**
+The Go admin API returns `models.DdnsProvider` directly, including the raw
+`addition` JSON blob. The Rust implementation keeps `ddns_providers.addition`
+unchanged in SQLite and uses the full value internally, but public API responses
+must remove sensitive fields before serialization.
 
-- Database rows keep the complete `addition` JSON; internal senders still read
-  the full configuration.
-- External responses call `komari_notify::redact_addition(provider, &addition)`
-  and return its `serde_json::Value`. The redacted value must never be written
-  back to the database.
-- Sensitive keys are removed, not masked. Non-sensitive keys are preserved.
-- Invalid JSON, top-level `null`, non-object values and unknown providers yield
-  `{}` without panicking or echoing the original text.
+Use `komari_ddns::redact_addition(provider_name, &addition)` for stored rows,
+or `komari_ddns::redact_provider_configuration(&provider)` for a live provider.
 
-**Sensitive fields:**
+| Provider | Fields removed from API responses | Fields kept |
+| --- | --- | --- |
+| `cloudflare` | `api_token`, `zone_id` | `record_id`, `record_type`, `ttl`, `proxied` |
+| `webhook` | `url`, `headers`, `body` | `method`, `content_type`, `response_json_path` |
+| `empty` | none | all fields |
 
-| Provider | Removed keys |
-| --- | --- |
-| `telegram` | `bot_token` |
-| `bark` | `device_key` |
-| `Server酱³` | `api_url` (contains the sendkey), `sendkey`, `send_key`, `token` |
-| `Server酱Turbo` | `api_url` (contains the sendkey), `sendkey`, `send_key`, `token` |
-| `webhook` | `headers`, `body`, `password`; `url`/`URL` when it contains userinfo, a credential query parameter, or a Slack/Discord/Teams path token |
-| `email` | `password` |
-| `Javascript` | `script`, `code` |
-| `empty` | none |
+Rules:
 
-**URL handling:** all URL-shaped fields (`url`, `URL`, `server_url`, `endpoint`,
-`api_url`) are checked. Credential detection covers userinfo, an exact
-credential-query list (`token`, `sig`, `signature`, `x-amz-signature`,
-`x-hub-signature-256`, `hmac`, ...), known Slack/Discord/Teams path tokens,
-common self-hosted markers (`/token/`, `/key/`, `/secret/`, `/webhook/`,
-`/send/`) followed by a token-shaped segment, and Telegram bot tokens embedded
-in the path. Token shape means uppercase/mixed case, digits, a longer separated
-value, or a very long opaque string; `/send/message`, `/webhook/events` and
-`/token/refresh` are preserved. Query/header names are matched exactly after
-normalization; unrelated keys such as `author`, `monkey`, `secretary`,
-`tokenizer` and `signature_pad` are not removed.
+- Sensitive fields are removed, not masked.
+- Invalid JSON, `null`, arrays and other non-object values produce `{}`.
+- Unknown providers produce `{}` because their sensitive fields are unknown.
+- Webhook URLs are always removed: Slack/Discord-style paths and query
+  strings may carry tokens even without username/password credentials.
+- The original `addition` string and the database row are not modified.
+- `Debug` output for Cloudflare and Webhook configurations redacts secrets.
+- Sensitive parsing failures use fixed error messages; HTTP client errors
+  strip the request URL before being logged or written to sync history.
 
-**Debug/logging:** every URL in `Debug` output is reduced to scheme + host +
-port (paths and query strings are hidden). Sensitive headers include `Authorization`, `X-Authorization`,
-`X-Forwarded-Authorization`, `X-Auth`, `X-Hub-Signature-256`,
-`X-Amz-Signature`, `X-Amz-Credential`, `X-Amz-Security-Token`,
-`X-Goog-Credential`, `X-Api-Key`, `hmac`, `sig` and similar.
-`HttpRequest` bodies and `HttpResponse` bodies are never printed; remote
-response bodies/descriptions are not included in errors. Registry type errors
-retain only provider, field path and serde error category, never the offending
-value or raw diagnostic text.
+**Impact:** an API client cannot read credentials back from the admin API. It
+must send a replacement value when changing a sensitive field. Internal DDNS
+synchronization continues to use the complete stored configuration.
 
-**Known heuristic limit:** tokens placed in arbitrary path segments of an
-unknown self-hosted service are not auto-detected by the API redactor. Debug
-output remains safe because it always hides the path.
+## DDNS record deletion
 
-**Call site:** B06 should call `redact_addition` in the GET/list response path.
-Provider configuration writes keep using the original `addition`.
+**Status:** extension, not present in Go.
 
-Other B07 deviations (unchanged): the `Javascript` provider is registered but
-returns `Unsupported` because goja has no equivalent Rust runtime; email
-subjects use RFC 2047 B-encoding instead of Go's Q-encoding; offline online
-notifications do not trigger auto-renewal; periodic notification loops are
-owned by the caller.
+`DdnsProvider::delete_record` and `DdnsService::delete_record` add explicit
+record deletion. Cloudflare implements it with
+`DELETE /zones/{zone}/dns_records/{id}`. `empty` returns an error, and other
+providers return an "unsupported" error by default. Callers must not interpret a
+no-op provider as proof that a record was deleted.
+
+## GeoIP local database initialization
+
+**Status:** implementation detail.
+
+`mmdb` initialization loads an existing database without downloading, and only
+downloads when the file is missing. The admin update path
+(`GeoIpService::update_database`) always downloads, matching Go's
+`UpdateDatabase`. Initialization failures fall back to `EmptyProvider` rather
+than aborting.

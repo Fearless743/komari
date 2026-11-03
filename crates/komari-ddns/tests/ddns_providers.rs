@@ -362,7 +362,21 @@ async fn webhook_reports_status_errors_and_invalid_configuration() {
         .sync(&context("1.2.3.4", ""))
         .await
         .expect_err("invalid headers");
-    assert!(error.to_string().contains("invalid headers json"));
+    assert!(error.to_string().contains("invalid webhook headers json"));
+
+    let mut secret_headers = WebhookProvider::new();
+    secret_headers
+        .set_configuration(json!({
+            "url": "http://127.0.0.1:1/hook",
+            "headers": "\"Bearer header-secret\""
+        }))
+        .expect("webhook config");
+    let error = secret_headers
+        .sync(&context("1.2.3.4", ""))
+        .await
+        .expect_err("secret headers must not be echoed");
+    assert!(!error.to_string().contains("header-secret"));
+    assert!(error.to_string().contains("invalid webhook headers json"));
 
     let mut missing = WebhookProvider::new();
     missing
@@ -429,6 +443,24 @@ fn webhook_helpers_match_go() {
     assert_eq!(extract_json_path(r#"{"data":{}}"#, "data.id"), "");
     assert_eq!(extract_json_path("not json", "id"), "");
     assert_eq!(extract_json_path(r#"{"id":123}"#, "id"), "");
+}
+
+#[tokio::test]
+async fn webhook_connection_errors_strip_url_credentials() {
+    let mut provider = WebhookProvider::new();
+    provider
+        .set_configuration(json!({
+            "url": "http://user:url-password@127.0.0.1:1/hook",
+            "body": "{}"
+        }))
+        .expect("webhook config");
+    let error = provider
+        .sync(&context("1.2.3.4", ""))
+        .await
+        .expect_err("connection refused");
+    let message = error.to_string();
+    assert!(!message.contains("url-password"));
+    assert!(!message.contains("127.0.0.1"));
 }
 
 #[tokio::test]
