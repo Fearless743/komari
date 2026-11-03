@@ -1,10 +1,17 @@
 //! External API redaction tests.
 
+use std::time::Duration;
+
+use komari_notify::providers::bark::BarkConfig;
 use komari_notify::providers::email::{EmailConfig, EmailSender};
 use komari_notify::providers::javascript::JavaScriptConfig;
+use komari_notify::providers::serverchan3::ServerChan3Config;
+use komari_notify::providers::serverchanturbo::ServerChanTurboConfig;
 use komari_notify::providers::telegram::TelegramConfig;
 use komari_notify::providers::webhook::WebhookConfig;
-use komari_notify::{HttpRequest, redact_addition, registry};
+use komari_notify::{
+    HttpRequest, HttpResponse, HttpTransport, ReqwestTransport, redact_addition, registry,
+};
 
 #[test]
 fn telegram_removes_bot_token_only() {
@@ -251,4 +258,159 @@ async fn malformed_addition_error_does_not_echo_input() {
         Err(error) => error,
     };
     assert!(!error.to_string().contains("TOKEN_SHOULD_NOT_APPEAR"));
+}
+
+#[test]
+fn webhook_url_key_variants_and_path_tokens_are_removed() {
+    for addition in [
+        r#"{"URL":"https://user:pass@hook.example/path"}"#,
+        r#"{"Url":"https://hooks.slack.com/services/T000/B000/SLACK_SECRET"}"#,
+        r#"{"url":"https://discord.com/api/webhooks/123/DISCORD_SECRET"}"#,
+        r#"{"url":"https://outlook.office.com/webhook/id@tenant/IncomingWebhook/TEAMS_SECRET/id"}"#,
+    ] {
+        let safe = redact_addition("webhook", addition);
+        assert!(
+            safe.get("url").is_none() && safe.get("URL").is_none() && safe.get("Url").is_none(),
+            "credentialed URL survived: {addition} -> {safe}"
+        );
+    }
+}
+
+#[test]
+fn webhook_query_signatures_are_removed_but_unrelated_keys_remain() {
+    for query in [
+        "?sig=SIGNATURE_SECRET",
+        "?signature=SIGNATURE_SECRET",
+        "?X-Amz-Signature=SIGNATURE_SECRET",
+        "?x-hub-signature-256=SIGNATURE_SECRET",
+    ] {
+        let addition = format!(r#"{{"url":"https://hook.example/path{query}"}}"#);
+        let safe = redact_addition("webhook", &addition);
+        assert!(safe.get("url").is_none(), "{query} was not redacted");
+    }
+
+    let safe = redact_addition(
+        "webhook",
+        r#"{"url":"https://hook.example/path?author=alice&monkey=1"}"#,
+    );
+    assert_eq!(
+        safe["url"],
+        "https://hook.example/path?author=alice&monkey=1"
+    );
+}
+
+#[test]
+fn all_url_fields_are_checked_for_credentials() {
+    let telegram = redact_addition(
+        "telegram",
+        r#"{"endpoint":"https://api.telegram.org/botTELEGRAM_SECRET","bot_token":"x"}"#,
+    );
+    assert!(telegram.get("endpoint").is_none());
+    assert!(telegram.get("bot_token").is_none());
+
+    let bark = redact_addition(
+        "bark",
+        r#"{"server_url":"https://user:pass@bark.example/path","device_key":"x"}"#,
+    );
+    assert!(bark.get("server_url").is_none());
+    assert!(bark.get("device_key").is_none());
+
+    let plain = redact_addition(
+        "bark",
+        r#"{"server_url":"https://bark.example/path","device_key":"x"}"#,
+    );
+    assert_eq!(plain["server_url"], "https://bark.example/path");
+}
+
+#[test]
+fn http_debug_hides_path_tokens_and_signature_headers() {
+    let telegram = HttpRequest::post("https://api.telegram.org/bot123:TELEGRAM_SECRET/sendMessage");
+    let debug = format!("{telegram:?}");
+    assert!(!debug.contains("TELEGRAM_SECRET"));
+    assert!(debug.contains("api.telegram.org"));
+
+    let serverchan = HttpRequest::post("https://sc3.example/send/SERVERCHAN_SECRET.send");
+    assert!(!format!("{serverchan:?}").contains("SERVERCHAN_SECRET"));
+
+    let slack = HttpRequest::post("https://hooks.slack.com/services/T/B/SLACK_SECRET")
+        .header("X-Auth", "X_AUTH_SECRET")
+        .header("X-Hub-Signature-256", "HUB_SIGNATURE_SECRET")
+        .header("X-Test", "visible");
+    let debug = format!("{slack:?}");
+    assert!(!debug.contains("SLACK_SECRET"));
+    assert!(!debug.contains("X_AUTH_SECRET"));
+    assert!(!debug.contains("HUB_SIGNATURE_SECRET"));
+    assert!(debug.contains("visible"));
+
+    let response = HttpResponse::new(200, b"RESPONSE_BODY_SECRET".to_vec());
+    assert!(!format!("{response:?}").contains("RESPONSE_BODY_SECRET"));
+}
+
+#[test]
+fn debug_redacts_bark_url_and_keeps_serverchan_metadata() {
+    let bark = BarkConfig {
+        server_url: "https://user:pass@bark.example/SECRET_PATH".to_owned(),
+        device_key: "BARK_DEVICE_SECRET".to_owned(),
+        level: "critical".to_owned(),
+        ..BarkConfig::default()
+    };
+    let debug = format!("{bark:?}");
+    assert!(!debug.contains("BARK_DEVICE_SECRET"));
+    assert!(!debug.contains("SECRET_PATH"));
+    assert!(!debug.contains("pass"));
+    assert!(debug.contains("bark.example"));
+    assert!(debug.contains("critical"));
+
+    let sc3 = ServerChan3Config {
+        api_url: "https://sc3.example/send/API_SECRET.send".to_owned(),
+        tags: "tag-a|tag-b".to_owned(),
+    };
+    let debug = format!("{sc3:?}");
+    assert!(!debug.contains("API_SECRET"));
+    assert!(debug.contains("tag-a|tag-b"));
+
+    let turbo = ServerChanTurboConfig {
+        api_url: "https://sct.example/API_SECRET.send".to_owned(),
+        channel: "9|66".to_owned(),
+        noip: "1".to_owned(),
+        openid: "oid".to_owned(),
+    };
+    let debug = format!("{turbo:?}");
+    assert!(!debug.contains("API_SECRET"));
+    assert!(debug.contains("9|66"));
+
+    let javascript = JavaScriptConfig {
+        script: "JS_SCRIPT_SECRET".to_owned(),
+    };
+    assert!(!format!("{javascript:?}").contains("JS_SCRIPT_SECRET"));
+}
+
+#[tokio::test]
+async fn registry_type_errors_do_not_echo_values() {
+    let error = match komari_notify::load_provider(
+        "email",
+        r#"{"host":"smtp.example","port":"PORT_SECRET"}"#,
+    )
+    .await
+    {
+        Ok(_) => panic!("type mismatch must fail"),
+        Err(error) => error,
+    };
+    let text = error.to_string();
+    assert!(text.contains("email"), "{text}");
+    assert!(!text.contains("PORT_SECRET"), "{text}");
+}
+
+#[tokio::test]
+async fn reqwest_errors_do_not_include_the_url() {
+    let transport = ReqwestTransport::new(Duration::from_millis(500));
+    let error = transport
+        .execute(HttpRequest::get(
+            "http://127.0.0.1:1/botREQUEST_SECRET?token=QUERY_SECRET",
+        ))
+        .await
+        .unwrap_err();
+    let text = error.to_string();
+    assert!(!text.contains("REQUEST_SECRET"), "{text}");
+    assert!(!text.contains("QUERY_SECRET"), "{text}");
 }
