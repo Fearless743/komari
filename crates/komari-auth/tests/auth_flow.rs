@@ -4,10 +4,11 @@ use std::time::{SystemTime, UNIX_EPOCH};
 
 use komari_auth::{
     authenticate, change_password, change_password_by_uuid, create_session, delete_session,
-    disable_2fa, enable_2fa, generate_code_at, hash_password, is_bcrypt_hash, validate_session,
-    verify_2fa, verify_password,
+    disable_2fa, enable_2fa, generate_code_at, hash_password, is_bcrypt_hash, legacy_hash_password,
+    validate_session, verify_2fa, verify_password,
 };
 use komari_db::Db;
+use komari_db::models::User;
 
 fn now_unix() -> i64 {
     SystemTime::now()
@@ -17,18 +18,26 @@ fn now_unix() -> i64 {
 }
 
 #[test]
-fn legacy_account_can_log_in_and_migrates_to_bcrypt() {
+fn password_changes_are_readable_by_the_go_backend() {
     let db = Db::open_in_memory().unwrap();
     db.migrate().unwrap();
-    // `Accounts::create` uses the historical Go SHA-256 format.
     let user = db.accounts().create("admin", "old-password").unwrap();
 
-    let logged_in = authenticate(&db, "admin", "old-password").unwrap().unwrap();
-    assert_eq!(logged_in.uuid, user.uuid);
-
+    assert!(
+        authenticate(&db, "admin", "old-password")
+            .unwrap()
+            .is_some()
+    );
     change_password(&db, "admin", "new-password").unwrap();
+
     let stored = db.accounts().require_by_uuid(&user.uuid).unwrap();
-    assert!(is_bcrypt_hash(&stored.passwd));
+    // Independent Go algorithm: base64(SHA-256(password + "06Wm4Jv1Hkxx")).
+    assert_eq!(
+        stored.passwd,
+        "yqyhBswdm4vh/vRYv8vY9m3+t+ZQPxLQLv0FlN6FArI="
+    );
+    assert_eq!(stored.passwd, legacy_hash_password("new-password"));
+    assert!(!is_bcrypt_hash(&stored.passwd));
     assert!(verify_password("new-password", &stored.passwd));
     assert!(
         authenticate(&db, "admin", "old-password")
@@ -48,16 +57,32 @@ fn password_change_by_uuid_reports_unknown_users() {
     db.migrate().unwrap();
     let user = db.accounts().create("alice", "password").unwrap();
 
-    let bcrypt = hash_password("another").unwrap();
     change_password_by_uuid(&db, &user.uuid, "another").unwrap();
-    assert!(verify_password(
-        "another",
-        &db.accounts().require_by_uuid(&user.uuid).unwrap().passwd
-    ));
+    let stored = db.accounts().require_by_uuid(&user.uuid).unwrap();
+    assert_eq!(stored.passwd, legacy_hash_password("another"));
 
     assert!(change_password(&db, "nobody", "pw").is_err());
     assert!(change_password_by_uuid(&db, "missing-uuid", "pw").is_err());
-    assert!(bcrypt.starts_with("$2b$"));
+    assert_eq!(
+        hash_password("admin").unwrap(),
+        legacy_hash_password("admin")
+    );
+}
+
+#[test]
+fn bcrypt_rows_are_readable_and_upgraded_to_go_hashes() {
+    let db = Db::open_in_memory().unwrap();
+    db.migrate().unwrap();
+    let mut user = User::new("legacy", "ignored");
+    // Bcrypt hash for "secret", as written by an earlier Rust build.
+    user.passwd = "$2a$10$C4Gwv0BDoZO0LFJLCMwD/OcQy61qVqTGBbvcnPh0FiTT408C69pv.".to_owned();
+    db.accounts().insert(&user).unwrap();
+
+    let logged_in = authenticate(&db, "legacy", "secret").unwrap().unwrap();
+    assert_eq!(logged_in.passwd, legacy_hash_password("secret"));
+    let stored = db.accounts().require_by_uuid(&user.uuid).unwrap();
+    assert_eq!(stored.passwd, legacy_hash_password("secret"));
+    assert!(!is_bcrypt_hash(&stored.passwd));
 }
 
 #[test]

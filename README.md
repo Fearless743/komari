@@ -86,9 +86,11 @@ komari disable-2fa [-u <username>]     # alias: disable2FA
 komari permit-login                    # alias: permitPasswordLogin
 ```
 
-`chpasswd` writes a bcrypt hash to the SQLite database and deletes all login
-sessions. Without `--username` it changes the first account, matching the Go
-command. `disable-2fa` clears one user's TOTP secret, or every user's secret
-when no username is given. `permit-login` sets `disable_password_login` to
-`false`. All three use `--database` / `KOMARI_DB_FILE` and do not create a
-missing database file.
+`chpasswd` writes the Go-compatible SHA-256 password hash
+(`base64(SHA-256(password + "06Wm4Jv1Hkxx"))`) to the SQLite database and
+deletes all login sessions, so the Go fallback can still authenticate. Without
+`--username` it changes the first account by UUID, matching the Go command.
+`disable-2fa` clears one user's TOTP secret, or every user's secret when no
+username is given. `permit-login` sets `disable_password_login` to `false`.
+`disable-2fa`/`permit-login` create and migrate a missing database like Go;
+`chpasswd` keeps Go's "Database file does not exist." message instead.

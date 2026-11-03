@@ -23,9 +23,9 @@ pub use middleware::{
     unauthorized_response,
 };
 pub use password::{
-    DEFAULT_BCRYPT_COST, authenticate, change_password, change_password_by_uuid, hash_password,
-    hash_password_with_cost, is_bcrypt_hash, legacy_hash_password, password_hash_cost,
-    verify_legacy_password, verify_password,
+    DEFAULT_BCRYPT_COST, authenticate, change_password, change_password_by_uuid,
+    hash_bcrypt_password, hash_bcrypt_password_with_cost, hash_password, is_bcrypt_hash,
+    legacy_hash_password, password_hash_cost, verify_legacy_password, verify_password,
 };
 pub use role::Role;
 pub use session::{

@@ -1,39 +1,49 @@
 //! Password hashing and verification.
 //!
-//! New passwords are hashed with bcrypt (GitHub/Gitea-style `$2b$` hashes) at
-//! the Go backend's default cost of 10. Verification accepts bcrypt `$2a$`,
-//! `$2b$`, `$2x$` and `$2y$` hashes as well as the legacy
-//! `base64(SHA-256(password + "06Wm4Jv1Hkxx"))` format used by current Go
-//! releases, so an existing `data/komari.db` keeps working during migration.
+//! **Writes always use the Go-compatible format**:
+//! `base64(SHA-256(password + "06Wm4Jv1Hkxx"))`, exactly like the Go
+//! `accounts.hashPasswd`. That guarantees a password changed by the Rust CLI
+//! can still be verified by the Go fallback binary.
+//!
+//! Verification additionally accepts bcrypt `$2a$`, `$2b$`, `$2x$` and `$2y$`
+//! rows for read-only compatibility with databases written by older Rust
+//! builds. When such a row authenticates successfully,
+//! [`authenticate`] immediately rewrites it to the Go SHA-256 format.
 
 use base64::Engine;
 use base64::engine::general_purpose::STANDARD as BASE64;
 use komari_db::{Db, LocalTime};
 use sha2::{Digest, Sha256};
-use subtle::ConstantTimeEq;
 
 use crate::error::{AuthError, Result};
 
-/// Bcrypt cost used for newly generated hashes. `golang.org/x/crypto/bcrypt`
-/// defaults to 10 as well.
+/// Bcrypt cost used by the read-only compatibility helpers.
 pub const DEFAULT_BCRYPT_COST: u32 = 10;
 
-/// Salt appended by the historical Go `accounts.hashPasswd` implementation.
+/// Salt appended by the Go `accounts.hashPasswd` implementation.
 const LEGACY_PASSWORD_SALT: &str = "06Wm4Jv1Hkxx";
 
-/// Hash a password with bcrypt at [`DEFAULT_BCRYPT_COST`].
+/// Hash a password in the Go-compatible format.
+///
+/// This is the only hash format written by this crate.
 pub fn hash_password(password: &str) -> Result<String> {
-    hash_password_with_cost(password, DEFAULT_BCRYPT_COST)
+    Ok(komari_db::util::hash_password(password))
 }
 
-/// Hash a password with an explicit bcrypt cost.
+/// Hash a password with bcrypt.
 ///
-/// Valid costs are 4 through 31, matching `golang.org/x/crypto/bcrypt`.
-pub fn hash_password_with_cost(password: &str, cost: u32) -> Result<String> {
+/// Only for compatibility tests/fixtures; never use this when writing a
+/// password row that the Go fallback must read.
+pub fn hash_bcrypt_password(password: &str) -> Result<String> {
+    hash_bcrypt_password_with_cost(password, DEFAULT_BCRYPT_COST)
+}
+
+/// Bcrypt hash with an explicit cost (4 through 31), for test fixtures.
+pub fn hash_bcrypt_password_with_cost(password: &str, cost: u32) -> Result<String> {
     Ok(bcrypt::hash(password, cost)?)
 }
 
-/// Whether a stored hash uses bcrypt (`$2a$`, `$2b$`, `$2x$` or `$2y$`).
+/// Whether a stored hash uses bcrypt.
 pub fn is_bcrypt_hash(hash: &str) -> bool {
     hash.starts_with("$2a$")
         || hash.starts_with("$2b$")
@@ -43,9 +53,8 @@ pub fn is_bcrypt_hash(hash: &str) -> bool {
 
 /// Verify a password against a stored hash.
 ///
-/// Bcrypt hashes are checked with the cost encoded in the hash. Hashes in the
-/// legacy Go SHA-256 format are still accepted. Malformed hashes simply fail
-/// verification instead of leaking an error to the caller.
+/// Bcrypt rows are accepted for compatibility, legacy Go SHA-256 rows are the
+/// normal path. Malformed hashes fail closed.
 pub fn verify_password(password: &str, hash: &str) -> bool {
     if is_bcrypt_hash(hash) {
         return bcrypt::verify(password, hash).unwrap_or(false);
@@ -53,20 +62,15 @@ pub fn verify_password(password: &str, hash: &str) -> bool {
     verify_legacy_password(password, hash)
 }
 
-/// Verify the historical `base64(SHA-256(password + salt))` format.
+/// Verify the Go `base64(SHA-256(password + salt))` format.
 pub fn verify_legacy_password(password: &str, hash: &str) -> bool {
     if hash.is_empty() {
         return false;
     }
-    let mut hasher = Sha256::new();
-    hasher.update(password.as_bytes());
-    hasher.update(LEGACY_PASSWORD_SALT.as_bytes());
-    let expected = BASE64.encode(hasher.finalize());
-    expected.as_bytes().ct_eq(hash.as_bytes()).into()
+    komari_db::util::verify_password(password, hash)
 }
 
-/// Create the legacy Go-compatible SHA-256 hash. Used by compatibility tests
-/// and by code that must inter-operate with the Go fallback.
+/// Create the Go-compatible SHA-256 hash.
 pub fn legacy_hash_password(password: &str) -> String {
     let mut hasher = Sha256::new();
     hasher.update(password.as_bytes());
@@ -74,7 +78,7 @@ pub fn legacy_hash_password(password: &str) -> String {
     BASE64.encode(hasher.finalize())
 }
 
-/// Extract the cost from a bcrypt hash.
+/// Extract the cost from a bcrypt hash (read-only compatibility helper).
 pub fn password_hash_cost(hash: &str) -> Option<u32> {
     use std::str::FromStr;
     bcrypt::HashParts::from_str(hash)
@@ -82,17 +86,13 @@ pub fn password_hash_cost(hash: &str) -> Option<u32> {
         .map(|parts| parts.get_cost())
 }
 
-/// Change a user's password by username and persist the bcrypt hash.
-///
-/// Returns an error when the username does not exist. Callers that need the
-/// Go `ForceResetPassword` behaviour can treat a missing user as an error;
-/// the CLI prints it and exits non-zero.
+/// Change a user's password by username and persist the Go SHA-256 hash.
 pub fn change_password(db: &Db, username: &str, new_password: &str) -> Result<usize> {
     let hash = hash_password(new_password)?;
     update_hash(db, "username", username, &hash)
 }
 
-/// Change a user's password by UUID and persist the bcrypt hash.
+/// Change a user's password by UUID and persist the Go SHA-256 hash.
 pub fn change_password_by_uuid(db: &Db, uuid: &str, new_password: &str) -> Result<usize> {
     let hash = hash_password(new_password)?;
     update_hash(db, "uuid", uuid, &hash)
@@ -114,29 +114,34 @@ fn update_hash(db: &Db, column: &str, value: &str, hash: &str) -> Result<usize> 
 
 /// Look up a user by username and verify the supplied password.
 ///
-/// Returns the user when the credentials match. Both bcrypt and legacy
-/// SHA-256 password rows are accepted.
+/// Successful bcrypt authentication transparently rewrites the row to the Go
+/// SHA-256 format, so the Go fallback can log in again after a downgrade.
 pub fn authenticate(
     db: &Db,
     username: &str,
     password: &str,
 ) -> Result<Option<komari_db::models::User>> {
-    let Some(user) = db.accounts().get_by_username(username)? else {
-        // Run a dummy verification so username probing is not measurably
-        // cheaper than a wrong password for an existing account.
+    let Some(mut user) = db.accounts().get_by_username(username)? else {
+        // Run a verification so username probing is not measurably cheaper.
         let _ = verify_password(password, &legacy_hash_password(password));
         return Ok(None);
     };
-    if verify_password(password, &user.passwd) {
-        Ok(Some(user))
-    } else {
-        Ok(None)
+    if !verify_password(password, &user.passwd) {
+        return Ok(None);
     }
+
+    if is_bcrypt_hash(&user.passwd) {
+        let upgraded = hash_password(password)?;
+        update_hash(db, "uuid", &user.uuid, &upgraded)?;
+        user.passwd = upgraded;
+    }
+    Ok(Some(user))
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use komari_db::models::User;
 
     // Generated with Go 1.24 and golang.org/x/crypto/bcrypt v0.39.0.
     const GO_2A_COST10_SECRET: &str =
@@ -146,6 +151,12 @@ mod tests {
     // Authentic 2y/2b fixtures from the Rust bcrypt crate's test suite.
     const CRATE_2Y_COST5: &str = "$2y$05$HlFShUxTu4ZHHfOLJwfmCeDj/kuKFKboanXtDJXxCC7aIPTUgxNDe";
     const CRATE_2B_COST4: &str = "$2b$04$EGdrhbKUv8Oc9vGiXX0HQOxSg445d458Muh7DAHskb6QbtCvdxcie";
+
+    fn database() -> Db {
+        let db = Db::open_in_memory().unwrap();
+        db.migrate().unwrap();
+        db
+    }
 
     #[test]
     fn verifies_go_generated_bcrypt_hashes() {
@@ -171,19 +182,21 @@ mod tests {
     }
 
     #[test]
-    fn hash_roundtrips_and_uses_cost_10() {
+    fn hash_password_writes_go_sha256_not_bcrypt() {
         let hash = hash_password("s3cret").unwrap();
-        assert!(hash.starts_with("$2b$10$"), "unexpected hash: {hash}");
+        assert_eq!(hash, legacy_hash_password("s3cret"));
+        assert_eq!(hash, "afNoIJvN1YwBajO9sRUt1zuHqOjGfIxEe9qKAgOKT0Y=");
+        assert!(!is_bcrypt_hash(&hash));
         assert!(verify_password("s3cret", &hash));
         assert!(!verify_password("s3creT", &hash));
-        assert_eq!(password_hash_cost(&hash), Some(10));
     }
 
     #[test]
-    fn cost_boundaries_match_go() {
-        assert!(hash_password_with_cost("pw", 4).is_ok());
-        assert!(hash_password_with_cost("pw", 3).is_err());
-        assert!(hash_password_with_cost("pw", 32).is_err());
+    fn bcrypt_helper_respects_cost_boundaries() {
+        let hash = hash_bcrypt_password_with_cost("pw", 4).unwrap();
+        assert!(hash.starts_with("$2b$04$"));
+        assert!(hash_bcrypt_password_with_cost("pw", 3).is_err());
+        assert!(hash_bcrypt_password_with_cost("pw", 32).is_err());
     }
 
     #[test]
@@ -203,5 +216,40 @@ mod tests {
         assert_eq!(legacy_hash_password("admin"), legacy);
         assert!(verify_password("admin", legacy));
         assert!(!verify_password("wrong", legacy));
+    }
+
+    #[test]
+    fn change_password_writes_the_go_hash() {
+        let db = database();
+        let user = db.accounts().create("alice", "old").unwrap();
+        change_password(&db, "alice", "new-password").unwrap();
+        let stored = db.accounts().require_by_uuid(&user.uuid).unwrap();
+        assert_eq!(
+            stored.passwd,
+            "yqyhBswdm4vh/vRYv8vY9m3+t+ZQPxLQLv0FlN6FArI="
+        );
+        assert!(!is_bcrypt_hash(&stored.passwd));
+    }
+
+    #[test]
+    fn bcrypt_row_is_upgraded_during_login() {
+        let db = database();
+        let mut user = User::new("legacy-rust", "whatever");
+        user.passwd = GO_2A_COST10_SECRET.to_owned();
+        db.accounts().insert(&user).unwrap();
+
+        let logged_in = authenticate(&db, "legacy-rust", "secret").unwrap().unwrap();
+        assert_eq!(logged_in.passwd, legacy_hash_password("secret"));
+        let stored = db.accounts().require_by_uuid(&user.uuid).unwrap();
+        assert_eq!(
+            stored.passwd,
+            "LKWZkh0XkW+IwPl4Zv7eHJmKmv2WvTk34iBzq0oefQM="
+        );
+        assert!(
+            authenticate(&db, "legacy-rust", "secret")
+                .unwrap()
+                .is_some()
+        );
+        assert!(authenticate(&db, "legacy-rust", "wrong").unwrap().is_none());
     }
 }
