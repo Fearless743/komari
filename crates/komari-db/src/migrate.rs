@@ -946,4 +946,47 @@ mod tests {
             .unwrap();
         assert_eq!(values, vec!["unique-3", "unique-4"]);
     }
+
+    #[test]
+    fn backfill_fails_after_exhausting_retries_and_rolls_back() {
+        let db = Db::open_in_memory().unwrap();
+        db.with_connection(|conn| {
+            conn.execute_batch(
+                "CREATE TABLE t (id integer PRIMARY KEY, v text);\
+                 INSERT INTO t VALUES (1, 'taken'), (2, ''), (3, '');",
+            )?;
+            Ok(())
+        })
+        .unwrap();
+
+        let mut conn = db.conn();
+        let tx = conn.transaction().unwrap();
+        let mut calls = 0;
+        let error = backfill_column(&tx, "t", "v", || {
+            calls += 1;
+            if calls == 1 {
+                "inserted".to_owned()
+            } else {
+                "taken".to_owned()
+            }
+        })
+        .unwrap_err();
+        assert!(
+            matches!(error, crate::error::DbError::InvalidData(ref message)
+                if message.contains("unique value")),
+            "unexpected error: {error}"
+        );
+
+        // Dropping without commit must roll back the first row's update.
+        drop(tx);
+        drop(conn);
+        let values: Vec<String> = db
+            .with_connection(|conn| {
+                let mut stmt = conn.prepare("SELECT v FROM t WHERE id <> 1 ORDER BY id")?;
+                let rows = stmt.query_map([], |row| row.get::<_, String>(0))?;
+                Ok(rows.collect::<rusqlite::Result<Vec<_>>>()?)
+            })
+            .unwrap();
+        assert_eq!(values, vec!["", ""]);
+    }
 }
