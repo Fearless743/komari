@@ -9,6 +9,9 @@ use std::path::Path;
 use komari_db::models::Config as LegacyConfig;
 use komari_db::{Db, LocalTime, migrate::TABLES};
 
+mod support;
+use support::TempDir;
+
 const REFERENCE_DB: &str = "/home/fearless/github/komari/komari/data/komari.db";
 
 fn reference_path() -> Option<String> {
@@ -157,4 +160,37 @@ fn reference_database_is_readable_and_has_expected_tables() {
     // deserializes when explicitly requested.
     let _legacy = LegacyConfig::default();
     let _: LocalTime = LocalTime::default();
+}
+
+#[test]
+fn migrating_a_copy_of_the_reference_database_preserves_data() {
+    let Some(path) = reference_path() else {
+        eprintln!("reference database {REFERENCE_DB} not found; skipping");
+        return;
+    };
+
+    let dir = TempDir::new("reference-copy");
+    let copy = dir.join("komari.db");
+    std::fs::copy(&path, &copy).expect("copy reference database");
+
+    let db = Db::open(&copy).expect("open copied database");
+    let before = db.config().count().unwrap();
+    let users_before = db.accounts().count().unwrap();
+    let sessions_before = db.sessions().count().unwrap();
+
+    // Running the migration twice must not drop or rewrite existing rows.
+    db.migrate().unwrap();
+    db.migrate().unwrap();
+
+    assert_eq!(db.config().count().unwrap(), before);
+    assert_eq!(db.accounts().count().unwrap(), users_before);
+    assert_eq!(db.sessions().count().unwrap(), sessions_before);
+    assert!(db.schema_is_current().unwrap());
+    if before > 0 {
+        assert!(db.config().get("sitename").unwrap().is_some());
+    }
+
+    // New writes still work on the upgraded copy.
+    let client = db.clients().create_named("compat-node").unwrap();
+    assert!(db.clients().get(&client.uuid).unwrap().is_some());
 }

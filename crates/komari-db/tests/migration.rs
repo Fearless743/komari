@@ -98,14 +98,32 @@ fn read_only_handle_can_inspect_but_not_write() {
 
 #[test]
 fn database_options_read_environment_names() {
-    let dir = TempDir::new("options");
-    let path = dir.join("env.db");
-    // `DbOptions::from_env` is testable without touching global state by
-    // checking the explicit constructor; environment mutation is intentionally
-    // avoided because tests run in parallel.
-    let options = komari_db::DbOptions::new(&path);
+    use komari_db::DbOptions;
+    use std::collections::HashMap;
+
+    let values: HashMap<&str, &str> = HashMap::from([
+        ("KOMARI_DB_TYPE", "sqlite"),
+        ("KOMARI_DB_FILE", "/tmp/x.db"),
+    ]);
+    let options =
+        DbOptions::from_env_with(|key| values.get(key).map(|value| (*value).to_owned())).unwrap();
+    assert_eq!(options.path, std::path::PathBuf::from("/tmp/x.db"));
     assert!(!options.read_only);
-    let db = Db::open_with(options).unwrap();
+
+    let options = DbOptions::from_env_with(|_| None).unwrap();
+    assert_eq!(
+        options.path,
+        std::path::PathBuf::from(komari_db::DEFAULT_DB_FILE)
+    );
+
+    let error =
+        DbOptions::from_env_with(|key| (key == "KOMARI_DB_TYPE").then(|| "mysql".to_owned()))
+            .unwrap_err();
+    assert!(matches!(error, komari_db::DbError::UnsupportedDatabase(_)));
+
+    // Creating an explicit database still works in a temp directory.
+    let dir = TempDir::new("options");
+    let db = Db::open_with(DbOptions::new(dir.join("env.db"))).unwrap();
     db.migrate().unwrap();
     assert!(db.table_exists("clients").unwrap());
 }

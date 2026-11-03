@@ -69,8 +69,13 @@ impl DbOptions {
     /// Only SQLite is implemented; asking for MySQL returns
     /// [`DbError::UnsupportedDatabase`].
     pub fn from_env() -> Result<Self> {
-        let db_type = std::env::var("KOMARI_DB_TYPE")
-            .ok()
+        Self::from_env_with(|key| std::env::var(key).ok())
+    }
+
+    /// Testable variant of [`DbOptions::from_env`] with an injectable
+    /// environment lookup.
+    pub fn from_env_with(lookup: impl Fn(&str) -> Option<String>) -> Result<Self> {
+        let db_type = lookup("KOMARI_DB_TYPE")
             .filter(|value| !value.trim().is_empty())
             .unwrap_or_else(|| "sqlite".to_owned());
         if !matches!(
@@ -80,8 +85,7 @@ impl DbOptions {
             return Err(DbError::UnsupportedDatabase(db_type));
         }
 
-        let path = std::env::var("KOMARI_DB_FILE")
-            .ok()
+        let path = lookup("KOMARI_DB_FILE")
             .filter(|value| !value.trim().is_empty())
             .unwrap_or_else(|| DEFAULT_DB_FILE.to_owned());
 
