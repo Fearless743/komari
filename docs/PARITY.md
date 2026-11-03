@@ -165,3 +165,16 @@ cargo test -p komari-jobs
 5. B04/B05/B06 合并并完成 B13 OAuth HTTP/B14 静态路由装配后，按 [API.md](API.md)
    的路由清单做端到端回归。
 6. 按 [DEPLOYMENT.md](DEPLOYMENT.md) 验证 systemd/Docker、反代 WS、备份和健康检查。
+
+## 5. B09 跨 crate 变更说明
+
+B09 的服务器装配需要少量跨 crate 改动，均为验收项所需的最小改动：
+
+- `komari-auth`：新增 `BufferedBodyLimit` / `SkipBodyBuffering`，让普通请求的
+  chunked 超限返回 413，并让 `/api/admin/upload/backup` 跳过 AuthLayer 的整包缓冲，
+  保持 B06 的流式上传。
+- `komari-config` / `komari-cli`：新增 `KOMARI_BODY_LIMIT` / `--body-limit`，用于
+  配置普通请求体上限。
+- `komari-notify`：新增 `renewal` 模块，供上线事件和每日 09:00 调度复用。
+- `komari-oauth`：仅随 main 的 B04/B06 合并同步，B09 未改变 provider 语义。
+- `docs`：更新服务器装配、OAuth、静态资源、浏览器 WS 与 body limit 状态。
