@@ -38,7 +38,7 @@ COPY --from=planner /src/recipe.json recipe.json
 # it also keeps the cook working if komari-cli gains a komari-web dependency.
 COPY crates/komari-web/defaultTheme/ /src/crates/komari-web/defaultTheme/
 ENV KOMARI_DEFAULT_THEME_DIR=/src/crates/komari-web/defaultTheme
-RUN cargo chef cook --release --locked --recipe-path recipe.json --package komari-cli
+RUN cargo chef cook --release --locked --recipe-path recipe.json --workspace
 
 # Frontend theme source, relative to the build context. The default is B14's
 # committed placeholder; CI and release builds pass a real komari-web checkout.
