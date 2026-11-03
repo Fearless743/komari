@@ -15,8 +15,11 @@ use crate::provider::{ConfigurationItem, DdnsProvider, SyncContext, SyncResult, 
 /// Default Cloudflare API base URL, overridable in tests.
 pub const CLOUDFLARE_API_BASE_URL: &str = "https://api.cloudflare.com/client/v4";
 
+/// Configuration fields that must never be returned by public APIs.
+pub const CLOUDFLARE_SENSITIVE_FIELDS: &[&str] = &["api_token", "zone_id"];
+
 /// Configuration stored in `ddns_providers.addition` for Cloudflare.
-#[derive(Clone, Debug, Default, Serialize, Deserialize)]
+#[derive(Clone, Default, Serialize, Deserialize)]
 #[serde(default)]
 pub struct CloudflareConfig {
     pub api_token: String,
@@ -25,6 +28,20 @@ pub struct CloudflareConfig {
     pub record_type: String,
     pub ttl: i64,
     pub proxied: bool,
+}
+
+impl std::fmt::Debug for CloudflareConfig {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter
+            .debug_struct("CloudflareConfig")
+            .field("api_token", &"<redacted>")
+            .field("zone_id", &"<redacted>")
+            .field("record_id", &self.record_id)
+            .field("record_type", &self.record_type)
+            .field("ttl", &self.ttl)
+            .field("proxied", &self.proxied)
+            .finish()
+    }
 }
 
 /// Cloudflare DDNS provider.
@@ -99,6 +116,10 @@ impl DdnsProvider for CloudflareProvider {
                 .item_type("bool")
                 .default_value("false"),
         ]
+    }
+
+    fn sensitive_fields(&self) -> &'static [&'static str] {
+        CLOUDFLARE_SENSITIVE_FIELDS
     }
 
     async fn sync(&self, context: &SyncContext) -> Result<SyncResult, DdnsError> {

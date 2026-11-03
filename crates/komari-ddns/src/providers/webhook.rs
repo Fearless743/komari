@@ -16,8 +16,12 @@ use crate::provider::{ConfigurationItem, DdnsProvider, SyncContext, SyncResult, 
 /// Body template offered by the admin UI when the field is first rendered.
 pub const DEFAULT_BODY: &str = r#"{"client_uuid":"{{client_uuid}}","client_name":"{{client_name}}","ipv4":"{{ipv4}}","ipv6":"{{ipv6}}","triggered_by":"{{triggered_by}}"}"#;
 
+/// Configuration fields that must never be returned by public APIs. The URL
+/// is additionally removed by the redaction helper when it embeds credentials.
+pub const WEBHOOK_SENSITIVE_FIELDS: &[&str] = &["headers", "body"];
+
 /// Configuration stored in `ddns_providers.addition` for a webhook.
-#[derive(Clone, Debug, Default, Serialize, Deserialize)]
+#[derive(Clone, Default, Serialize, Deserialize)]
 #[serde(default)]
 pub struct WebhookConfig {
     pub url: String,
@@ -26,6 +30,25 @@ pub struct WebhookConfig {
     pub headers: String,
     pub body: String,
     pub response_json_path: String,
+}
+
+impl std::fmt::Debug for WebhookConfig {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        let url = if crate::redaction::url_contains_credentials(&self.url) {
+            "<redacted>"
+        } else {
+            self.url.as_str()
+        };
+        formatter
+            .debug_struct("WebhookConfig")
+            .field("url", &url)
+            .field("method", &self.method)
+            .field("content_type", &self.content_type)
+            .field("headers", &"<redacted>")
+            .field("body", &"<redacted>")
+            .field("response_json_path", &self.response_json_path)
+            .finish()
+    }
 }
 
 /// Webhook DDNS provider.
@@ -91,6 +114,10 @@ impl DdnsProvider for WebhookProvider {
             ConfigurationItem::new("response_json_path")
                 .help("JSON path to extract record_id from response, e.g. data.record_id"),
         ]
+    }
+
+    fn sensitive_fields(&self) -> &'static [&'static str] {
+        WEBHOOK_SENSITIVE_FIELDS
     }
 
     async fn sync(&self, context: &SyncContext) -> Result<SyncResult, DdnsError> {

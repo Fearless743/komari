@@ -126,6 +126,12 @@ pub trait DdnsProvider: Send + Sync {
         Vec::new()
     }
 
+    /// Fields in `configuration()` that must be removed from public API
+    /// responses. The database keeps them unchanged.
+    fn sensitive_fields(&self) -> &'static [&'static str] {
+        &[]
+    }
+
     /// Validate and prepare the provider. Called after `set_configuration`.
     fn init(&mut self) -> Result<(), DdnsError> {
         Ok(())
