@@ -23,7 +23,7 @@ use komari_db::Db;
 use komari_oauth::{
     AccountLinker, CallbackQuery, CallbackRequest, OAuthError, OAuthProvider, SsoIdentity,
 };
-use serde_json::json;
+use serde_json::{Value, json};
 
 /// Name of the state cookie used by the Go backend.
 pub const OAUTH_STATE_COOKIE: &str = "oauth_state";
@@ -204,8 +204,9 @@ async fn oauth_callback(
     let clear_state = format!("{OAUTH_STATE_COOKIE}=; Path=/; Max-Age=0; HttpOnly");
 
     let Some(provider) = state.runtime.current() else {
-        return error_response(
+        return json_error(
             StatusCode::INTERNAL_SERVER_ERROR,
+            "error",
             "OAuth provider is not initialized",
             std::slice::from_ref(&clear_state),
         );
@@ -214,15 +215,17 @@ async fn oauth_callback(
     let query_state = query.get("state").map(String::as_str);
     if provider.skip_query_state_check() {
         if state_cookie.is_empty() {
-            return error_response(
+            return json_error(
                 StatusCode::BAD_REQUEST,
+                "error",
                 "Invalid state",
                 std::slice::from_ref(&clear_state),
             );
         }
     } else if state_cookie.is_empty() || query_state != Some(state_cookie.as_str()) {
-        return error_response(
+        return json_error(
             StatusCode::BAD_REQUEST,
+            "error",
             "Invalid state",
             std::slice::from_ref(&clear_state),
         );
@@ -244,8 +247,9 @@ async fn oauth_callback(
         Ok(user) => user,
         Err(error) => {
             tracing::warn!(%error, "OAuth callback failed");
-            return error_response(
+            return json_error(
                 StatusCode::INTERNAL_SERVER_ERROR,
+                "error",
                 &format!("Failed to get user info: {error}"),
                 std::slice::from_ref(&clear_state),
             );
@@ -273,15 +277,17 @@ async fn oauth_callback(
             .is_some_and(|validation| validation.user.uuid == binding_uuid);
         let clear_binding = format!("{BINDING_COOKIE}=; Path=/; Max-Age=0; HttpOnly");
         if !valid {
-            return error_response(
+            return json_error(
                 StatusCode::INTERNAL_SERVER_ERROR,
+                "message",
                 "Binding failed",
                 &[clear_state.clone(), clear_binding],
             );
         }
         if linker.bind(&binding_uuid, &identity).is_err() {
-            return error_response(
+            return json_error(
                 StatusCode::INTERNAL_SERVER_ERROR,
+                "message",
                 "Binding failed",
                 &[clear_state.clone(), clear_binding],
             );
@@ -289,7 +295,10 @@ async fn oauth_callback(
         let _ = state.db.logs().log(
             &ip,
             &binding_uuid,
-            format!("bound external account (OAuth),sso_id: {}", identity.combined_id()),
+            format!(
+                "bound external account (OAuth),sso_id: {}",
+                identity.combined_id()
+            ),
             "login",
         );
         return redirect_with_cookies(
@@ -304,16 +313,18 @@ async fn oauth_callback(
     let session_user = match linker.login(&identity) {
         Ok(user) => user,
         Err(OAuthError::AccountNotBound) => {
-            return error_response(
+            return json_error(
                 StatusCode::UNAUTHORIZED,
+                "message",
                 "please log in and bind your external account first.",
                 std::slice::from_ref(&clear_state),
             );
         }
         Err(error) => {
             tracing::warn!(%error, "OAuth account lookup failed");
-            return error_response(
+            return json_error(
                 StatusCode::INTERNAL_SERVER_ERROR,
+                "message",
                 &error.to_string(),
                 std::slice::from_ref(&clear_state),
             );
@@ -331,23 +342,21 @@ async fn oauth_callback(
         Ok(session) => session,
         Err(error) => {
             tracing::warn!(%error, "failed to create OAuth session");
-            return error_response(
+            return json_error(
                 StatusCode::INTERNAL_SERVER_ERROR,
+                "message",
                 &error.to_string(),
                 std::slice::from_ref(&clear_state),
             );
         }
     };
 
-    let _ = state.db.logs().log(
-        &ip,
-        &session_user.uuid,
-        "logged in (OAuth)",
-        "login",
-    );
-    let session_cookie = format!(
-        "{SESSION_COOKIE}={session}; Path=/; Max-Age={SESSION_MAX_AGE}; HttpOnly"
-    );
+    let _ = state
+        .db
+        .logs()
+        .log(&ip, &session_user.uuid, "logged in (OAuth)", "login");
+    let session_cookie =
+        format!("{SESSION_COOKIE}={session}; Path=/; Max-Age={SESSION_MAX_AGE}; HttpOnly");
     redirect_with_cookies("/admin", &[clear_state, session_cookie])
 }
 
@@ -415,9 +424,11 @@ impl Cookies {
     }
 }
 
-fn error_response(status: StatusCode, message: &str, cookies: &[String]) -> Response {
-    let mut response =
-        (status, Json(json!({"status": "error", "message": message}))).into_response();
+fn json_error(status: StatusCode, field: &str, message: &str, cookies: &[String]) -> Response {
+    let mut body = serde_json::Map::new();
+    body.insert("status".to_owned(), json!("error"));
+    body.insert(field.to_owned(), json!(message));
+    let mut response = (status, Json(Value::Object(body))).into_response();
     for cookie in cookies {
         append_cookie(&mut response, cookie);
     }
