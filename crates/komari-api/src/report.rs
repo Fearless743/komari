@@ -327,9 +327,14 @@ pub fn aggregate_reports(
             .collect(),
     );
 
-    // Totals are static capacities; Go reads them from the first element of
-    // the (repeatedly sorted) slice. Use the newest sample for deterministic
-    // output.
+    // Go's `AverageReport` sorts the slice once per metric; the final sort is
+    // Connections.UDP descending, so `records[0]` is the sample with the
+    // highest UDP connection count. Take static capacities from that sample.
+    let totals_source = reports
+        .iter()
+        .max_by_key(|report| report.connections.udp)
+        .cloned()
+        .unwrap_or_default();
     let latest = reports.last().cloned().unwrap_or_default();
     let gpu_detail = aggregate_gpu_reports(reports, top_percentage).map(|mut detail| {
         detail.average_usage = gpu;
@@ -345,11 +350,11 @@ pub fn aggregate_reports(
             usage: cpu,
         },
         ram: RamReport {
-            total: latest.ram.total,
+            total: totals_source.ram.total,
             used: ram,
         },
         swap: RamReport {
-            total: latest.swap.total,
+            total: totals_source.swap.total,
             used: swap,
         },
         load: LoadReport {
@@ -358,7 +363,7 @@ pub fn aggregate_reports(
             load15: latest.load.load15,
         },
         disk: DiskReport {
-            total: latest.disk.total,
+            total: totals_source.disk.total,
             used: disk,
         },
         network: NetworkReport {
@@ -535,6 +540,46 @@ mod tests {
         let aggregate = aggregate_reports("client", &reports, LocalTime::now(), 0.3);
         // int(3 * 0.3) == 0, clamped to one sample: the highest CPU value.
         assert!((aggregate.cpu.usage - 90.0).abs() < f64::EPSILON);
+    }
+
+    #[test]
+    fn totals_come_from_the_highest_udp_sample() {
+        let low_udp = Report {
+            ram: RamReport {
+                total: 100,
+                used: 10,
+            },
+            swap: RamReport {
+                total: 200,
+                used: 0,
+            },
+            disk: DiskReport {
+                total: 300,
+                used: 1,
+            },
+            connections: ConnectionsReport { tcp: 1, udp: 1 },
+            ..Report::default()
+        };
+        let high_udp = Report {
+            ram: RamReport {
+                total: 1000,
+                used: 10,
+            },
+            swap: RamReport {
+                total: 2000,
+                used: 0,
+            },
+            disk: DiskReport {
+                total: 3000,
+                used: 1,
+            },
+            connections: ConnectionsReport { tcp: 1, udp: 9 },
+            ..Report::default()
+        };
+        let aggregate = aggregate_reports("client", &[low_udp, high_udp], LocalTime::now(), 0.3);
+        assert_eq!(aggregate.ram.total, 1000);
+        assert_eq!(aggregate.swap.total, 2000);
+        assert_eq!(aggregate.disk.total, 3000);
     }
 
     #[test]
