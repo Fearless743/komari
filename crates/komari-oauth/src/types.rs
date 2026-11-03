@@ -10,7 +10,7 @@ use serde::{Deserialize, Serialize};
 use crate::accounts::SsoIdentity;
 
 /// The result of building an authorization URL.
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, PartialEq, Eq)]
 pub struct AuthorizationRequest {
     /// URL the browser must be redirected to.
     pub url: String,
@@ -24,11 +24,11 @@ pub struct AuthorizationRequest {
 /// JWT itself).
 #[derive(Clone, Default, PartialEq, Serialize, Deserialize)]
 pub struct TokenSet {
-    #[serde(default)]
+    #[serde(default, skip_serializing)]
     pub access_token: String,
     #[serde(default)]
     pub token_type: String,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[serde(default, skip_serializing)]
     pub refresh_token: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub expires_in: Option<u64>,
@@ -36,7 +36,7 @@ pub struct TokenSet {
     pub expires_at: Option<DateTime<Utc>>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub scope: Option<String>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[serde(default, skip_serializing)]
     pub id_token: Option<String>,
     /// Provider-specific payload kept in memory only. It is never serialized
     /// or logged.
@@ -100,7 +100,7 @@ impl TokenSet {
 }
 
 /// Provider-neutral user information.
-#[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
+#[derive(Clone, Default, PartialEq, Serialize, Deserialize)]
 pub struct UserInfo {
     /// Provider-specific immutable subject identifier.
     pub subject: String,
@@ -118,12 +118,13 @@ pub struct UserInfo {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub open_id: Option<String>,
     /// Raw provider payload, useful to the API layer for display purposes.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
+    /// It is never serialized and its `Debug` output is omitted.
+    #[serde(skip)]
     pub raw: Option<serde_json::Value>,
 }
 
 /// A user resolved by a provider callback.
-#[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
+#[derive(Clone, Default, PartialEq, Serialize, Deserialize)]
 pub struct OAuthUser {
     /// Registered provider name (`generic`, `github`, `qq` or
     /// `CloudflareAccess`), matching the Go factory names.
@@ -147,7 +148,9 @@ pub struct OAuthUser {
     /// serialized by default.
     #[serde(skip)]
     pub tokens: Option<TokenSet>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
+    /// Raw provider payload. It is never serialized and its `Debug` output is
+    /// omitted.
+    #[serde(skip)]
     pub raw: Option<serde_json::Value>,
 }
 
@@ -168,7 +171,7 @@ impl OAuthUser {
             union_id: info.union_id,
             open_id: info.open_id,
             tokens,
-            raw: info.raw,
+            raw: info.raw.map(sanitize_raw),
         }
     }
 
@@ -176,6 +179,92 @@ impl OAuthUser {
     /// Go backend's `fmt.Sprintf("%s_%s", providerName, userId)` convention.
     pub fn identity(&self) -> SsoIdentity {
         SsoIdentity::new(self.provider.clone(), self.subject.clone())
+    }
+}
+
+impl std::fmt::Debug for AuthorizationRequest {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        let mut secrets = vec![self.state.as_str()];
+        if let Some(verifier) = self.pkce_verifier.as_deref() {
+            secrets.push(verifier);
+        }
+        formatter
+            .debug_struct("AuthorizationRequest")
+            .field("url", &crate::error::redact_secrets(&self.url, &secrets))
+            .field("state", &"********")
+            .field(
+                "pkce_verifier",
+                &self
+                    .pkce_verifier
+                    .as_deref()
+                    .map(crate::error::debug_secret),
+            )
+            .finish()
+    }
+}
+
+impl std::fmt::Debug for UserInfo {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter
+            .debug_struct("UserInfo")
+            .field("subject", &self.subject)
+            .field("username", &self.username)
+            .field("email", &self.email)
+            .field("email_verified", &self.email_verified)
+            .field("avatar", &self.avatar)
+            .field("union_id", &self.union_id)
+            .field("open_id", &self.open_id)
+            .finish_non_exhaustive()
+    }
+}
+
+impl std::fmt::Debug for OAuthUser {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter
+            .debug_struct("OAuthUser")
+            .field("provider", &self.provider)
+            .field("subject", &self.subject)
+            .field("username", &self.username)
+            .field("email", &self.email)
+            .field("email_verified", &self.email_verified)
+            .field("avatar", &self.avatar)
+            .field("union_id", &self.union_id)
+            .field("open_id", &self.open_id)
+            .field("tokens", &self.tokens)
+            .finish_non_exhaustive()
+    }
+}
+
+const SENSITIVE_RAW_KEYS: &[&str] = &[
+    "access_token",
+    "refresh_token",
+    "id_token",
+    "client_secret",
+    "app_key",
+    "appkey",
+    "code",
+];
+
+/// Recursively replace token/secret values in a provider payload.
+///
+/// Provider payloads are retained for display/diagnostics, but they must never
+/// carry credentials. This runs before a payload is stored in
+/// [`UserInfo::raw`] or [`OAuthUser::raw`].
+pub(crate) fn sanitize_raw(value: serde_json::Value) -> serde_json::Value {
+    match value {
+        serde_json::Value::Object(values) => values
+            .into_iter()
+            .map(|(key, value)| {
+                let key_lower = key.to_ascii_lowercase();
+                if SENSITIVE_RAW_KEYS.contains(&key_lower.as_str()) {
+                    (key, serde_json::Value::String("********".to_owned()))
+                } else {
+                    (key, sanitize_raw(value))
+                }
+            })
+            .collect(),
+        serde_json::Value::Array(values) => values.into_iter().map(sanitize_raw).collect(),
+        other => other,
     }
 }
 
@@ -206,4 +295,82 @@ pub struct ExchangeRequest<'a> {
     pub pkce_verifier: Option<&'a str>,
     pub nonce: Option<&'a str>,
     pub query: &'a CallbackQuery,
+}
+
+#[cfg(test)]
+mod tests {
+    use serde_json::json;
+
+    use super::{AuthorizationRequest, OAuthUser, TokenSet, UserInfo};
+
+    fn token_set() -> TokenSet {
+        TokenSet {
+            access_token: "access-123".to_owned(),
+            token_type: "Bearer".to_owned(),
+            refresh_token: Some("refresh-456".to_owned()),
+            id_token: Some("jwt-789".to_owned()),
+            raw: Some(json!({
+                "access_token": "raw-token",
+                "nested": {"id_token": "nested-token"}
+            })),
+            ..TokenSet::default()
+        }
+    }
+
+    #[test]
+    fn token_set_serialization_and_debug_hide_tokens() {
+        let tokens = token_set();
+        let json = serde_json::to_string(&tokens).unwrap();
+        assert!(!json.contains("access-123"));
+        assert!(!json.contains("refresh-456"));
+        assert!(!json.contains("jwt-789"));
+        assert!(!json.contains("raw-token"));
+
+        let debug = format!("{tokens:?}");
+        assert!(!debug.contains("access-123"));
+        assert!(!debug.contains("refresh-456"));
+        assert!(!debug.contains("jwt-789"));
+        assert!(debug.contains("********"));
+    }
+
+    #[test]
+    fn user_payloads_do_not_serialize_or_debug_raw_tokens() {
+        let info = UserInfo {
+            subject: "user-1".to_owned(),
+            raw: Some(json!({
+                "access_token": "raw-token",
+                "name": "Alice"
+            })),
+            ..UserInfo::default()
+        };
+        let json = serde_json::to_string(&info).unwrap();
+        assert!(!json.contains("raw-token"));
+        assert!(!json.contains("raw"));
+
+        let user = OAuthUser::from_user_info("qq", info, Some(token_set()));
+        let json = serde_json::to_string(&user).unwrap();
+        assert!(!json.contains("raw-token"));
+        assert!(!json.contains("access-123"));
+        let debug = format!("{user:?}");
+        assert!(!debug.contains("raw-token"));
+        assert!(!debug.contains("access-123"));
+
+        let raw = user.raw.unwrap();
+        assert_eq!(raw["access_token"], "********");
+        assert_eq!(raw["name"], "Alice");
+    }
+
+    #[test]
+    fn authorization_request_debug_hides_state_and_verifier() {
+        let request = AuthorizationRequest {
+            url: "https://idp.example/authorize?state=state-123&code_challenge=challenge"
+                .to_owned(),
+            state: "state-123".to_owned(),
+            pkce_verifier: Some("verifier-456".to_owned()),
+        };
+        let debug = format!("{request:?}");
+        assert!(!debug.contains("state-123"));
+        assert!(!debug.contains("verifier-456"));
+        assert!(debug.contains("challenge"));
+    }
 }

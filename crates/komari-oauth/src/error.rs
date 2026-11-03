@@ -76,6 +76,11 @@ pub enum OAuthError {
     #[error("database error: {0}")]
     Database(#[from] komari_db::DbError),
 
+    /// No local account is bound to this external identity. The API layer
+    /// should return 401 and ask the user to bind first, matching Go.
+    #[error("please log in and bind your external account first.")]
+    AccountNotBound,
+
     /// The external identity is already bound to a different local account.
     #[error("external account is already bound to another user")]
     AlreadyBound,
@@ -150,7 +155,62 @@ pub fn redact_secrets(message: &str, secrets: &[&str]) -> String {
     ] {
         result = redact_query_parameter(&result, parameter);
     }
-    result
+    redact_json_document(&result)
+}
+
+fn redact_json_document(input: &str) -> String {
+    let Some(start) = input.find(['{', '[']) else {
+        return input.to_owned();
+    };
+    let Some(end) = input.rfind(['}', ']']) else {
+        return input.to_owned();
+    };
+    if start >= end {
+        return input.to_owned();
+    }
+    let document = &input[start..=end];
+    let Ok(mut value) = serde_json::from_str::<serde_json::Value>(document) else {
+        return input.to_owned();
+    };
+    redact_json_value(&mut value);
+    let Ok(redacted) = serde_json::to_string(&value) else {
+        return input.to_owned();
+    };
+    format!("{}{}{}", &input[..start], redacted, &input[end + 1..])
+}
+
+fn redact_json_value(value: &mut serde_json::Value) {
+    match value {
+        serde_json::Value::Object(values) => {
+            for (key, value) in values.iter_mut() {
+                if is_sensitive_json_key(key) {
+                    *value = serde_json::Value::String("********".to_owned());
+                } else {
+                    redact_json_value(value);
+                }
+            }
+        }
+        serde_json::Value::Array(values) => {
+            for value in values {
+                redact_json_value(value);
+            }
+        }
+        _ => {}
+    }
+}
+
+fn is_sensitive_json_key(key: &str) -> bool {
+    matches!(
+        key.to_ascii_lowercase().as_str(),
+        "access_token"
+            | "refresh_token"
+            | "id_token"
+            | "client_secret"
+            | "app_key"
+            | "appkey"
+            | "secret"
+            | "code"
+    )
 }
 
 fn redact_query_parameter(input: &str, parameter: &str) -> String {
@@ -198,6 +258,18 @@ mod tests {
         assert!(!redacted.contains("qq-key"));
         assert!(!redacted.contains("tok-123"));
         assert!(!redacted.contains("jwt-456"));
+        assert!(redacted.contains("********"));
+    }
+
+    #[test]
+    fn redacts_json_token_and_secret_values() {
+        let message = r#"HTTP 400: {"error":"invalid_grant","access_token":"tok-123","refresh_token":"ref-456","client_secret":"s3cr3t","nested":{"id_token":"jwt-789"}}"#;
+        let redacted = redact_secrets(message, &[]);
+        assert!(redacted.contains("invalid_grant"));
+        assert!(!redacted.contains("tok-123"));
+        assert!(!redacted.contains("ref-456"));
+        assert!(!redacted.contains("s3cr3t"));
+        assert!(!redacted.contains("jwt-789"));
         assert!(redacted.contains("********"));
     }
 }

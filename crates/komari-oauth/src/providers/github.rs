@@ -16,7 +16,7 @@ use crate::http::{json_response, parse_token_set, string_field, value_to_string}
 use crate::provider::OAuthProvider;
 use crate::redirect::checked_redirect_uri;
 use crate::state::StateStore;
-use crate::types::{AuthorizationRequest, ExchangeRequest, TokenSet, UserInfo};
+use crate::types::{AuthorizationRequest, ExchangeRequest, TokenSet, UserInfo, sanitize_raw};
 
 const GITHUB_AUTHORIZE_URL: &str = "https://github.com/login/oauth/authorize";
 const GITHUB_TOKEN_URL: &str = "https://github.com/login/oauth/access_token";
@@ -225,7 +225,7 @@ impl OAuthProvider for GithubProvider {
             avatar: string_field(&value, "avatar_url"),
             union_id: None,
             open_id: None,
-            raw: Some(value),
+            raw: Some(sanitize_raw(value)),
         })
     }
 }

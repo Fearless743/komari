@@ -20,7 +20,7 @@ use crate::error::{OAuthError, Result};
 pub const DEFAULT_STATE_TTL: Duration = Duration::from_secs(5 * 60);
 
 /// One pending authorization request.
-#[derive(Clone, Debug)]
+#[derive(Clone)]
 pub struct StateEntry {
     pub redirect_uri: String,
     pub pkce_verifier: Option<String>,
@@ -28,11 +28,40 @@ pub struct StateEntry {
     created_at: Instant,
 }
 
+impl std::fmt::Debug for StateEntry {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter
+            .debug_struct("StateEntry")
+            .field("redirect_uri", &self.redirect_uri)
+            .field(
+                "pkce_verifier",
+                &self
+                    .pkce_verifier
+                    .as_deref()
+                    .map(crate::error::debug_secret),
+            )
+            .field(
+                "nonce",
+                &self.nonce.as_deref().map(crate::error::debug_secret),
+            )
+            .finish_non_exhaustive()
+    }
+}
+
 /// Thread-safe state store with a fixed TTL.
-#[derive(Debug)]
 pub struct StateStore {
     ttl: Duration,
     entries: Mutex<HashMap<String, StateEntry>>,
+}
+
+impl std::fmt::Debug for StateStore {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter
+            .debug_struct("StateStore")
+            .field("ttl", &self.ttl)
+            .field("entries", &self.len())
+            .finish()
+    }
 }
 
 impl Default for StateStore {
@@ -129,10 +158,20 @@ impl StateStore {
 }
 
 /// A PKCE verifier/challenge pair (RFC 7636, `S256`).
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, PartialEq, Eq)]
 pub struct Pkce {
     pub verifier: String,
     pub challenge: String,
+}
+
+impl std::fmt::Debug for Pkce {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter
+            .debug_struct("Pkce")
+            .field("verifier", &crate::error::debug_secret(&self.verifier))
+            .field("challenge", &self.challenge)
+            .finish()
+    }
 }
 
 impl Pkce {
@@ -199,5 +238,30 @@ mod tests {
         let pkce = Pkce::generate();
         assert_eq!(pkce.verifier.len(), 64);
         assert_eq!(pkce.challenge.len(), 43);
+    }
+
+    #[test]
+    fn debug_output_hides_state_and_pkce_verifier() {
+        let store = StateStore::default();
+        let state = store.issue(
+            "https://app.example/callback",
+            Some("verifier-secret".to_owned()),
+            Some("nonce-secret".to_owned()),
+        );
+        let store_debug = format!("{store:?}");
+        assert!(!store_debug.contains(&state));
+        assert!(!store_debug.contains("verifier-secret"));
+
+        let entry = store
+            .consume(&state, "https://app.example/callback")
+            .unwrap();
+        let entry_debug = format!("{entry:?}");
+        assert!(!entry_debug.contains("verifier-secret"));
+        assert!(!entry_debug.contains("nonce-secret"));
+
+        let pkce = Pkce::generate();
+        let pkce_debug = format!("{pkce:?}");
+        assert!(!pkce_debug.contains(&pkce.verifier));
+        assert!(pkce_debug.contains(&pkce.challenge));
     }
 }

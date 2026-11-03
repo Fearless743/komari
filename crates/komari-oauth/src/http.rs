@@ -4,7 +4,7 @@ use reqwest::Response;
 use serde_json::Value;
 
 use crate::error::{OAuthError, Result, redact_secrets};
-use crate::types::TokenSet;
+use crate::types::{TokenSet, sanitize_raw};
 
 /// Read a response body as JSON, turning non-2xx responses and parse errors
 /// into redacted [`OAuthError`]s.
@@ -17,12 +17,41 @@ pub async fn json_response(response: Response, secrets: &[&str]) -> Result<Value
     if !status.is_success() {
         return Err(OAuthError::Http(format!(
             "HTTP {status}: {}",
-            redact_secrets(&body, secrets)
+            summarize_error_body(&body, secrets)
         )));
     }
     serde_json::from_str(&body).map_err(|error| {
         OAuthError::InvalidResponse(format!("{error}: {}", redact_secrets(&body, secrets)))
     })
+}
+
+/// Keep only safe diagnostic fields from an error response.
+///
+/// Provider error bodies often repeat the access token or client secret. Only
+/// `error`, `error_description`, `error_uri`, `message` and `msg` are retained;
+/// everything else is replaced by the redacted body.
+fn summarize_error_body(body: &str, secrets: &[&str]) -> String {
+    let Ok(value) = serde_json::from_str::<Value>(body) else {
+        return redact_secrets(body, secrets);
+    };
+    let Some(object) = value.as_object() else {
+        return redact_secrets(body, secrets);
+    };
+    let mut parts = Vec::new();
+    for key in ["error", "error_description", "error_uri", "message", "msg"] {
+        if let Some(value) = object.get(key) {
+            let text = match value {
+                Value::String(text) => text.clone(),
+                other => other.to_string(),
+            };
+            parts.push(format!("{key}={}", redact_secrets(&text, secrets)));
+        }
+    }
+    if parts.is_empty() {
+        redact_secrets(body, secrets)
+    } else {
+        parts.join(", ")
+    }
 }
 
 /// Parse a token endpoint response.
@@ -67,7 +96,7 @@ pub fn parse_token_set(value: &Value, secrets: &[&str]) -> Result<TokenSet> {
         expires_at: None,
         scope: string_field(value, "scope"),
         id_token: string_field(value, "id_token"),
-        raw: Some(value.clone()),
+        raw: Some(sanitize_raw(value.clone())),
         id_token_claims: None,
     }
     .with_expiry_from_now())
