@@ -159,6 +159,12 @@ differs from the host. Same-OS cross builds (for example macOS x86_64 on Apple
 Silicon) use the native cargo/linker, matching the CI matrix. A `CROSS`
 override can force `cargo` or another runner.
 
+`Cross.toml` forwards `KOMARI_VERSION`, `KOMARI_VERSION_HASH`,
+`KOMARI_DEFAULT_THEME_DIR` and `CARGO_PROFILE_RELEASE_STRIP` into the cross
+container; cross does not pass arbitrary environment variables by default.
+Without that, musl builds would lose the injected version, the relative theme
+path and the strip setting.
+
 ## Cross-compilation
 
 Release artifacts use these targets:
