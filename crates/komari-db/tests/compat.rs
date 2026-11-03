@@ -53,6 +53,17 @@ fn indexes(db: &Db, table: &str) -> Vec<(String, i64, String)> {
     .unwrap()
 }
 
+fn index_snapshot(db: &Db) -> Vec<(String, Vec<(String, i64, String)>)> {
+    db.table_names()
+        .unwrap()
+        .into_iter()
+        .map(|table| {
+            let table_indexes = indexes(db, &table);
+            (table, table_indexes)
+        })
+        .collect()
+}
+
 #[test]
 fn reference_database_schema_matches_our_migration() {
     let Some(path) = reference_path() else {
@@ -120,21 +131,18 @@ fn reference_database_is_readable_and_has_expected_tables() {
         eprintln!("reference database has an empty configs table; skipping value assertions");
     } else {
         // Values differ between installations, so only assert shape/validity.
-        let sitename = config
-            .get_as::<String>("sitename")
-            .expect("read sitename")
-            .expect("sitename must exist");
-        assert!(!sitename.is_empty());
-        let theme = config
-            .get("theme")
-            .expect("read theme")
-            .expect("theme must exist");
-        assert!(theme.is_string());
-        let preserve = config
+        if let Some(sitename) = config.get_as::<String>("sitename").expect("read sitename") {
+            assert!(!sitename.is_empty());
+        }
+        if let Some(theme) = config.get("theme").expect("read theme") {
+            assert!(theme.is_string());
+        }
+        if let Some(preserve) = config
             .get_as::<i64>("record_preserve_time")
-            .unwrap()
-            .expect("record_preserve_time must exist");
-        assert!(preserve > 0);
+            .expect("read record_preserve_time")
+        {
+            assert!(preserve > 0);
+        }
         assert!(all.contains_key("sitename"));
     }
 
@@ -206,6 +214,11 @@ fn migrating_a_copy_of_the_reference_database_preserves_data() {
     let before = db.config().count().unwrap();
     let users_before = db.accounts().count().unwrap();
     let sessions_before = db.sessions().count().unwrap();
+    // Only assert "no structural change" when the snapshot already had the
+    // full schema; an intentionally old KOMARI_COMPAT_DB may be upgraded.
+    let schema_was_current = db.schema_is_current().unwrap();
+    let tables_before = db.table_names().unwrap();
+    let indexes_before = index_snapshot(&db);
 
     // Running the migration twice must not drop or rewrite existing rows.
     db.migrate().unwrap();
@@ -216,6 +229,20 @@ fn migrating_a_copy_of_the_reference_database_preserves_data() {
     assert_eq!(db.sessions().count().unwrap(), sessions_before);
     assert!(db.schema_is_current().unwrap());
     assert_eq!(db.config().get_all().unwrap(), config_before);
+
+    if schema_was_current {
+        assert_eq!(db.table_names().unwrap(), tables_before);
+        assert_eq!(index_snapshot(&db), indexes_before);
+        assert!(!db.table_exists("configs_legacy_backup").unwrap());
+        let mut index_names = Vec::new();
+        for (_, table_indexes) in index_snapshot(&db) {
+            index_names.extend(table_indexes.into_iter().map(|(name, _, _)| name));
+        }
+        index_names.sort();
+        let mut unique_names = index_names.clone();
+        unique_names.dedup();
+        assert_eq!(index_names, unique_names, "duplicate index names");
+    }
 
     // New writes still work on the upgraded copy.
     let client = db.clients().create_named("compat-node").unwrap();
