@@ -179,11 +179,12 @@ pub(crate) async fn upload_backup(
     }
 
     audit(&state, &admin, "upload backup", "warn");
-    // Go returns a top-level message and the fixed `./data/backup.zip` path.
+    // Return the real data-directory path; `--database`/custom data dirs may
+    // move it away from Go's fixed `./data/backup.zip` spelling.
     axum::Json(json!({
         "status": "success",
         "message": "Backup uploaded successfully. The service will restart and apply the backup.",
-        "path": "./data/backup.zip",
+        "path": path.to_string_lossy(),
     }))
     .into_response()
 }
