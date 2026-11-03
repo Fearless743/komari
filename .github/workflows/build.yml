@@ -1,0 +1,202 @@
+name: Build
+
+on:
+  push:
+    branches:
+      - main
+  pull_request:
+    branches:
+      - main
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: build-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  CARGO_TERM_COLOR: always
+  RUST_BACKTRACE: 1
+
+jobs:
+  lint:
+    name: Format and Clippy
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Rust
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt, clippy
+
+      - name: Cache Cargo
+        uses: Swatinem/rust-cache@v2
+
+      - name: Check formatting
+        run: cargo fmt --all -- --check
+
+      - name: Run Clippy
+        run: cargo clippy --workspace --all-targets --locked -- -D warnings
+
+  test:
+    name: Test
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Rust
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Cache Cargo
+        uses: Swatinem/rust-cache@v2
+
+      - name: Run tests
+        run: cargo test --workspace --locked
+
+  build:
+    name: Build ${{ matrix.name }}
+    needs:
+      - lint
+      - test
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - name: linux-amd64
+            os: ubuntu-latest
+            target: x86_64-unknown-linux-musl
+            use_cross: true
+            extension: ""
+          - name: linux-arm64
+            os: ubuntu-latest
+            target: aarch64-unknown-linux-musl
+            use_cross: true
+            extension: ""
+          # macos-14 is Apple Silicon; both macOS targets can be built there
+          # because the Xcode SDK ships the x86_64 slice as well.
+          - name: darwin-amd64
+            os: macos-14
+            target: x86_64-apple-darwin
+            use_cross: false
+            extension: ""
+          - name: darwin-arm64
+            os: macos-14
+            target: aarch64-apple-darwin
+            use_cross: false
+            extension: ""
+          - name: windows-amd64
+            os: windows-latest
+            target: x86_64-pc-windows-msvc
+            use_cross: false
+            extension: ".exe"
+    env:
+      # Match the Go build workflow, which used the commit SHA for both values.
+      KOMARI_VERSION: ${{ github.sha }}
+      KOMARI_VERSION_HASH: ${{ github.sha }}
+      TARGET: ${{ matrix.target }}
+      NAME: ${{ matrix.name }}
+      EXTENSION: ${{ matrix.extension }}
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Rust
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: ${{ matrix.target }}
+
+      - name: Cache Cargo
+        uses: Swatinem/rust-cache@v2
+        with:
+          key: ${{ matrix.name }}
+
+      - name: Install cross
+        if: matrix.use_cross
+        uses: taiki-e/install-action@cross
+
+      # Optional: B14 can add web/package.json; until then web/dist contains a
+      # placeholder and the Rust build proceeds unchanged.
+      - name: Build frontend assets
+        if: hashFiles('web/package.json') != ''
+        working-directory: web
+        run: |
+          npm install
+          npm run build
+
+      - name: Build binary
+        shell: bash
+        run: |
+          # option_env! values are not part of Cargo's fingerprint.
+          touch crates/komari-cli/src/version.rs
+          if [[ "${{ matrix.use_cross }}" == "true" ]]; then
+            cross build --locked --release -p komari-cli --target "${TARGET}"
+          else
+            cargo build --locked --release -p komari-cli --target "${TARGET}"
+          fi
+
+      - name: Package artifact
+        shell: bash
+        run: |
+          mkdir -p dist
+          cp "target/${TARGET}/release/komari${EXTENSION}" "dist/komari-${NAME}${EXTENSION}"
+          # Portable checksum: coreutils/shasum availability differs on the
+          # Windows and macOS runners, but Python is present on all of them.
+          if command -v python3 >/dev/null 2>&1; then
+            PYTHON=python3
+          elif command -v python >/dev/null 2>&1; then
+            PYTHON=python
+          else
+            PYTHON=""
+          fi
+          if [[ -n "${PYTHON}" ]]; then
+            "${PYTHON}" - "dist/komari-${NAME}${EXTENSION}" "dist/komari-${NAME}.sha256" <<'PY'
+          import hashlib
+          import sys
+
+          src, dst = sys.argv[1], sys.argv[2]
+          with open(src, "rb") as handle:
+              digest = hashlib.sha256(handle.read()).hexdigest()
+          with open(dst, "w", encoding="utf-8") as handle:
+              handle.write(f"{digest}  {src.rsplit('/', 1)[-1]}\n")
+          PY
+          else
+            echo "::warning::python not found; skipping checksum for ${NAME}"
+          fi
+
+      - name: Upload artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: komari-${{ matrix.name }}
+          path: dist/*
+          if-no-files-found: error
+
+  docker:
+    name: Docker image (build only)
+    needs:
+      - lint
+      - test
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+
+      - name: Build image
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          push: false
+          tags: komari:ci
+          build-args: |
+            KOMARI_VERSION=${{ github.sha }}
+            KOMARI_VERSION_HASH=${{ github.sha }}
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
