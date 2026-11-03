@@ -6,3 +6,12 @@ rust-version.workspace = true
 license.workspace = true
 
 [dependencies]
+chrono = { workspace = true }
+komari-db = { workspace = true }
+rusqlite = { workspace = true }
+thiserror = { workspace = true }
+tokio = { workspace = true }
+tracing = { workspace = true }
+
+[dev-dependencies]
+tokio = { workspace = true }
