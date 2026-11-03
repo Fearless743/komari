@@ -599,7 +599,14 @@ async fn admin_backup_upload_validates_markup_and_stages_zip() {
     let (status, body) = call(&app, request).await;
     assert_eq!(status, StatusCode::OK);
     assert_eq!(body["status"], "success");
-    assert_eq!(body["path"], "./data/backup.zip");
+    assert_eq!(
+        body["path"],
+        directory
+            .path()
+            .join("backup.zip")
+            .to_string_lossy()
+            .as_ref()
+    );
     assert!(
         body["message"]
             .as_str()
