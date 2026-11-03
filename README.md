@@ -81,11 +81,18 @@ logging by default, matching the Go backend's `utils.VersionHash` behavior.
 
 ```text
 komari server
-komari chpasswd -p <password>
-komari disable-2fa     # alias: disable2FA
-komari permit-login    # alias: permitPasswordLogin
+komari chpasswd -p <password> [-u <username>]
+komari disable-2fa [-u <username>]     # alias: disable2FA
+komari permit-login                    # alias: permitPasswordLogin
 ```
 
-Only `server` produces startup output in this task. `chpasswd`,
-`disable-2fa`, and `permit-login` are present with `--help` but intentionally
-return a "not implemented yet" message until their follow-up tasks land.
+`chpasswd` writes the Go-compatible SHA-256 password hash
+(`base64(SHA-256(password + "06Wm4Jv1Hkxx"))`) to the SQLite database and
+deletes all login sessions, so the Go fallback can still authenticate. Without
+`--username` it changes the first account by UUID, matching the Go command.
+`disable-2fa` clears one user's TOTP secret, or every user's secret when no
+username is given. `permit-login` sets `disable_password_login` to `false`.
+`disable-2fa`/`permit-login` create and migrate a missing database like Go;
+`chpasswd` keeps Go's "Database file does not exist." message instead.
+`permit-login` writes the current key/value `configs` row; the Go command's
+legacy single-row column update only matters for pre-1.1.4 schemas.

@@ -19,6 +19,33 @@ fn recent(seconds_ago: i64) -> LocalTime {
 }
 
 #[test]
+fn accounts_check_password_accepts_bcrypt_rows_read_only() {
+    let db = memory_db();
+    let mut user = User::new("legacy-rust", "ignored");
+    user.passwd = "$2a$10$C4Gwv0BDoZO0LFJLCMwD/OcQy61qVqTGBbvcnPh0FiTT408C69pv.".to_owned();
+    db.accounts().insert(&user).unwrap();
+
+    assert_eq!(
+        db.accounts()
+            .check_password("legacy-rust", "secret")
+            .unwrap(),
+        Some(user.uuid.clone())
+    );
+    assert_eq!(
+        db.accounts()
+            .check_password("legacy-rust", "wrong")
+            .unwrap(),
+        None
+    );
+    assert!(
+        db.accounts()
+            .require_by_username("legacy-rust")
+            .unwrap()
+            .check_password("secret")
+    );
+}
+
+#[test]
 fn clients_crud_and_lookup() {
     let db = memory_db();
     let clients = db.clients();
