@@ -111,14 +111,17 @@ fn due_offline_updates_last_notified_with_disconnect_time() {
 fn load_task_emits_event_and_updates_cooldown() {
     let db = enabled_db();
     let client = db.clients().create_named("loaded").unwrap();
+    let second = db.clients().create_named("loaded-2").unwrap();
     // The combined record query clamps its live window against the real clock,
     // so this test must use the current instant as well.
     let now = Utc::now();
 
-    let mut record = Record::new(&client.uuid);
-    record.time = LocalTime::from_instant(now - TimeDelta::minutes(1));
-    record.cpu = 95.0;
-    db.records().insert(&record).unwrap();
+    for uuid in [&client.uuid, &second.uuid] {
+        let mut record = Record::new(uuid);
+        record.time = LocalTime::from_instant(now - TimeDelta::minutes(1));
+        record.cpu = 95.0;
+        db.records().insert(&record).unwrap();
+    }
 
     let mut task = LoadNotification::new("cpu high", "cpu");
     task.clients = komari_db::StringArray::new([client.uuid.clone()]);
@@ -126,12 +129,25 @@ fn load_task_emits_event_and_updates_cooldown() {
     task.ratio = 0.8;
     task.interval = 15;
     db.notifications().load_save(&mut task).unwrap();
+    let stored = db.notifications().load_get(task.id).unwrap().unwrap();
 
+    // Mutating the in-memory copy must not overwrite other database columns.
+    task.name = "mutated in memory".to_owned();
+    task.clients = komari_db::StringArray::new([client.uuid.clone(), second.uuid.clone()]);
     let event = execute_load_task(&db, &mut task, now).unwrap().unwrap();
     assert_eq!(event.event, "Alert");
-    assert_eq!(event.clients.len(), 1);
-    assert_eq!(event.message, "cpu high");
+    assert_eq!(event.clients.len(), 2);
+    assert_eq!(event.message, "mutated in memory");
     assert!(!task.last_notified.is_zero());
+
+    let reloaded = db.notifications().load_get(task.id).unwrap().unwrap();
+    assert_eq!(reloaded.name, stored.name);
+    assert_eq!(reloaded.clients.as_slice(), stored.clients.as_slice());
+    assert_eq!(reloaded.metric, stored.metric);
+    assert_eq!(reloaded.threshold, stored.threshold);
+    assert_eq!(reloaded.ratio, stored.ratio);
+    assert_eq!(reloaded.interval, stored.interval);
+    assert_eq!(reloaded.last_notified.timestamp(), Some(now.timestamp()));
 
     // A second run inside the interval is skipped without sending.
     assert!(execute_load_task(&db, &mut task, now).unwrap().is_none());
