@@ -2,6 +2,7 @@
 //! OAuth, background tasks, backup restore and graceful shutdown.
 
 use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::Duration;
 
 use async_trait::async_trait;
@@ -179,6 +180,36 @@ async fn server_initializes_the_geoip_service() {
     let geoip = server.state().geoip.as_ref().expect("geoip service");
     assert_ne!(geoip.provider_key(), "empty");
     assert_eq!(geoip.provider_key(), "ipinfo");
+}
+
+#[tokio::test]
+async fn server_installs_web_and_ddns_services_in_state() {
+    let dir = TempDir::new().expect("temp dir");
+    let hook_ran = Arc::new(AtomicBool::new(false));
+    let flag = Arc::clone(&hook_ran);
+    let server = ServerBuilder::new(server_config(&dir))
+        .with_db(memory_db())
+        .skip_services()
+        .configure_state(move |state| {
+            flag.store(true, Ordering::SeqCst);
+            state
+        })
+        .build()
+        .await
+        .expect("build");
+    assert!(hook_ran.load(Ordering::SeqCst));
+    assert_eq!(
+        server
+            .state()
+            .web
+            .as_ref()
+            .expect("web assets")
+            .config()
+            .data_dir
+            .as_path(),
+        dir.path()
+    );
+    assert!(server.state().ddns.is_some());
 }
 
 #[tokio::test]

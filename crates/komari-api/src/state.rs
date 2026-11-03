@@ -1,14 +1,17 @@
 //! Shared application state for the API routers.
 
-use std::sync::Arc;
+use std::sync::{Arc, RwLock};
 use std::time::Duration;
 
 use axum::extract::FromRef;
 use komari_auth::AuthState;
 use komari_config::keys;
 use komari_db::{Db, DbError};
+use komari_ddns::DdnsService;
 use komari_geoip::GeoIpService;
 use komari_jobs::CancelToken;
+use komari_oauth::OAuthProvider;
+use komari_web::WebAssets;
 
 use crate::cache::ReportCache;
 use crate::clock::{Clock, SystemClock};
@@ -73,6 +76,12 @@ pub struct ApiState {
     /// server assembly can call `initialize()` and install it with
     /// [`ApiState::with_geoip_service`].
     pub geoip: Option<Arc<GeoIpService>>,
+    /// Static web assets shared with the admin/settings API (B06).
+    pub web: Option<Arc<WebAssets>>,
+    /// DDNS service shared with the admin API (B06).
+    pub ddns: Option<Arc<DdnsService>>,
+    /// Currently loaded OAuth provider (B04 reads this for `/api/oauth`).
+    pub oauth_provider: Arc<RwLock<Option<Arc<dyn OAuthProvider>>>>,
     config: Arc<ApiConfig>,
     /// Cancels the presence sweeper and report flusher started by
     /// [`ApiState::with_clock`].
@@ -120,6 +129,9 @@ impl ApiState {
             presence,
             report_cache,
             geoip,
+            web: None,
+            ddns: None,
+            oauth_provider: Arc::new(RwLock::new(None)),
             config: Arc::new(config),
             background_cancel: CancelToken::new(),
         };
@@ -149,6 +161,34 @@ impl ApiState {
     pub fn with_geoip_service(mut self, service: Arc<GeoIpService>) -> Self {
         self.geoip = Some(service);
         self
+    }
+
+    /// Install the shared static-asset service.
+    pub fn with_web_assets(mut self, assets: Arc<WebAssets>) -> Self {
+        self.web = Some(assets);
+        self
+    }
+
+    /// Install the shared DDNS service.
+    pub fn with_ddns_service(mut self, ddns: Arc<DdnsService>) -> Self {
+        self.ddns = Some(ddns);
+        self
+    }
+
+    /// Read the currently loaded OAuth provider.
+    pub fn oauth_provider(&self) -> Option<Arc<dyn OAuthProvider>> {
+        self.oauth_provider
+            .read()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .clone()
+    }
+
+    /// Replace the OAuth provider snapshot used by B04's public routes.
+    pub fn set_oauth_provider(&self, provider: Option<Arc<dyn OAuthProvider>>) {
+        *self
+            .oauth_provider
+            .write()
+            .unwrap_or_else(|poisoned| poisoned.into_inner()) = provider;
     }
 
     fn spawn_presence_sweeper(&self) {

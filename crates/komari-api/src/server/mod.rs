@@ -139,6 +139,7 @@ pub struct ServerBuilder {
     admin_router: Option<Router<ApiState>>,
     rpc_router: Option<Router<ApiState>>,
     stateless_router: Option<Router>,
+    state_hook: Option<Box<dyn FnOnce(ApiState) -> ApiState + Send>>,
     initialize_services: bool,
 }
 
@@ -154,6 +155,7 @@ impl ServerBuilder {
             admin_router: None,
             rpc_router: None,
             stateless_router: None,
+            state_hook: None,
             initialize_services: true,
         }
     }
@@ -211,6 +213,19 @@ impl ServerBuilder {
         self
     }
 
+    /// Customize the shared state after the server services (web assets, DDNS,
+    /// OAuth provider) have been attached and before the router is built.
+    ///
+    /// B04/B06 can use this to install their own service handles or middleware
+    /// state without changing the assembly.
+    pub fn configure_state<F>(mut self, hook: F) -> Self
+    where
+        F: FnOnce(ApiState) -> ApiState + Send + 'static,
+    {
+        self.state_hook = Some(Box::new(hook));
+        self
+    }
+
     pub async fn build(self) -> Result<Server> {
         let config = self.config;
         let mut state = match (self.state, self.db) {
@@ -255,6 +270,14 @@ impl ServerBuilder {
             Some(assets) => assets,
             None => build_web_assets(&config, &db).context("failed to load web assets")?,
         };
+
+        state = state
+            .with_web_assets(assets.clone())
+            .with_ddns_service(ddns.clone());
+        state.set_oauth_provider(oauth.current());
+        if let Some(hook) = self.state_hook {
+            state = hook(state);
+        }
 
         let mut state_router = Router::<ApiState>::new();
         if let Some(router) = self.public_router {
