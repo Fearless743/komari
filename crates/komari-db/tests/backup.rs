@@ -4,13 +4,14 @@
 mod support;
 
 use std::fs;
-use std::io::{Cursor, Read, Write};
+use std::io::{self, Cursor, Read, Seek, SeekFrom, Write};
 use std::path::{Path, PathBuf};
-use std::sync::{Arc, Barrier};
+use std::sync::mpsc;
 use std::thread;
 
 use komari_db::{
-    BACKUP_DB_NAME, BACKUP_MARKUP_NAME, BackupOptions, Db, DbError, import_backup_bytes,
+    BACKUP_DB_NAME, BACKUP_MARKUP_NAME, BackupOptions, Db, DbError, import_backup,
+    import_backup_bytes, import_backup_file, restore_pending_backup,
 };
 use support::TempDir;
 use zip::write::SimpleFileOptions;
@@ -66,6 +67,95 @@ fn build_zip(entries: &[(&str, &[u8])]) -> Vec<u8> {
         zip.finish().unwrap();
     }
     cursor.into_inner()
+}
+
+fn build_zip_with_symlink(database: &[u8]) -> Vec<u8> {
+    let mut cursor = Cursor::new(Vec::new());
+    {
+        let mut zip = ZipWriter::new(&mut cursor);
+        let file_options =
+            SimpleFileOptions::default().compression_method(CompressionMethod::Deflated);
+        zip.start_file(BACKUP_MARKUP_NAME, file_options).unwrap();
+        zip.write_all(MARKER).unwrap();
+        zip.start_file(BACKUP_DB_NAME, file_options).unwrap();
+        zip.write_all(database).unwrap();
+        zip.add_symlink("link", "target", SimpleFileOptions::default())
+            .unwrap();
+        zip.finish().unwrap();
+    }
+    cursor.into_inner()
+}
+
+fn duplicate_central_directory_name(mut bytes: Vec<u8>, from: &str, to: &str) -> Vec<u8> {
+    assert_eq!(from.len(), to.len());
+    let signature = b"PK\x01\x02";
+    let mut position = 0;
+    while let Some(relative) = bytes[position..]
+        .windows(signature.len())
+        .position(|window| window == signature)
+    {
+        let header = position + relative;
+        if header + 46 <= bytes.len() {
+            let name_len = u16::from_le_bytes([bytes[header + 28], bytes[header + 29]]) as usize;
+            let extra_len = u16::from_le_bytes([bytes[header + 30], bytes[header + 31]]) as usize;
+            let comment_len = u16::from_le_bytes([bytes[header + 32], bytes[header + 33]]) as usize;
+            let name_start = header + 46;
+            if name_start + name_len <= bytes.len()
+                && &bytes[name_start..name_start + name_len] == from.as_bytes()
+            {
+                bytes[name_start..name_start + name_len].copy_from_slice(to.as_bytes());
+            }
+            position = name_start + name_len + extra_len + comment_len;
+        } else {
+            break;
+        }
+    }
+    bytes
+}
+
+fn mark_entries_encrypted(mut bytes: Vec<u8>) -> Vec<u8> {
+    for signature in [b"PK\x03\x04".as_slice(), b"PK\x01\x02".as_slice()] {
+        let flag_offset = if signature == b"PK\x03\x04" { 6 } else { 8 };
+        let positions: Vec<usize> = bytes
+            .windows(signature.len())
+            .enumerate()
+            .filter(|(_, window)| *window == signature)
+            .map(|(index, _)| index)
+            .collect();
+        for position in positions {
+            let offset = position + flag_offset;
+            if offset + 2 <= bytes.len() {
+                bytes[offset] |= 1;
+            }
+        }
+    }
+    bytes
+}
+
+struct BlockingReader {
+    inner: Cursor<Vec<u8>>,
+    started: Option<mpsc::Sender<()>>,
+    release: mpsc::Receiver<()>,
+    blocked: bool,
+}
+
+impl Read for BlockingReader {
+    fn read(&mut self, buffer: &mut [u8]) -> io::Result<usize> {
+        self.inner.read(buffer)
+    }
+}
+
+impl Seek for BlockingReader {
+    fn seek(&mut self, position: SeekFrom) -> io::Result<u64> {
+        if !self.blocked && position == SeekFrom::End(0) {
+            self.blocked = true;
+            if let Some(started) = self.started.take() {
+                let _ = started.send(());
+            }
+            let _ = self.release.recv();
+        }
+        self.inner.seek(position)
+    }
 }
 
 fn snapshot_bytes(db: &Db) -> Vec<u8> {
@@ -413,6 +503,9 @@ fn optional_pre_restore_archive_captures_the_previous_data() {
 
     let backup_dir = destination.join("backup");
     let mut restore_options = options(&target);
+    // The restore itself only needs the database, but the pre-restore archive
+    // must still capture the whole old data directory.
+    restore_options.include_data = false;
     restore_options.pre_restore_backup_dir = Some(backup_dir.clone());
     let report = import_backup_bytes(&restore_options, &archive).expect("restore");
 
@@ -438,47 +531,41 @@ fn optional_pre_restore_archive_captures_the_previous_data() {
 }
 
 #[test]
-fn concurrent_imports_do_not_corrupt_the_target() {
+fn concurrent_imports_are_serialized_per_data_directory() {
     let source = TempDir::new("backup-concurrent-source");
     let data = make_data_dir(&source);
-    fs::create_dir_all(data.join("files")).unwrap();
-    for index in 0..500 {
-        fs::write(
-            data.join(format!("files/{index}.bin")),
-            vec![index as u8; 512],
-        )
-        .unwrap();
-    }
     let db = make_db(&data);
     let archive = db.export_backup(&options(&data)).unwrap();
     drop(db);
 
     let destination = TempDir::new("backup-concurrent-destination");
     let target = destination.join("data");
-    let archive = Arc::new(archive);
-    let barrier = Arc::new(Barrier::new(2));
-    let mut handles = Vec::new();
+    let (started_tx, started_rx) = mpsc::channel();
+    let (release_tx, release_rx) = mpsc::channel();
 
-    for _ in 0..2 {
-        let archive = Arc::clone(&archive);
-        let barrier = Arc::clone(&barrier);
-        let target = target.clone();
-        handles.push(thread::spawn(move || {
-            let options = options(&target);
-            barrier.wait();
-            import_backup_bytes(&options, &archive).map(|_| ())
-        }));
-    }
+    let thread_target = target.clone();
+    let thread_archive = archive.clone();
+    let handle = thread::spawn(move || {
+        let reader = BlockingReader {
+            inner: Cursor::new(thread_archive),
+            started: Some(started_tx),
+            release: release_rx,
+            blocked: false,
+        };
+        import_backup(&options(&thread_target), reader).map(|_| ())
+    });
 
-    let mut successes = 0;
-    for handle in handles {
-        match handle.join().expect("thread") {
-            Ok(()) => successes += 1,
-            Err(DbError::BackupInProgress) => {}
-            Err(error) => panic!("unexpected import error: {error}"),
-        }
-    }
-    assert!(successes >= 1);
+    // The first import holds the per-directory lock while blocked in Seek.
+    started_rx.recv().expect("first import acquired the lock");
+    let busy = import_backup_bytes(&options(&target), &archive).unwrap_err();
+    assert!(matches!(busy, DbError::BackupInProgress), "{busy}");
+
+    release_tx.send(()).expect("release first import");
+    handle
+        .join()
+        .expect("first import thread")
+        .expect("first import succeeds");
+
     let restored = Db::open(target.join(BACKUP_DB_NAME)).expect("restored database");
     assert!(restored.schema_is_current().unwrap());
 }
@@ -495,6 +582,8 @@ fn export_excludes_database_files_temporary_files_and_itself() {
     fs::write(data.join("komari.db-wal"), b"wal").unwrap();
     fs::write(data.join("komari.db-shm"), b"shm").unwrap();
     fs::write(data.join(BACKUP_MARKUP_NAME), b"old marker").unwrap();
+    fs::create_dir_all(data.join("archive.db")).unwrap();
+    fs::write(data.join("archive.db/child.txt"), b"child").unwrap();
 
     let db = make_db(&data);
     let archive = db.export_backup(&options(&data)).unwrap();
@@ -509,6 +598,8 @@ fn export_excludes_database_files_temporary_files_and_itself() {
     assert!(!names.iter().any(|name| name == "backup.zip"));
     assert!(!names.iter().any(|name| name.ends_with(".db-wal")));
     assert!(!names.iter().any(|name| name.ends_with(".db-shm")));
+    assert!(names.iter().any(|name| name == "archive.db/child.txt"));
+    assert!(!names.iter().any(|name| name == "archive.db/"));
     assert_eq!(
         names
             .iter()
@@ -521,6 +612,10 @@ fn export_excludes_database_files_temporary_files_and_itself() {
     let target = destination.join("data");
     import_backup_bytes(&options(&target), &archive).unwrap();
     assert_eq!(fs::read(target.join("theme/main.css")).unwrap(), b"css");
+    assert_eq!(
+        fs::read(target.join("archive.db/child.txt")).unwrap(),
+        b"child"
+    );
     assert!(!target.join("scratch.tmp").exists());
     assert!(!target.join(BACKUP_MARKUP_NAME).exists());
 }
@@ -552,8 +647,230 @@ fn export_to_file_excludes_the_destination_archive() {
 
     let restored_dir = TempDir::new("backup-destination-restored");
     let restored = restored_dir.join("data");
-    import_backup_bytes(&options(&restored), &bytes).unwrap();
+    import_backup_file(&options(&restored), &destination).unwrap();
     assert_eq!(fs::read(restored.join("theme/main.css")).unwrap(), b"css");
+}
+
+#[test]
+fn export_refuses_to_overwrite_the_live_database() {
+    let source = TempDir::new("backup-overwrite-db");
+    let data = make_data_dir(&source);
+    let db = make_db(&data);
+
+    for destination in [
+        data.join(BACKUP_DB_NAME),
+        data.join("komari.db-wal"),
+        data.join("komari.db-shm"),
+    ] {
+        let error = db
+            .export_backup_to(&options(&data), &destination)
+            .unwrap_err();
+        assert!(matches!(error, DbError::InvalidData(_)), "{error}");
+    }
+
+    assert!(
+        Db::open(data.join(BACKUP_DB_NAME))
+            .unwrap()
+            .schema_is_current()
+            .unwrap()
+    );
+}
+
+#[test]
+fn marker_uses_go_rfc3339_second_precision_without_newline() {
+    let source = TempDir::new("backup-marker-format");
+    let data = make_data_dir(&source);
+    let db = make_db(&data);
+    let archive = db.export_backup(&options(&data)).unwrap();
+
+    let marker = read_entry(&archive, BACKUP_MARKUP_NAME).expect("marker");
+    let text = String::from_utf8(marker).unwrap();
+    assert!(!text.ends_with('\n'));
+    let timestamp = text.rsplit(": ").next().unwrap();
+    assert_eq!(timestamp.len(), 25, "{timestamp}");
+    assert!(timestamp.contains('T'));
+    assert!(!timestamp.contains('.'), "{timestamp}");
+}
+
+#[test]
+fn symlink_zip_entry_is_rejected() {
+    let source = TempDir::new("backup-symlink-source");
+    let data = make_data_dir(&source);
+    let db = make_db(&data);
+    let database = snapshot_bytes(&db);
+    drop(db);
+
+    let archive = build_zip_with_symlink(&database);
+
+    let destination = TempDir::new("backup-symlink-destination");
+    let target = sentinel_target(&destination);
+    let error = import_backup_bytes(&options(&target), &archive).unwrap_err();
+    assert!(matches!(error, DbError::UnsafeBackupPath(_)), "{error}");
+    assert_sentinel(&target);
+}
+
+#[test]
+fn encrypted_zip_entry_is_rejected() {
+    let source = TempDir::new("backup-encrypted-source");
+    let data = make_data_dir(&source);
+    let db = make_db(&data);
+    let database = snapshot_bytes(&db);
+    drop(db);
+
+    let archive = mark_entries_encrypted(build_zip(&[
+        (BACKUP_MARKUP_NAME, MARKER),
+        (BACKUP_DB_NAME, &database),
+    ]));
+
+    let destination = TempDir::new("backup-encrypted-destination");
+    let target = sentinel_target(&destination);
+    let error = import_backup_bytes(&options(&target), &archive).unwrap_err();
+    assert!(
+        matches!(error, DbError::Zip(_) | DbError::InvalidBackup(_)),
+        "{error}"
+    );
+    let message = error.to_string().to_ascii_lowercase();
+    assert!(
+        message.contains("encrypt") || message.contains("password"),
+        "{error}"
+    );
+    assert_sentinel(&target);
+}
+
+#[test]
+fn archive_and_total_size_limits_are_enforced() {
+    let source = TempDir::new("backup-limits-source");
+    let data = make_data_dir(&source);
+    let db = make_db(&data);
+    let database = snapshot_bytes(&db);
+    drop(db);
+
+    let archive = build_zip(&[
+        (BACKUP_MARKUP_NAME, MARKER),
+        (BACKUP_DB_NAME, &database),
+        ("payload.bin", b"payload"),
+    ]);
+
+    let destination = TempDir::new("backup-limits-destination");
+    let target = sentinel_target(&destination);
+
+    let mut archive_limit = options(&target);
+    archive_limit.max_archive_bytes = (archive.len() - 1) as u64;
+    let error = import_backup_bytes(&archive_limit, &archive).unwrap_err();
+    assert!(matches!(error, DbError::BackupLimit(_)), "{error}");
+    assert_sentinel(&target);
+
+    let mut total_limit = options(&target);
+    total_limit.max_total_uncompressed_bytes = database.len() as u64;
+    let error = import_backup_bytes(&total_limit, &archive).unwrap_err();
+    assert!(matches!(error, DbError::BackupLimit(_)), "{error}");
+    assert_sentinel(&target);
+}
+
+#[cfg(unix)]
+#[test]
+fn symlinked_data_dir_is_rejected() {
+    let root = TempDir::new("backup-symlink-dir");
+    let real = root.join("real");
+    fs::create_dir_all(&real).unwrap();
+    let link = root.join("data");
+    std::os::unix::fs::symlink(&real, &link).unwrap();
+
+    let error = import_backup_bytes(&options(&link), b"unused").unwrap_err();
+    assert!(matches!(error, DbError::InvalidData(_)), "{error}");
+    assert!(real.is_dir());
+}
+
+#[test]
+fn filesystem_root_is_rejected_as_data_dir() {
+    let error = import_backup_bytes(&BackupOptions::new("/"), b"unused").unwrap_err();
+    assert!(matches!(error, DbError::InvalidData(_)), "{error}");
+}
+
+#[cfg(unix)]
+#[test]
+fn non_utf8_file_names_are_skipped_without_failing_export() {
+    use std::ffi::OsString;
+    use std::os::unix::ffi::OsStringExt;
+
+    let source = TempDir::new("backup-non-utf8-source");
+    let data = make_data_dir(&source);
+    let bad = data.join(OsString::from_vec(b"bad\xff.txt".to_vec()));
+    fs::write(&bad, b"bad").unwrap();
+    fs::write(data.join("good.txt"), b"good").unwrap();
+
+    let db = make_db(&data);
+    let archive = db.export_backup(&options(&data)).unwrap();
+    drop(db);
+
+    let names = zip_names(&archive);
+    assert!(names.iter().any(|name| name == "good.txt"));
+    assert!(!names.iter().any(|name| name.starts_with("bad")));
+
+    let destination = TempDir::new("backup-non-utf8-destination");
+    let target = destination.join("data");
+    import_backup_bytes(&options(&target), &archive).unwrap();
+    assert_eq!(fs::read(target.join("good.txt")).unwrap(), b"good");
+}
+
+#[test]
+fn duplicate_entry_names_are_deduplicated_by_the_zip_reader() {
+    let source = TempDir::new("backup-duplicate-source");
+    let data = make_data_dir(&source);
+    let db = make_db(&data);
+    let database = snapshot_bytes(&db);
+    drop(db);
+
+    let archive = build_zip(&[
+        (BACKUP_MARKUP_NAME, MARKER),
+        (BACKUP_DB_NAME, &database),
+        ("theme/a.txt", b"first"),
+        ("theme/b.txt", b"second"),
+    ]);
+    // Same-length rename in the central directory creates a duplicate name
+    // that the zip writer itself refuses to produce.
+    let archive = duplicate_central_directory_name(archive, "theme/b.txt", "theme/a.txt");
+
+    let destination = TempDir::new("backup-duplicate-destination");
+    let target = destination.join("data");
+    let report = import_backup_bytes(&options(&target), &archive)
+        .expect("the zip reader de-duplicates central-directory names");
+    assert_eq!(report.data_entries, 1);
+    assert!(target.join("theme/a.txt").is_file());
+}
+
+#[test]
+fn restore_pending_backup_mirrors_go_startup_restore() {
+    let source = TempDir::new("backup-pending-source");
+    let data = make_data_dir(&source);
+    fs::write(data.join("version.txt"), b"v1").unwrap();
+    let db = make_db(&data);
+    let archive = db.export_backup(&options(&data)).unwrap();
+    drop(db);
+
+    let destination = TempDir::new("backup-pending-destination");
+    let target = destination.join("data");
+    fs::create_dir_all(&target).unwrap();
+    fs::write(target.join("backup.zip"), &archive).unwrap();
+
+    let report = restore_pending_backup(&options(&target))
+        .expect("restore")
+        .expect("pending archive");
+    assert!(report.replaced_existing);
+    assert!(!target.join("backup.zip").exists());
+    assert_eq!(fs::read(target.join("version.txt")).unwrap(), b"v1");
+    assert!(
+        Db::open(target.join(BACKUP_DB_NAME))
+            .unwrap()
+            .schema_is_current()
+            .unwrap()
+    );
+
+    assert!(
+        restore_pending_backup(&options(&destination.join("missing")))
+            .unwrap()
+            .is_none()
+    );
 }
 
 #[test]
