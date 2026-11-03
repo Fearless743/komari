@@ -67,6 +67,33 @@ fn index_snapshot(db: &Db) -> IndexSnapshot {
         .collect()
 }
 
+/// Validate the shape of the configuration map without assuming any specific
+/// key (custom `KOMARI_COMPAT_DB` databases may not have `sitename`).
+fn assert_config_shape(db: &Db) {
+    let config = db.config();
+    let all = config.get_all().expect("read configs");
+    if all.is_empty() {
+        eprintln!("reference database has an empty configs table; skipping value assertions");
+        return;
+    }
+
+    if let Some(sitename) = config.get_as::<String>("sitename").expect("read sitename") {
+        assert!(!sitename.is_empty());
+    }
+    if let Some(theme) = config.get("theme").expect("read theme") {
+        assert!(theme.is_string());
+    }
+    if let Some(preserve) = config
+        .get_as::<i64>("record_preserve_time")
+        .expect("read record_preserve_time")
+    {
+        assert!(preserve > 0);
+    }
+    if let Some(sitename) = all.get("sitename") {
+        assert!(sitename.is_string());
+    }
+}
+
 #[test]
 fn reference_database_schema_matches_our_migration() {
     let Some(path) = reference_path() else {
@@ -127,27 +154,8 @@ fn reference_database_is_readable_and_has_expected_tables() {
     }
     assert!(db.schema_is_current().unwrap());
 
-    // The bundled database always contains the key/value configuration table.
-    let config = db.config();
-    let all = config.get_all().expect("read configs");
-    if all.is_empty() {
-        eprintln!("reference database has an empty configs table; skipping value assertions");
-    } else {
-        // Values differ between installations, so only assert shape/validity.
-        if let Some(sitename) = config.get_as::<String>("sitename").expect("read sitename") {
-            assert!(!sitename.is_empty());
-        }
-        if let Some(theme) = config.get("theme").expect("read theme") {
-            assert!(theme.is_string());
-        }
-        if let Some(preserve) = config
-            .get_as::<i64>("record_preserve_time")
-            .expect("read record_preserve_time")
-        {
-            assert!(preserve > 0);
-        }
-        assert!(all.contains_key("sitename"));
-    }
+    // Configuration values differ between installations; validate shape only.
+    assert_config_shape(&db);
 
     // Users should be readable, including the non-standard timestamp layout.
     let users = db.accounts().list().expect("read users");
@@ -250,4 +258,16 @@ fn migrating_a_copy_of_the_reference_database_preserves_data() {
     // New writes still work on the upgraded copy.
     let client = db.clients().create_named("compat-node").unwrap();
     assert!(db.clients().get(&client.uuid).unwrap().is_some());
+}
+
+#[test]
+fn config_shape_without_sitename_is_accepted() {
+    let dir = TempDir::new("no-sitename");
+    let path = dir.join("komari.db");
+    let db = Db::open(&path).unwrap();
+    db.migrate().unwrap();
+    db.config().set("theme", "dark").unwrap();
+
+    // No `sitename` key at all: shape validation must not assume it exists.
+    assert_config_shape(&db);
 }
