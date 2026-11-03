@@ -104,10 +104,21 @@ impl DdnsService {
     /// load the provider selected by the `ddns_provider` setting.
     pub async fn initialize(&self) -> Result<(), DdnsError> {
         for (name, provider) in self.factory.get_all_providers() {
-            if self.db.ddns_providers().get(&name)?.is_some() {
-                continue;
+            match self.db.ddns_providers().get(&name) {
+                Ok(Some(_)) => continue,
+                Ok(None) => {}
+                Err(error) => {
+                    tracing::error!("failed to read DDNS provider {name}: {error}");
+                    continue;
+                }
             }
-            let addition = serde_json::to_string(&provider.configuration())?;
+            let addition = match serde_json::to_string(&provider.configuration()) {
+                Ok(addition) => addition,
+                Err(error) => {
+                    tracing::error!("failed to marshal DDNS config for {name}: {error}");
+                    continue;
+                }
+            };
             if let Err(error) = self
                 .db
                 .ddns_providers()
@@ -117,16 +128,31 @@ impl DdnsService {
             }
         }
 
-        let method: String = self
+        let method: String = match self
             .db
             .config()
-            .get_as_or(DDNS_PROVIDER_KEY, "none".to_owned())?;
+            .get_as_or(DDNS_PROVIDER_KEY, "none".to_owned())
+        {
+            Ok(method) => method,
+            Err(error) => {
+                tracing::error!("failed to read ddns_provider: {error}");
+                return self.load_provider("empty", "{}");
+            }
+        };
         if method.is_empty() || method == "none" {
             return self.load_provider("empty", "{}");
         }
 
-        let Some(provider_config) = self.db.ddns_providers().get(&method)? else {
-            return self.load_provider("empty", "{}");
+        let provider_config = match self.db.ddns_providers().get(&method) {
+            Ok(Some(provider_config)) => provider_config,
+            Ok(None) => {
+                tracing::error!("DDNS provider configuration not found: {method}");
+                return self.load_provider("empty", "{}");
+            }
+            Err(error) => {
+                tracing::error!("failed to read DDNS provider {method}: {error}");
+                return self.load_provider("empty", "{}");
+            }
         };
         if let Err(error) = self.load_provider(&method, &provider_config.addition) {
             tracing::error!("failed to load DDNS provider {method}: {error}");
@@ -179,7 +205,13 @@ impl DdnsService {
         triggered_by: &str,
         force: bool,
     ) -> Result<(), DdnsError> {
-        let enabled: bool = self.db.config().get_as_or(DDNS_ENABLED_KEY, false)?;
+        let enabled: bool = match self.db.config().get_as_or(DDNS_ENABLED_KEY, false) {
+            Ok(enabled) => enabled,
+            Err(error) => {
+                tracing::error!("failed to read ddns_enabled: {error}");
+                false
+            }
+        };
         if !enabled && !force {
             return Ok(());
         }

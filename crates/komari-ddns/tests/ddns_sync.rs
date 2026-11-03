@@ -322,6 +322,80 @@ async fn initialize_persists_defaults_and_loads_selected_provider() {
 }
 
 #[tokio::test]
+async fn initialize_falls_back_when_selected_provider_row_is_missing() {
+    let db = database();
+    db.config()
+        .set(DDNS_PROVIDER_KEY, "missing-provider")
+        .expect("provider key");
+
+    let service = DdnsService::new(Arc::clone(&db));
+    service.initialize().await.expect("initialize");
+
+    assert_eq!(
+        service
+            .current_provider()
+            .map(|provider| provider.name().to_owned()),
+        Some("empty".to_owned())
+    );
+}
+
+#[tokio::test]
+async fn initialize_falls_back_when_selected_provider_json_is_invalid() {
+    let db = database();
+    db.ddns_providers()
+        .save(&ProviderModel::new("webhook", "not-json"))
+        .expect("save invalid provider");
+    db.config()
+        .set(DDNS_PROVIDER_KEY, "webhook")
+        .expect("provider key");
+
+    let service = DdnsService::new(Arc::clone(&db));
+    service.initialize().await.expect("initialize");
+
+    assert_eq!(
+        service
+            .current_provider()
+            .map(|provider| provider.name().to_owned()),
+        Some("empty".to_owned())
+    );
+}
+
+#[tokio::test]
+async fn initialize_survives_a_config_table_read_error() {
+    let db = database();
+    db.execute_batch("DROP TABLE configs")
+        .expect("drop configs");
+
+    let service = DdnsService::new(Arc::clone(&db));
+    service.initialize().await.expect("initialize");
+
+    assert_eq!(
+        service
+            .current_provider()
+            .map(|provider| provider.name().to_owned()),
+        Some("empty".to_owned())
+    );
+}
+
+#[tokio::test]
+async fn config_read_error_is_treated_as_disabled_during_sync() {
+    let db = database();
+    enable_ddns(&db);
+    let (service, state) = service(&db, "", 2);
+    let client = create_client(&db, "client-1", "1.1.1.1");
+    db.execute_batch("DROP TABLE configs")
+        .expect("drop configs");
+
+    service
+        .sync_client(&client, "test", false)
+        .await
+        .expect("failure degrades to disabled");
+
+    assert_eq!(state.calls.lock().unwrap().len(), 0);
+    assert_eq!(db.ddns().history_count().unwrap(), 0);
+}
+
+#[tokio::test]
 async fn initialize_without_selection_uses_empty_provider() {
     let db = database();
     let service = DdnsService::new(Arc::clone(&db));
