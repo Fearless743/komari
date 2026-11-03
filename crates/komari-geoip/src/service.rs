@@ -104,8 +104,10 @@ impl GeoIpService {
     }
 
     /// Port of `geoip.InitGeoIp`. Configuration failures leave the service on
-    /// the empty provider and never propagate as a panic.
-    pub fn initialize(&self) -> Result<(), GeoIpError> {
+    /// the empty provider and never propagate as a panic. Local providers
+    /// (currently `mmdb`) are prepared here, which may download a missing
+    /// database before the provider is installed.
+    pub async fn initialize(&self) -> Result<(), GeoIpError> {
         let Some(db) = self.db.as_ref() else {
             return Ok(());
         };
@@ -125,6 +127,11 @@ impl GeoIpService {
 
         match self.factory.create(&provider_key) {
             Ok(provider) => {
+                if let Err(error) = provider.update_database().await {
+                    tracing::error!("failed to initialize GeoIP provider {provider_key}: {error}");
+                    self.clear_provider();
+                    return Ok(());
+                }
                 *self.provider.write() = Some(Arc::from(provider));
                 *self.provider_key.write() = provider_key.clone();
                 self.cache.lock().clear();

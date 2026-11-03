@@ -33,7 +33,7 @@ impl RecordedRequest {
 #[derive(Clone, Debug)]
 pub struct MockResponse {
     pub status: u16,
-    pub body: String,
+    pub body: Vec<u8>,
     pub content_type: String,
 }
 
@@ -41,7 +41,7 @@ impl MockResponse {
     pub fn json(status: u16, body: impl Into<String>) -> Self {
         Self {
             status,
-            body: body.into(),
+            body: body.into().into_bytes(),
             content_type: "application/json".to_owned(),
         }
     }
@@ -49,8 +49,16 @@ impl MockResponse {
     pub fn text(status: u16, body: impl Into<String>) -> Self {
         Self {
             status,
-            body: body.into(),
+            body: body.into().into_bytes(),
             content_type: "text/plain".to_owned(),
+        }
+    }
+
+    pub fn bytes(status: u16, body: impl Into<Vec<u8>>, content_type: impl Into<String>) -> Self {
+        Self {
+            status,
+            body: body.into(),
+            content_type: content_type.into(),
         }
     }
 }
@@ -89,15 +97,15 @@ impl MockServer {
                         .expect("mock request log poisoned")
                         .push(request.clone());
                     let response = handler(&request);
-                    let mut payload = format!(
+                    let header = format!(
                         "HTTP/1.1 {} {}\r\nContent-Type: {}\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
                         response.status,
                         if response.status < 400 { "OK" } else { "Error" },
                         response.content_type,
                         response.body.len()
                     );
-                    payload.push_str(&response.body);
-                    let _ = socket.write_all(payload.as_bytes()).await;
+                    let _ = socket.write_all(header.as_bytes()).await;
+                    let _ = socket.write_all(&response.body).await;
                     let _ = socket.shutdown().await;
                 });
             }

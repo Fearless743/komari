@@ -13,6 +13,10 @@ pub enum GeoIpError {
     #[error("geoip provider not found: {0}")]
     ProviderNotFound(String),
 
+    /// A MaxMind database has not been opened yet.
+    #[error("MaxMind database is not initialized or failed to open")]
+    DatabaseUnavailable,
+
     /// An IP address could not be parsed.
     #[error("invalid IP address: {0}")]
     InvalidIp(String),
