@@ -28,14 +28,14 @@ pub async fn json_response(response: Response, secrets: &[&str]) -> Result<Value
 /// Keep only safe diagnostic fields from an error response.
 ///
 /// Provider error bodies often repeat the access token or client secret. Only
-/// `error`, `error_description`, `error_uri`, `message` and `msg` are retained;
-/// everything else is replaced by the redacted body.
+/// `error`, `error_description`, `error_uri`, `message` and `msg` are retained.
+/// Unknown fields and non-JSON bodies are never echoed.
 fn summarize_error_body(body: &str, secrets: &[&str]) -> String {
     let Ok(value) = serde_json::from_str::<Value>(body) else {
-        return redact_secrets(body, secrets);
+        return format!("non-JSON error body ({} bytes)", body.len());
     };
     let Some(object) = value.as_object() else {
-        return redact_secrets(body, secrets);
+        return "error body is not a JSON object".to_owned();
     };
     let mut parts = Vec::new();
     for key in ["error", "error_description", "error_uri", "message", "msg"] {
@@ -48,7 +48,7 @@ fn summarize_error_body(body: &str, secrets: &[&str]) -> String {
         }
     }
     if parts.is_empty() {
-        redact_secrets(body, secrets)
+        "no error details".to_owned()
     } else {
         parts.join(", ")
     }

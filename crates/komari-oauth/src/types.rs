@@ -235,16 +235,6 @@ impl std::fmt::Debug for OAuthUser {
     }
 }
 
-const SENSITIVE_RAW_KEYS: &[&str] = &[
-    "access_token",
-    "refresh_token",
-    "id_token",
-    "client_secret",
-    "app_key",
-    "appkey",
-    "code",
-];
-
 /// Recursively replace token/secret values in a provider payload.
 ///
 /// Provider payloads are retained for display/diagnostics, but they must never
@@ -255,8 +245,7 @@ pub(crate) fn sanitize_raw(value: serde_json::Value) -> serde_json::Value {
         serde_json::Value::Object(values) => values
             .into_iter()
             .map(|(key, value)| {
-                let key_lower = key.to_ascii_lowercase();
-                if SENSITIVE_RAW_KEYS.contains(&key_lower.as_str()) {
+                if crate::error::is_sensitive_key(&key) {
                     (key, serde_json::Value::String("********".to_owned()))
                 } else {
                     (key, sanitize_raw(value))
@@ -301,7 +290,7 @@ pub struct ExchangeRequest<'a> {
 mod tests {
     use serde_json::json;
 
-    use super::{AuthorizationRequest, OAuthUser, TokenSet, UserInfo};
+    use super::{AuthorizationRequest, OAuthUser, TokenSet, UserInfo, sanitize_raw};
 
     fn token_set() -> TokenSet {
         TokenSet {
@@ -358,6 +347,22 @@ mod tests {
         let raw = user.raw.unwrap();
         assert_eq!(raw["access_token"], "********");
         assert_eq!(raw["name"], "Alice");
+    }
+
+    #[test]
+    fn sanitize_raw_handles_camel_and_kebab_case_keys() {
+        let raw = sanitize_raw(json!({
+            "accessToken": "a",
+            "refresh-token": "b",
+            "client.secret": "c",
+            "idToken": "d",
+            "safe": "ok"
+        }));
+        assert_eq!(raw["accessToken"], "********");
+        assert_eq!(raw["refresh-token"], "********");
+        assert_eq!(raw["client.secret"], "********");
+        assert_eq!(raw["idToken"], "********");
+        assert_eq!(raw["safe"], "ok");
     }
 
     #[test]

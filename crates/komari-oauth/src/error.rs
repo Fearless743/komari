@@ -183,7 +183,7 @@ fn redact_json_value(value: &mut serde_json::Value) {
     match value {
         serde_json::Value::Object(values) => {
             for (key, value) in values.iter_mut() {
-                if is_sensitive_json_key(key) {
+                if is_sensitive_key(key) {
                     *value = serde_json::Value::String("********".to_owned());
                 } else {
                     redact_json_value(value);
@@ -199,17 +199,28 @@ fn redact_json_value(value: &mut serde_json::Value) {
     }
 }
 
-fn is_sensitive_json_key(key: &str) -> bool {
+/// Normalize a JSON key by removing separators and lowercasing it.
+///
+/// This makes `access_token`, `accessToken`, `access-token` and
+/// `access.token` equivalent.
+pub(crate) fn is_sensitive_key(key: &str) -> bool {
+    let normalized = key
+        .chars()
+        .filter(|character| !matches!(character, '_' | '-' | '.' | ' '))
+        .collect::<String>()
+        .to_ascii_lowercase();
     matches!(
-        key.to_ascii_lowercase().as_str(),
-        "access_token"
-            | "refresh_token"
-            | "id_token"
-            | "client_secret"
-            | "app_key"
+        normalized.as_str(),
+        "accesstoken"
+            | "refreshtoken"
+            | "idtoken"
+            | "clientsecret"
+            | "appsecret"
             | "appkey"
             | "secret"
             | "code"
+            | "token"
+            | "password"
     )
 }
 
@@ -263,7 +274,7 @@ mod tests {
 
     #[test]
     fn redacts_json_token_and_secret_values() {
-        let message = r#"HTTP 400: {"error":"invalid_grant","access_token":"tok-123","refresh_token":"ref-456","client_secret":"s3cr3t","nested":{"id_token":"jwt-789"}}"#;
+        let message = r#"HTTP 400: {"error":"invalid_grant","access_token":"tok-123","refreshToken":"ref-456","client-secret":"s3cr3t","nested":{"id.token":"jwt-789"}}"#;
         let redacted = redact_secrets(message, &[]);
         assert!(redacted.contains("invalid_grant"));
         assert!(!redacted.contains("tok-123"));
