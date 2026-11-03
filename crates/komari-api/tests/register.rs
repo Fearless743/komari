@@ -137,3 +137,17 @@ async fn register_tokens_are_unique_across_same_name() {
         json!(state.db.clients().count().unwrap())
     );
 }
+
+#[tokio::test]
+async fn exactly_twelve_character_key_is_accepted() {
+    let (state, app) = app();
+    set_auto_key(&state, "123456789012");
+    let mut req = request(Method::POST, "/api/clients/register", Body::empty());
+    req.headers_mut().insert(
+        header::AUTHORIZATION,
+        header::HeaderValue::from_static("Bearer 123456789012"),
+    );
+    let (status, body) = call(&app, req).await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(body["status"], "success");
+}
