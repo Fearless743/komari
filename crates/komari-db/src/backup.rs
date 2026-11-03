@@ -833,16 +833,17 @@ fn exchange_directories(left: &Path, right: &Path) -> io::Result<()> {
 
     // SAFETY: both pointers are valid NUL-terminated strings for the duration
     // of the call and `AT_FDCWD` is a valid dirfd. `SYS_renameat2` avoids a
-    // hard dependency on the glibc 2.28 wrapper; older libcs return ENOSYS and
-    // the caller falls back to two renames.
+    // hard dependency on the glibc 2.28 wrapper; older kernels return ENOSYS
+    // and the caller falls back to two renames. Variadic arguments are passed
+    // as `c_long` as required by the syscall ABI.
     let result = unsafe {
         libc::syscall(
             libc::SYS_renameat2,
-            libc::AT_FDCWD,
+            libc::AT_FDCWD as libc::c_long,
             left.as_ptr(),
-            libc::AT_FDCWD,
+            libc::AT_FDCWD as libc::c_long,
             right.as_ptr(),
-            libc::RENAME_EXCHANGE,
+            libc::RENAME_EXCHANGE as libc::c_long,
         )
     };
     if result == 0 {

@@ -204,8 +204,8 @@ The archive is inspected before anything is written:
    directory is replaced. On Linux the swap uses the
    `SYS_renameat2` syscall with `RENAME_EXCHANGE`, so there is no moment where
    `data_dir` is missing and no glibc 2.28 wrapper dependency. Other platforms
-   (or kernels/filesystems without exchange support, including `ENOSYS`) fall
-   back to two renames; if the process crashes between them, the previous data
+   (or older kernels/filesystems without exchange support; `ENOSYS` falls
+   back) use two renames; if the process crashes between them, the previous data
    is at a `.komari-backup-previous-*` sibling and can be moved back manually. A failure at any point removes the staging directory and leaves
    the existing data untouched. If `pre_restore_backup_dir` is set, a
    best-effort snapshot of the whole old data directory is written there
