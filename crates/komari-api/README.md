@@ -97,3 +97,56 @@ provider rows and loads `o_auth_provider`) before serving requests.
   that belongs to the web task (B09).
 - An administrator WebSocket still needs a resolvable `?token=` client token;
   admin HTTP reports/basic-info use the body UUID instead.
+
+## B06 — admin API and JSON-RPC 2.0
+
+`admin_router()` implements the Go `api/admin/**` groups (settings, clients,
+records, sessions, 2FA, backup, DDNS/notification/OAuth providers, themes,
+logs, clipboard, notification rules, test/update endpoints). Every handler
+takes `RequireAdmin`, so merging `admin_router()` without the role middleware
+still returns `401` for guests and agents.
+
+`rpc_router()` implements `/api/rpc2` over both POST and WebSocket. Both
+transports share `rpc::dispatch`, the namespace checks (`guest`/`client`/
+`admin`/`common`) and the codes from `utils/rpc/errors.go`. Registered methods:
+
+- `common:getNodes`, `common:getNodesLatestStatus`, `common:getMe`,
+  `common:getPublicInfo`, `common:getVersion`, `common:getNodeRecentStatus`,
+  `common:getRecords`
+- internal `rpc.ping`, `rpc.version`, `rpc.methods`, `rpc.help`
+
+The Go backend has no `admin:*` RPC methods, so they are **not** in the default
+registry. Set `KOMARI_RPC_ADMIN_METHODS=true` to opt in to the extension
+methods (`admin:getClients`, `admin:getClient`, `admin:getSettings`,
+`admin:saveSettings`, `admin:addClient`, `admin:editClient`,
+`admin:removeClient`); `rpc.methods` then lists them too.
+
+Provider GET responses call `komari_ddns::redact_addition`,
+`komari_notify::redact_addition` or the local OAuth redactor; the database
+keeps the complete `addition` JSON.
+
+Known differences:
+
+- `GET /api/admin/2fa/generate` returns `image/png` QR code bytes and the
+  `2fa_secret` cookie, matching Go. The otpauth URL is not returned as JSON.
+- Theme upload/update/import endpoints are not implemented (listing, switching,
+  deleting and per-theme settings are). They need ZIP/SSRF handling from the Go
+  implementation.
+- `common:getRecords` iterates the current `clients` table, so records of
+  already-deleted clients are not returned.
+- `common:getPublicInfo` does not merge managed-theme defaults from
+  `data/theme/<short>/komari-theme.json`.
+- `common:getMe` for an agent returns the token in `uuid`, matching the
+  observable Go behaviour (its lookup error check is inverted).
+- Admin backup upload validates `komari-backup-markup` and stages
+  `<data_dir>/backup.zip`; the server assembly must call
+  `komari_db::restore_pending_backup` at startup (Go exits and restores on the
+  next boot).
+
+## 历史提交说明
+
+首轮 B06 提交 `217231a`（`feat(api): 增加管理 API 的设置与客户端端点`）在
+`admin/mod.rs` 中提前声明了后续提交才加入的模块，因此该提交单独检出时不可
+编译。后续历史（`b6e467f`、`29e55c2`、`a458e2c`、`2e15cd4`）同样依赖前序
+提交才能构建。仓库未重写这些历史提交；自复审修复提交 `3392fbb` 起，每笔提交
+均在提交后执行 `cargo build -p komari-api` 验证，可单独构建。
