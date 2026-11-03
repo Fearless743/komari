@@ -5,24 +5,41 @@ Rust reimplementation of the Komari backend. The Go implementation in
 
 ## Status
 
-This workspace currently provides the project skeleton, configuration loading,
-version reporting, and the command-line interface. The HTTP server and business
-logic live in follow-up tasks; every crate below already exists so later work
-only changes the crate it owns.
+The merged baseline provides the CLI/configuration, the SQLite persistence
+layer, authentication, notifications, GeoIP, DDNS, scheduled record maintenance,
+the B14 static web assets (`komari-web`) and the B13 OAuth/OIDC crate
+(`komari-oauth`). The HTTP server, public/admin API and agent WebSocket assembly
+remain B04/B05/B06; OAuth HTTP login/binding routes and B14 static routes still
+need server assembly. `komari server` currently resolves configuration and
+prints it without binding a port.
 
-| Crate | Responsibility |
+| Crate | Responsibility | Status |
+| --- | --- | --- |
+| `komari-cli` | `komari` binary, flags, logging, version | merged (B01) |
+| `komari-config` | Environment/flag configuration and site defaults | merged (B01) |
+| `komari-db` | SQLite database layer | merged (B02) |
+| `komari-auth` | Authentication, sessions, TOTP, roles | merged (B03) |
+| `komari-api` | HTTP/JSON-RPC API | placeholder; B04/B05/B06 |
+| `komari-notify` | Notification delivery | merged (B07) |
+| `komari-jobs` | Scheduled record maintenance | merged |
+| `komari-ddns` | DDNS integrations | merged |
+| `komari-geoip` | GeoIP lookups | merged (B08) |
+| `komari-oauth` | OAuth/OIDC | merged (B13); HTTP routes pending assembly |
+| `komari-web` | Static themes and web assets | merged (B14); server assembly pending |
+
+## Documentation
+
+| Document | Contents |
 | --- | --- |
-| `komari-cli` | `komari` binary, flags, logging, version |
-| `komari-config` | Environment/flag configuration and site defaults |
-| `komari-db` | Database layer |
-| `komari-auth` | Authentication |
-| `komari-api` | HTTP/JSON-RPC API |
-| `komari-notify` | Notification delivery |
-| `komari-jobs` | Scheduled work |
-| `komari-ddns` | DDNS integrations |
-| `komari-geoip` | GeoIP lookups |
-| `komari-oauth` | OAuth/OIDC |
-| `komari-web` | Static themes and web assets |
+| [docs/CONFIGURATION.md](docs/CONFIGURATION.md) | All `KOMARI_*` variables, CLI flags, defaults, database, logging, CORS/WS, GeoIP/DDNS/OAuth/notification keys |
+| [docs/MIGRATION.md](docs/MIGRATION.md) | Go → Rust migration, SQLite schema compatibility, service swap, rollback, version injection, frontend assets |
+| [docs/DEPLOYMENT.md](docs/DEPLOYMENT.md) | systemd, Docker/Compose, reverse proxy (WebSocket/body/timeouts), backups, health checks, port 25774 |
+| [docs/API.md](docs/API.md) | Go reference routes and Rust implementation status (public/client/admin/rpc2/static) |
+| [docs/PARITY.md](docs/PARITY.md) | Module status and D-number summary |
+| [docs/parity-deviations.md](docs/parity-deviations.md) | Known Go/Rust behavior differences |
+
+Run `./docs/check-docs.sh` to verify documented environment variables, flags,
+configuration keys and relative links against the code.
 
 ## Build
 
@@ -60,10 +77,14 @@ Precedence is **command-line flag > environment variable > built-in default**.
 | `KOMARI_THEME` | `--theme` | `default` |
 | `KOMARI_ALLOW_CORS` | `--allow-cors[=BOOL]` | `false` |
 | `KOMARI_ENABLE_CLOUDFLARED` | `--enable-cloudflared[=BOOL]` | `false` |
+| `KOMARI_CLOUDFLARED_TOKEN` | none | unset |
 | `KOMARI_WS_DISABLE_ORIGIN` | `--ws-disable-origin[=BOOL]` | `false` |
 
 Empty environment values are treated as unset, matching the Go `GetEnv`
-helper. Boolean values accept `true/false`, `1/0`, `yes/no`, and `on/off`.
+helper. Environment booleans accept `true/false`, `1/0`, `yes/no`, and
+`on/off`; CLI boolean flags accept only lowercase `true`/`false` (bare
+`--flag` means true). The full reference, including persisted `configs` keys
+and provider JSON, is in [docs/CONFIGURATION.md](docs/CONFIGURATION.md).
 
 ## Version
 
