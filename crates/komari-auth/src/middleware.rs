@@ -247,9 +247,14 @@ pub fn extract_client_token(
     body: Option<&[u8]>,
 ) -> Option<String> {
     if let Some(token) = query.and_then(|query| query_param(query, "token")) {
-        return Some(token);
+        // Go `c.Query` returns the first value even when it is empty. An empty
+        // first value does not fall through to later `token` parameters.
+        if !token.is_empty() {
+            return Some(token);
+        }
     }
-    if method == Method::GET || method == Method::HEAD {
+    // Go only skips body parsing for GET; HEAD keeps the generic path.
+    if method == Method::GET {
         return None;
     }
     let body = body?;
@@ -257,7 +262,6 @@ pub fn extract_client_token(
     value
         .get("token")
         .and_then(serde_json::Value::as_str)
-        .map(str::trim)
         .filter(|token| !token.is_empty())
         .map(str::to_owned)
 }
@@ -693,9 +697,7 @@ fn cookie_value(headers: &HeaderMap, name: &str) -> Option<String> {
 fn query_param(query: &str, name: &str) -> Option<String> {
     query.split('&').find_map(|pair| {
         let (key, value) = pair.split_once('=').unwrap_or((pair, ""));
-        (percent_decode(key) == name)
-            .then(|| percent_decode(value))
-            .filter(|value| !value.is_empty())
+        (percent_decode(key) == name).then(|| percent_decode(value))
     })
 }
 
@@ -904,17 +906,38 @@ mod tests {
     #[test]
     fn extract_client_token_matches_go_precedence() {
         let method = Method::POST;
+        let body: Option<&[u8]> = Some(br#"{"token":"body"}"#);
         assert_eq!(
-            extract_client_token(Some("token=query"), &method, Some(br#"{"token":"body"}"#)),
+            extract_client_token(Some("token=query"), &method, body),
             Some("query".to_owned())
         );
         assert_eq!(
-            extract_client_token(None, &method, Some(br#"{"token":"body"}"#)),
+            extract_client_token(None, &method, body),
+            Some("body".to_owned())
+        );
+        assert_eq!(extract_client_token(None, &Method::GET, body), None);
+        // Go only skips the body for GET.
+        assert_eq!(
+            extract_client_token(None, &Method::HEAD, body),
+            Some("body".to_owned())
+        );
+        // The first query value wins even when empty; later values are ignored.
+        assert_eq!(
+            extract_client_token(Some("token=&token=second"), &method, body),
             Some("body".to_owned())
         );
         assert_eq!(
-            extract_client_token(None, &Method::GET, Some(br#"{"token":"body"}"#)),
+            extract_client_token(Some("token=&token=second"), &Method::GET, body),
             None
+        );
+        assert_eq!(
+            extract_client_token(Some("token=first&token=second"), &method, body),
+            Some("first".to_owned())
+        );
+        // The body token is not trimmed, matching Go.
+        assert_eq!(
+            extract_client_token(None, &method, Some(br#"{"token":"  spaced  "}"#.as_slice())),
+            Some("  spaced  ".to_owned())
         );
         assert_eq!(extract_client_token(None, &method, Some(b"not-json")), None);
     }
