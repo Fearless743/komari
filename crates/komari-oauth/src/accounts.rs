@@ -110,7 +110,16 @@ impl<'a> AccountLinker<'a> {
     }
 
     /// Find the local account bound to an external identity.
-    pub fn find(&self, identity: &SsoIdentity) -> Result<Option<User>> {
+    ///
+    /// Returns a [`SessionUser`] so callers cannot accidentally serialize the
+    /// password hash or TOTP secret.
+    pub fn find(&self, identity: &SsoIdentity) -> Result<Option<SessionUser>> {
+        Ok(self
+            .find_user(identity)?
+            .map(|user| SessionUser::from(&user)))
+    }
+
+    fn find_user(&self, identity: &SsoIdentity) -> Result<Option<User>> {
         identity.validate()?;
         let accounts = self.db.accounts();
         let combined = identity.combined_id();
@@ -142,7 +151,7 @@ impl<'a> AccountLinker<'a> {
         identity: &SsoIdentity,
         preferred_username: Option<&str>,
     ) -> Result<OAuthAccount> {
-        if let Some(user) = self.find(identity)? {
+        if let Some(user) = self.find_user(identity)? {
             return Ok(OAuthAccount {
                 user,
                 created: false,
@@ -176,7 +185,9 @@ impl<'a> AccountLinker<'a> {
     /// [`SessionUser`] or [`OAuthError::AccountNotBound`] (the API layer maps
     /// this to 401).
     pub fn login(&self, identity: &SsoIdentity) -> Result<SessionUser> {
-        let user = self.find(identity)?.ok_or(OAuthError::AccountNotBound)?;
+        let user = self
+            .find_user(identity)?
+            .ok_or(OAuthError::AccountNotBound)?;
         Ok(SessionUser::from(&user))
     }
 
@@ -185,21 +196,23 @@ impl<'a> AccountLinker<'a> {
     /// The local password hash is not touched. Binding fails when the identity
     /// already belongs to another account or when the target account already
     /// has a different identity bound.
-    pub fn bind(&self, uuid: &str, identity: &SsoIdentity) -> Result<User> {
+    pub fn bind(&self, uuid: &str, identity: &SsoIdentity) -> Result<SessionUser> {
         self.bind_inner(uuid, identity, false)
+            .map(|user| SessionUser::from(&user))
     }
 
     /// Replace the target account's existing binding with a new identity.
     ///
     /// An identity owned by a *different* account is still rejected, so two
     /// accounts can never share an external login.
-    pub fn rebind(&self, uuid: &str, identity: &SsoIdentity) -> Result<User> {
+    pub fn rebind(&self, uuid: &str, identity: &SsoIdentity) -> Result<SessionUser> {
         self.bind_inner(uuid, identity, true)
+            .map(|user| SessionUser::from(&user))
     }
 
     fn bind_inner(&self, uuid: &str, identity: &SsoIdentity, replace: bool) -> Result<User> {
         identity.validate()?;
-        if let Some(existing) = self.find(identity)? {
+        if let Some(existing) = self.find_user(identity)? {
             if existing.uuid != uuid {
                 return Err(OAuthError::AlreadyBound);
             }
@@ -221,9 +234,11 @@ impl<'a> AccountLinker<'a> {
     }
 
     /// Remove an external account binding.
-    pub fn unbind(&self, uuid: &str) -> Result<User> {
+    pub fn unbind(&self, uuid: &str) -> Result<SessionUser> {
         self.db.accounts().unbind_sso(uuid)?;
-        Ok(self.db.accounts().require_by_uuid(uuid)?)
+        Ok(SessionUser::from(
+            &self.db.accounts().require_by_uuid(uuid)?,
+        ))
     }
 
     fn unique_username(
@@ -319,8 +334,9 @@ mod tests {
         let bound = linker.bind(&local.uuid, &identity).unwrap();
         assert_eq!(bound.sso_id, "github_99");
         assert_eq!(bound.sso_type, "github");
-        assert!(bound.check_password("correct horse"));
-        assert_eq!(bound.passwd, local.passwd);
+        let stored = db.accounts().require_by_uuid(&local.uuid).unwrap();
+        assert!(stored.check_password("correct horse"));
+        assert_eq!(stored.passwd, local.passwd);
 
         let other = db.accounts().create("other", "password").unwrap();
         assert!(matches!(
@@ -400,6 +416,29 @@ mod tests {
         assert_eq!(value["sso_id"], "github_session-user");
         assert!(value.get("passwd").is_none());
         assert!(!value.to_string().contains("passwd"));
+    }
+
+    #[test]
+    fn find_bind_and_unbind_return_serializable_session_users() {
+        let db = database();
+        let local = db.accounts().create("session-safe", "password").unwrap();
+        let linker = AccountLinker::new(&db);
+        let identity = SsoIdentity::new("github", "safe-1");
+
+        let bound = linker.bind(&local.uuid, &identity).unwrap();
+        let bound_json = serde_json::to_string(&bound).unwrap();
+        assert!(bound_json.contains("github_safe-1"));
+        assert!(!bound_json.contains("passwd"));
+        assert!(!bound_json.contains("two_factor"));
+
+        let found = linker.find(&identity).unwrap().unwrap();
+        let found_json = serde_json::to_string(&found).unwrap();
+        assert!(!found_json.contains("passwd"));
+
+        let unbound = linker.unbind(&local.uuid).unwrap();
+        let unbound_json = serde_json::to_string(&unbound).unwrap();
+        assert!(unbound_json.contains("session-safe"));
+        assert!(!unbound_json.contains("passwd"));
     }
 
     #[test]
