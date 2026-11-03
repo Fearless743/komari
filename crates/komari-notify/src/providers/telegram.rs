@@ -10,14 +10,26 @@ use crate::error::{NotifyError, Result};
 use crate::http::{HttpRequest, HttpResponse, HttpTransport, ReqwestTransport, form_encode};
 use crate::provider::{ConfigField, MessageSender};
 
+/// Configuration keys removed from external API responses.
+pub const SENSITIVE_FIELDS: &[&str] = &["bot_token"];
+
 /// Provider configuration (`telegram.Addition`).
-#[derive(Clone, Debug, Default, Serialize, Deserialize)]
+#[derive(Clone, Default, Serialize, Deserialize)]
 #[serde(default)]
 pub struct TelegramConfig {
     pub bot_token: String,
     pub chat_id: String,
     pub message_thread_id: String,
     pub endpoint: String,
+}
+
+impl std::fmt::Debug for TelegramConfig {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        let redacted = crate::redact::redact_serialized("telegram", self);
+        f.debug_struct("TelegramConfig")
+            .field("config", &redacted)
+            .finish()
+    }
 }
 
 /// Telegram text sender.
@@ -108,6 +120,10 @@ impl MessageSender for TelegramSender {
 
     fn config(&self) -> Value {
         serde_json::to_value(&self.config).unwrap_or(Value::Null)
+    }
+
+    fn sensitive_fields(&self) -> &'static [&'static str] {
+        crate::providers::telegram::SENSITIVE_FIELDS
     }
 
     async fn send_text(&self, message: &str, title: &str) -> Result<()> {

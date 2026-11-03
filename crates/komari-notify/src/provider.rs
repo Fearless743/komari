@@ -19,7 +19,15 @@ pub trait MessageSender: Send + Sync {
     fn name(&self) -> &'static str;
 
     /// Current configuration as JSON, identical to `GetConfiguration()`.
+    ///
+    /// This is the full internal configuration and must not be returned from
+    /// an external API directly; use [`crate::redact_addition`] instead.
     fn config(&self) -> Value;
+
+    /// Configuration keys that must be removed from API responses.
+    fn sensitive_fields(&self) -> &'static [&'static str] {
+        &[]
+    }
 
     /// Send one text message. `title` may be empty.
     async fn send_text(&self, message: &str, title: &str) -> Result<()>;

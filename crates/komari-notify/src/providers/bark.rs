@@ -10,14 +10,26 @@ use crate::error::{NotifyError, Result};
 use crate::http::{HttpRequest, HttpResponse, HttpTransport, ReqwestTransport};
 use crate::provider::{ConfigField, MessageSender};
 
+/// Configuration keys removed from external API responses.
+pub const SENSITIVE_FIELDS: &[&str] = &["device_key"];
+
 /// Provider configuration (`bark.Addition`).
-#[derive(Clone, Debug, Default, Serialize, Deserialize)]
+#[derive(Clone, Default, Serialize, Deserialize)]
 #[serde(default)]
 pub struct BarkConfig {
     pub server_url: String,
     pub device_key: String,
     pub icon: String,
     pub level: String,
+}
+
+impl std::fmt::Debug for BarkConfig {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        let redacted = crate::redact::redact_serialized("bark", self);
+        f.debug_struct("BarkConfig")
+            .field("config", &redacted)
+            .finish()
+    }
 }
 
 /// Bark text sender.
@@ -123,6 +135,10 @@ impl MessageSender for BarkSender {
 
     fn config(&self) -> Value {
         serde_json::to_value(&self.config).unwrap_or(Value::Null)
+    }
+
+    fn sensitive_fields(&self) -> &'static [&'static str] {
+        crate::providers::bark::SENSITIVE_FIELDS
     }
 
     async fn init(&self) -> Result<()> {

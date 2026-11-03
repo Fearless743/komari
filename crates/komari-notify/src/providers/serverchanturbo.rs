@@ -10,14 +10,26 @@ use crate::error::{NotifyError, Result};
 use crate::http::{HttpRequest, HttpResponse, HttpTransport, ReqwestTransport};
 use crate::provider::{ConfigField, MessageSender};
 
+/// Configuration keys removed from external API responses.
+pub const SENSITIVE_FIELDS: &[&str] = &["api_url", "sendkey", "send_key", "token"];
+
 /// Provider configuration (`serverchanturbo.Addition`).
-#[derive(Clone, Debug, Default, Serialize, Deserialize)]
+#[derive(Clone, Default, Serialize, Deserialize)]
 #[serde(default)]
 pub struct ServerChanTurboConfig {
     pub api_url: String,
     pub channel: String,
     pub noip: String,
     pub openid: String,
+}
+
+impl std::fmt::Debug for ServerChanTurboConfig {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        let redacted = crate::redact::redact_serialized("serverchanturbo", self);
+        f.debug_struct("ServerChanTurboConfig")
+            .field("config", &redacted)
+            .finish()
+    }
 }
 
 /// Server酱 Turbo sender.
@@ -99,6 +111,10 @@ impl MessageSender for ServerChanTurboSender {
 
     fn config(&self) -> Value {
         serde_json::to_value(&self.config).unwrap_or(Value::Null)
+    }
+
+    fn sensitive_fields(&self) -> &'static [&'static str] {
+        crate::providers::serverchanturbo::SENSITIVE_FIELDS
     }
 
     async fn send_text(&self, message: &str, title: &str) -> Result<()> {

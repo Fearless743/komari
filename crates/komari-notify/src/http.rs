@@ -10,14 +10,41 @@ use std::time::Duration;
 use async_trait::async_trait;
 
 use crate::error::{NotifyError, Result};
+use crate::redact::{is_sensitive_header, redact_url_for_debug};
 
 /// A fully-resolved HTTP request.
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, PartialEq, Eq)]
 pub struct HttpRequest {
     pub method: String,
     pub url: String,
     pub headers: Vec<(String, String)>,
     pub body: Option<Vec<u8>>,
+}
+
+impl std::fmt::Debug for HttpRequest {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        let headers = self
+            .headers
+            .iter()
+            .map(|(name, value)| {
+                if is_sensitive_header(name) {
+                    (name.as_str(), "<redacted>")
+                } else {
+                    (name.as_str(), value.as_str())
+                }
+            })
+            .collect::<Vec<_>>();
+        let body = self
+            .body
+            .as_ref()
+            .map(|body| format!("<{} bytes redacted>", body.len()));
+        f.debug_struct("HttpRequest")
+            .field("method", &self.method)
+            .field("url", &redact_url_for_debug(&self.url))
+            .field("headers", &headers)
+            .field("body", &body)
+            .finish()
+    }
 }
 
 impl HttpRequest {
@@ -74,10 +101,19 @@ impl HttpRequest {
 }
 
 /// A raw HTTP response.
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, PartialEq, Eq)]
 pub struct HttpResponse {
     pub status: u16,
     pub body: Vec<u8>,
+}
+
+impl std::fmt::Debug for HttpResponse {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("HttpResponse")
+            .field("status", &self.status)
+            .field("body", &format!("<{} bytes redacted>", self.body.len()))
+            .finish()
+    }
 }
 
 impl HttpResponse {

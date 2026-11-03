@@ -20,6 +20,7 @@ pub struct ProviderRegistration {
     name: &'static str,
     default_config: Value,
     fields: Vec<ConfigField>,
+    sensitive_fields: &'static [&'static str],
     constructor: fn(Value) -> Result<Box<dyn MessageSender>>,
 }
 
@@ -34,8 +35,15 @@ impl ProviderRegistration {
             name,
             default_config,
             fields,
+            sensitive_fields: &[],
             constructor,
         }
+    }
+
+    /// Declare the configuration keys that must be removed from API responses.
+    pub fn sensitive(mut self, fields: &'static [&'static str]) -> Self {
+        self.sensitive_fields = fields;
+        self
     }
 
     pub fn name(&self) -> &'static str {
@@ -48,6 +56,10 @@ impl ProviderRegistration {
 
     pub fn fields(&self) -> &[ConfigField] {
         &self.fields
+    }
+
+    pub fn sensitive_fields(&self) -> &'static [&'static str] {
+        self.sensitive_fields
     }
 
     pub fn create(&self, addition: &str) -> Result<Box<dyn MessageSender>> {
@@ -105,54 +117,78 @@ impl ProviderRegistry {
     /// Register every provider Go imports from `all.go`.
     pub fn builtin() -> Self {
         let mut registry = Self::new();
-        registry.register(ProviderRegistration::new(
-            "telegram",
-            providers::telegram::default_config(),
-            providers::telegram::fields(),
-            providers::telegram::constructor,
-        ));
-        registry.register(ProviderRegistration::new(
-            "bark",
-            providers::bark::default_config(),
-            providers::bark::fields(),
-            providers::bark::constructor,
-        ));
-        registry.register(ProviderRegistration::new(
-            "webhook",
-            providers::webhook::default_config(),
-            providers::webhook::fields(),
-            providers::webhook::constructor,
-        ));
-        registry.register(ProviderRegistration::new(
-            "email",
-            providers::email::default_config(),
-            providers::email::fields(),
-            providers::email::constructor,
-        ));
-        registry.register(ProviderRegistration::new(
-            "Server酱³",
-            providers::serverchan3::default_config(),
-            providers::serverchan3::fields(),
-            providers::serverchan3::constructor,
-        ));
-        registry.register(ProviderRegistration::new(
-            "Server酱Turbo",
-            providers::serverchanturbo::default_config(),
-            providers::serverchanturbo::fields(),
-            providers::serverchanturbo::constructor,
-        ));
-        registry.register(ProviderRegistration::new(
-            "empty",
-            providers::empty::default_config(),
-            providers::empty::fields(),
-            providers::empty::constructor,
-        ));
-        registry.register(ProviderRegistration::new(
-            "Javascript",
-            providers::javascript::default_config(),
-            providers::javascript::fields(),
-            providers::javascript::constructor,
-        ));
+        registry.register(
+            ProviderRegistration::new(
+                "telegram",
+                providers::telegram::default_config(),
+                providers::telegram::fields(),
+                providers::telegram::constructor,
+            )
+            .sensitive(providers::telegram::SENSITIVE_FIELDS),
+        );
+        registry.register(
+            ProviderRegistration::new(
+                "bark",
+                providers::bark::default_config(),
+                providers::bark::fields(),
+                providers::bark::constructor,
+            )
+            .sensitive(providers::bark::SENSITIVE_FIELDS),
+        );
+        registry.register(
+            ProviderRegistration::new(
+                "webhook",
+                providers::webhook::default_config(),
+                providers::webhook::fields(),
+                providers::webhook::constructor,
+            )
+            .sensitive(providers::webhook::SENSITIVE_FIELDS),
+        );
+        registry.register(
+            ProviderRegistration::new(
+                "email",
+                providers::email::default_config(),
+                providers::email::fields(),
+                providers::email::constructor,
+            )
+            .sensitive(providers::email::SENSITIVE_FIELDS),
+        );
+        registry.register(
+            ProviderRegistration::new(
+                "Server酱³",
+                providers::serverchan3::default_config(),
+                providers::serverchan3::fields(),
+                providers::serverchan3::constructor,
+            )
+            .sensitive(providers::serverchan3::SENSITIVE_FIELDS),
+        );
+        registry.register(
+            ProviderRegistration::new(
+                "Server酱Turbo",
+                providers::serverchanturbo::default_config(),
+                providers::serverchanturbo::fields(),
+                providers::serverchanturbo::constructor,
+            )
+            .sensitive(providers::serverchanturbo::SENSITIVE_FIELDS),
+        );
+        registry.register(
+            ProviderRegistration::new(
+                "empty",
+                providers::empty::default_config(),
+                providers::empty::fields(),
+                providers::empty::constructor,
+            )
+            .sensitive(providers::empty::SENSITIVE_FIELDS),
+        );
+        registry.register(
+            ProviderRegistration::new(
+                "Javascript",
+                providers::javascript::default_config(),
+                providers::javascript::fields(),
+                providers::javascript::constructor,
+            )
+            .sensitive(providers::javascript::SENSITIVE_FIELDS),
+        );
         registry
     }
 
@@ -162,6 +198,12 @@ impl ProviderRegistry {
 
     pub fn get(&self, name: &str) -> Option<&ProviderRegistration> {
         self.providers.get(name)
+    }
+
+    /// Sensitive keys for a provider, or `None` when it is unknown.
+    pub fn sensitive_fields(&self, name: &str) -> Option<&'static [&'static str]> {
+        self.get(name)
+            .map(|registration| registration.sensitive_fields())
     }
 
     pub fn names(&self) -> Vec<&'static str> {
