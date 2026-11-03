@@ -40,19 +40,38 @@ let safe = redact_addition("telegram", &provider.addition);
 非法 JSON、顶层 `null`、数组/字符串/数字等非对象值、未知 provider 都返回
 `{}`，不会 panic，也不会回显原始字符串。键名比较忽略大小写、下划线和连字符。
 
+所有 URL 型字段（`url`/`URL`/`server_url`/`endpoint`/`api_url`）都会做凭据检测。
+API 响应中，含以下内容的 URL 字段会被移除：
+
+- userinfo（`https://user:pass@...`）；
+- 凭据类 query 参数（精确名单：`token`、`access_token`、`auth`、
+  `authorization`、`api_key`、`key`、`secret`、`password`、`sig`、
+  `signature`、`x-amz-signature`、`x-hub-signature-256`、`hmac` 等；
+  `author`、`monkey` 这类无关键不会被误删）；
+- 已知 webhook 路径 token：Slack `hooks.slack.com/services/...`、
+  Discord `/api/webhooks/...`、Microsoft Teams `/webhook...`；
+- Telegram Bot API 路径中直接拼接的 token（`api.telegram.org/bot<token>`）。
+
+启发式限制：未知自建服务把 token 放在普通路径段时，API 脱敏无法自动识别；
+但 `Debug` 输出对所有 URL 一律只保留 scheme + host + port，路径和 query 全部
+隐藏，因此日志不会泄露。远端非 2xx 响应体和 Telegram/Bark 错误描述也不再拼入
+`NotifyError`，避免响应内容回显 secret。
+
 | Provider | 移除的字段 |
 | --- | --- |
 | `telegram` | `bot_token` |
 | `bark` | `device_key` |
 | `Server酱³` | `api_url`（内含 sendkey），以及 `sendkey` / `send_key` / `token` 别名 |
 | `Server酱Turbo` | `api_url`（内含 sendkey），以及 `sendkey` / `send_key` / `token` 别名 |
-| `webhook` | `headers`、`body`、`password`；`url` 含 userinfo 或 token/secret/key 查询参数时也移除 |
+| `webhook` | `headers`、`body`、`password`；`url`/`URL` 含 userinfo、凭据 query 或 Slack/Discord/Teams 路径 token 时移除 |
 | `email` | `password` |
 | `Javascript` | `script`、`code` |
 | `empty` | 无 |
 
-配置结构体的 `Debug` 输出同样经过脱敏；`HttpRequest` 的 `Debug` 不显示请求体
-和敏感请求头，`EmailEnvelope` 不显示密码和 MIME 原文。
+配置结构体的 `Debug` 输出同样经过脱敏；所有 URL 字段只显示 scheme + host +
+port，路径/query 隐藏。`HttpRequest` 的 `Debug` 不显示请求体和敏感请求头
+（`Authorization`、`X-Auth`、`X-Hub-Signature-256`、`X-Api-Key` 等），
+`HttpResponse` 只显示 body 长度，`EmailEnvelope` 不显示密码和 MIME 原文。
 
 ## Known differences
 
