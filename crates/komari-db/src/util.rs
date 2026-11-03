@@ -39,9 +39,36 @@ pub fn hash_password(password: &str) -> String {
     BASE64.encode(hasher.finalize())
 }
 
-/// Constant-time-ish verification of a stored password hash.
+/// Whether a stored hash is bcrypt (`$2a$`, `$2b$`, `$2x$`, `$2y$`).
+///
+/// Komari only writes the Go SHA-256 format. Bcrypt is accepted here for
+/// read-only compatibility with databases written by older Rust builds; the
+/// auth layer upgrades such rows to SHA-256 on successful login.
+pub fn is_bcrypt_hash(hash: &str) -> bool {
+    hash.starts_with("$2a$")
+        || hash.starts_with("$2b$")
+        || hash.starts_with("$2x$")
+        || hash.starts_with("$2y$")
+}
+
+/// Verify only the Go `base64(SHA-256(password + salt))` format.
+///
+/// Unlike [`verify_password`] this never accepts bcrypt, so callers can enforce
+/// the exact Go fallback contract.
+pub fn verify_sha256_password(password: &str, hash: &str) -> bool {
+    !hash.is_empty() && hash_password(password) == hash
+}
+
+/// Verify a stored password hash.
+///
+/// Writes always use [`hash_password`] (SHA-256); bcrypt rows are accepted for
+/// read compatibility so `Accounts::check_password` and `User::check_password`
+/// do not reject credentials written by an older Rust version.
 pub fn verify_password(password: &str, hash: &str) -> bool {
-    hash_password(password) == hash
+    if is_bcrypt_hash(hash) {
+        return bcrypt::verify(password, hash).unwrap_or(false);
+    }
+    verify_sha256_password(password, hash)
 }
 
 #[cfg(test)]
@@ -54,6 +81,22 @@ mod tests {
         assert_eq!(
             hash_password("admin"),
             "NwK0chtAiNgPs5S3fCOjr2s6C61k8x+k/s9Y0PesSp4="
+        );
+    }
+
+    #[test]
+    fn bcrypt_hashes_are_read_only_compatible() {
+        // Bcrypt hash of "secret", as written by an older Rust build.
+        let hash = "$2a$10$C4Gwv0BDoZO0LFJLCMwD/OcQy61qVqTGBbvcnPh0FiTT408C69pv.";
+        assert!(verify_password("secret", hash));
+        assert!(!verify_password("wrong", hash));
+        assert!(!verify_sha256_password("secret", hash));
+        assert!(is_bcrypt_hash(hash));
+        assert!(!is_bcrypt_hash(&hash_password("secret")));
+        // Writing still produces the Go SHA-256 format.
+        assert_eq!(
+            hash_password("secret"),
+            "LKWZkh0XkW+IwPl4Zv7eHJmKmv2WvTk34iBzq0oefQM="
         );
     }
 
