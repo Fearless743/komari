@@ -11,9 +11,10 @@ pub const DEFAULT_LISTEN: &str = "0.0.0.0:25774";
 pub const DEFAULT_DB_FILE: &str = "data/komari.db";
 
 /// Supported database backends.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
 pub enum DatabaseType {
+    #[default]
     Sqlite,
     Mysql,
 }
@@ -28,12 +29,6 @@ impl DatabaseType {
 
     pub const fn is_sqlite(self) -> bool {
         matches!(self, Self::Sqlite)
-    }
-}
-
-impl Default for DatabaseType {
-    fn default() -> Self {
-        Self::Sqlite
     }
 }
 
