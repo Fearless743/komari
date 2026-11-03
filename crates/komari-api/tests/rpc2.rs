@@ -182,77 +182,29 @@ async fn rpc2_namespace_permissions() {
 }
 
 #[tokio::test]
-async fn rpc2_admin_client_and_settings_methods() {
+async fn rpc2_default_registry_hides_admin_extension_methods() {
     let (state, app) = rpc_app();
     set_api_key(&state, API_KEY);
-    let client = create_client(&state, "alpha");
+    create_client(&state, "alpha");
 
+    // Go has no admin:* methods. The extension is opt-in via
+    // KOMARI_RPC_ADMIN_METHODS, so the default registry reports not found.
     let (status, body) = call(&app, post_bearer(rpc(1, "admin:getClients", json!({})))).await;
     assert_eq!(status, StatusCode::OK);
-    assert_eq!(body["result"].as_array().unwrap().len(), 1);
-    assert_eq!(body["result"][0]["name"], "alpha");
-
-    let (status, body) = call(
-        &app,
-        post_bearer(rpc(2, "admin:getClient", json!({"uuid": client.uuid}))),
-    )
-    .await;
-    assert_eq!(status, StatusCode::OK);
-    assert_eq!(body["result"]["uuid"], client.uuid);
-
-    let (status, body) = call(
-        &app,
-        post_bearer(rpc(3, "admin:getClient", json!({"uuid": "missing"}))),
-    )
-    .await;
-    assert_eq!(status, StatusCode::OK);
-    assert_eq!(body["error"]["code"], -32044);
-
-    let (status, body) = call(
-        &app,
-        post_bearer(rpc(4, "admin:saveSettings", json!({"sitename": "Rpc"}))),
-    )
-    .await;
-    assert_eq!(status, StatusCode::OK);
-    assert!(body.get("result").is_none());
-    assert!(body.get("error").is_none());
-
-    let (status, body) = call(&app, post_bearer(rpc(5, "admin:getSettings", json!({})))).await;
-    assert_eq!(status, StatusCode::OK);
-    assert_eq!(body["result"]["sitename"], "Rpc");
-
-    let (status, body) = call(
-        &app,
-        post_bearer(rpc(6, "admin:addClient", json!({"name": "beta"}))),
-    )
-    .await;
-    assert_eq!(status, StatusCode::OK);
-    let beta = body["result"]["uuid"].as_str().unwrap().to_owned();
-    let (_, body) = call(
-        &app,
-        post_bearer(rpc(
-            7,
-            "admin:editClient",
-            json!({"uuid": beta, "hidden": true, "weight": 3}),
-        )),
-    )
-    .await;
-    assert!(body.get("error").is_none());
-    let (_, body) = call(
-        &app,
-        post_bearer(rpc(8, "admin:getClient", json!({"uuid": beta}))),
-    )
-    .await;
-    assert_eq!(body["result"]["hidden"], true);
-    assert_eq!(body["result"]["weight"], 3);
+    assert_eq!(body["error"]["code"], -32601);
+    assert_eq!(body["error"]["message"], "method not found");
 
     let (_, body) = call(
         &app,
-        post_bearer(rpc(9, "admin:removeClient", json!({"uuid": beta}))),
+        post_bearer(rpc(2, "rpc.methods", json!({"internal": true}))),
     )
     .await;
-    assert!(body.get("error").is_none());
-    assert_eq!(state.db.clients().list().unwrap().len(), 1);
+    let methods = body["result"].as_array().unwrap();
+    assert!(!methods.iter().any(|method| {
+        method
+            .as_str()
+            .is_some_and(|name| name.starts_with("admin:"))
+    }));
 }
 
 #[tokio::test]
@@ -286,6 +238,37 @@ async fn rpc2_errors_match_go_codes() {
     assert_eq!(status, StatusCode::BAD_REQUEST);
     assert_eq!(body["error"]["code"], -32600);
     assert_eq!(body["error"]["message"], "empty batch");
+}
+
+#[tokio::test]
+async fn rpc2_positional_and_scalar_params_match_go_binding() {
+    let (state, app) = rpc_app();
+    let client = create_client(&state, "positional");
+
+    let (status, body) = call(&app, post(rpc(1, "common:getNodes", json!([client.uuid])))).await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(body["result"]["uuid"], client.uuid);
+
+    let (status, body) = call(&app, post(rpc(2, "common:getNodes", json!(client.uuid)))).await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(body["result"]["uuid"], client.uuid);
+}
+
+#[tokio::test]
+async fn rpc2_method_not_allowed_and_origin_rejection_match_go() {
+    let (_state, app) = rpc_app();
+
+    let (status, body) = call(&app, request(Method::PATCH, "/api/rpc2", Body::empty())).await;
+    assert_eq!(status, StatusCode::METHOD_NOT_ALLOWED);
+    assert_eq!(body["error"], "method not allowed");
+
+    let mut request = request(Method::GET, "/api/rpc2", Body::empty());
+    request
+        .headers_mut()
+        .insert(header::ORIGIN, "http://evil.example".parse().unwrap());
+    let (status, body) = call(&app, request).await;
+    assert_eq!(status, StatusCode::FORBIDDEN);
+    assert_eq!(body, Value::String("Forbidden\n".to_owned()));
 }
 
 #[tokio::test]
@@ -340,7 +323,7 @@ async fn rpc2_get_me_for_each_permission_group() {
     .await;
     assert_eq!(body["result"]["logged_in"], true);
     assert_eq!(body["result"]["username"], "client");
-    assert_eq!(body["result"]["uuid"], client.uuid);
+    assert_eq!(body["result"]["uuid"], client.token);
 
     let request = Request::builder()
         .method(Method::POST)

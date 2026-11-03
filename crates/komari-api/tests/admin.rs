@@ -92,7 +92,7 @@ async fn admin_settings_round_trip() {
     let (state, app) = admin_app(directory.path());
     admin_key(&state);
 
-    let (status, _) = call(
+    let (status, body) = call(
         &app,
         bearer(
             Method::POST,
@@ -102,6 +102,8 @@ async fn admin_settings_round_trip() {
     )
     .await;
     assert_eq!(status, StatusCode::OK);
+    assert_eq!(body["status"], "success");
+    assert!(body.get("data").is_none());
 
     let (_, body) = call(
         &app,
@@ -118,6 +120,54 @@ async fn admin_settings_round_trip() {
     .await;
     assert_eq!(status, StatusCode::BAD_REQUEST);
     assert_eq!(body["status"], "error");
+}
+
+#[tokio::test]
+async fn admin_settings_apply_provider_and_theme_side_effects() {
+    let directory = tempfile::tempdir().unwrap();
+    let theme_root = directory.path().join("theme").join("alpha");
+    std::fs::create_dir_all(theme_root.join("dist")).unwrap();
+    std::fs::write(
+        theme_root.join("komari-theme.json"),
+        r#"{"name":"Alpha","short":"alpha"}"#,
+    )
+    .unwrap();
+    std::fs::write(theme_root.join("dist/index.html"), "<html></html>").unwrap();
+
+    let (state, app) = admin_app(directory.path());
+    admin_key(&state);
+    state
+        .db
+        .ddns_providers()
+        .save(&Provider::new(
+            "cloudflare",
+            r#"{"api_token":"token","zone_id":"zone","record_id":"record"}"#,
+        ))
+        .unwrap();
+
+    let (status, _) = call(
+        &app,
+        bearer(
+            Method::POST,
+            "/api/admin/settings",
+            json_body(json!({
+                "ddns_provider": "cloudflare",
+                "ddns_enabled": true,
+                "theme": "alpha",
+                "sitename": "Side Effects"
+            })),
+        ),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+
+    let provider = state
+        .ddns
+        .current_provider()
+        .expect("DDNS provider should be loaded");
+    assert_eq!(provider.name(), "cloudflare");
+    assert_eq!(state.web.theme(), "alpha");
+    assert_eq!(state.web.site_meta().sitename, "Side Effects");
 }
 
 #[tokio::test]
@@ -162,7 +212,7 @@ async fn admin_clients_crud_weight_and_hidden() {
     assert_eq!(status, StatusCode::OK);
     assert_eq!(body["uuid"], uuid);
 
-    let (status, _) = call(
+    let (status, body) = call(
         &app,
         bearer(
             Method::POST,
@@ -172,6 +222,7 @@ async fn admin_clients_crud_weight_and_hidden() {
     )
     .await;
     assert_eq!(status, StatusCode::OK);
+    assert_eq!(body, json!({"status": "success"}));
 
     let (_, body) = call(
         &app,
@@ -198,7 +249,7 @@ async fn admin_clients_crud_weight_and_hidden() {
     assert_eq!(status, StatusCode::OK);
     assert_eq!(body["token"], token);
 
-    let (status, _) = call(
+    let (status, body) = call(
         &app,
         bearer(
             Method::POST,
@@ -208,6 +259,7 @@ async fn admin_clients_crud_weight_and_hidden() {
     )
     .await;
     assert_eq!(status, StatusCode::OK);
+    assert_eq!(body, json!({"status": "success", "message": ""}));
     let (_, body) = call(
         &app,
         bearer(
@@ -219,7 +271,7 @@ async fn admin_clients_crud_weight_and_hidden() {
     .await;
     assert_eq!(body["weight"], 9);
 
-    let (status, _) = call(
+    let (status, body) = call(
         &app,
         bearer(
             Method::POST,
@@ -229,6 +281,7 @@ async fn admin_clients_crud_weight_and_hidden() {
     )
     .await;
     assert_eq!(status, StatusCode::OK);
+    assert_eq!(body, json!({"status": "success"}));
     let (_, body) = call(
         &app,
         bearer(Method::GET, "/api/admin/client/list", Body::empty()),
@@ -294,6 +347,29 @@ async fn admin_ddns_get_redacts_sensitive_fields() {
     .await;
     assert_eq!(status, StatusCode::OK);
     assert!(body["data"]["cloudflare"].is_array());
+
+    // Invalid history query values fall back to the defaults, not a 400.
+    let (status, body) = call(
+        &app,
+        bearer(
+            Method::GET,
+            "/api/admin/settings/ddns/history?limit=abc&before_days=abc",
+            Body::empty(),
+        ),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    assert!(body["data"].is_array());
+    let (status, _) = call(
+        &app,
+        bearer(
+            Method::DELETE,
+            "/api/admin/settings/ddns/history?before_days=abc",
+            Body::empty(),
+        ),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
 }
 
 #[tokio::test]
@@ -331,7 +407,7 @@ async fn admin_notification_and_oauth_get_redact_secrets() {
         .oauth()
         .save(&Provider::new(
             "github",
-            r#"{"client_id":"id","client_secret":"oauth-secret"}"#,
+            r#"{"client_id":"id","client_secret":"oauth-secret","app_secret":"app-secret","id_token":"jwt","code":"auth-code","state":"csrf"}"#,
         ))
         .unwrap();
     let (status, body) = call(
@@ -346,6 +422,10 @@ async fn admin_notification_and_oauth_get_redact_secrets() {
     assert_eq!(status, StatusCode::OK);
     let addition: Value = serde_json::from_str(body["data"]["addition"].as_str().unwrap()).unwrap();
     assert!(addition.get("client_secret").is_none());
+    assert!(addition.get("app_secret").is_none());
+    assert!(addition.get("id_token").is_none());
+    assert!(addition.get("code").is_none());
+    assert!(addition.get("state").is_none());
     assert_eq!(addition["client_id"], "id");
 
     let (status, body) = call(
@@ -515,6 +595,14 @@ async fn admin_backup_upload_validates_markup_and_stages_zip() {
     let (status, body) = call(&app, request).await;
     assert_eq!(status, StatusCode::OK);
     assert_eq!(body["status"], "success");
+    assert_eq!(body["path"], "./data/backup.zip");
+    assert!(
+        body["message"]
+            .as_str()
+            .unwrap()
+            .contains("Backup uploaded")
+    );
+    assert!(body.get("data").is_none());
     assert!(directory.path().join("backup.zip").is_file());
 
     // A ZIP without the marker is rejected.
@@ -548,6 +636,53 @@ async fn admin_backup_upload_validates_markup_and_stages_zip() {
         .unwrap();
     let (status, _) = call(&app, request).await;
     assert_eq!(status, StatusCode::BAD_REQUEST);
+}
+
+#[tokio::test]
+async fn admin_backup_upload_accepts_archives_over_two_megabytes() {
+    let directory = tempfile::tempdir().unwrap();
+    let (state, app) = admin_app(directory.path());
+    admin_key(&state);
+
+    let mut buffer = Cursor::new(Vec::new());
+    {
+        let mut zip = zip::ZipWriter::new(&mut buffer);
+        let options = zip::write::SimpleFileOptions::default()
+            .compression_method(zip::CompressionMethod::Stored);
+        zip.start_file("komari-backup-markup", options).unwrap();
+        zip.write_all(b"marker").unwrap();
+        zip.start_file("big.bin", options).unwrap();
+        zip.write_all(&vec![0x5a; 3 * 1024 * 1024]).unwrap();
+        zip.finish().unwrap();
+    }
+    let archive = buffer.into_inner();
+    assert!(archive.len() > 2 * 1024 * 1024);
+
+    let boundary = "----komari-large";
+    let mut body = Vec::new();
+    body.extend_from_slice(
+        format!(
+            "--{boundary}\r\nContent-Disposition: form-data; name=\"backup\"; filename=\"large.zip\"\r\nContent-Type: application/zip\r\n\r\n"
+        )
+        .as_bytes(),
+    );
+    body.extend_from_slice(&archive);
+    body.extend_from_slice(format!("\r\n--{boundary}--\r\n").as_bytes());
+
+    let request = Request::builder()
+        .method(Method::POST)
+        .uri("/api/admin/upload/backup")
+        .header(header::AUTHORIZATION, format!("Bearer {API_KEY}"))
+        .header(
+            header::CONTENT_TYPE,
+            format!("multipart/form-data; boundary={boundary}"),
+        )
+        .body(Body::from(body))
+        .unwrap();
+    let (status, body) = call(&app, request).await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(body["status"], "success");
+    assert!(directory.path().join("backup.zip").is_file());
 }
 
 #[tokio::test]
@@ -593,25 +728,21 @@ async fn admin_two_factor_generate_enable_disable() {
     );
     let response = app.clone().oneshot(request).await.unwrap();
     assert_eq!(response.status(), StatusCode::OK);
-    assert!(
-        response.headers()[header::SET_COOKIE]
-            .to_str()
-            .unwrap()
-            .contains("2fa_secret=")
-    );
-    let body: Value = serde_json::from_slice(
-        &axum::body::to_bytes(response.into_body(), usize::MAX)
-            .await
-            .unwrap(),
-    )
-    .unwrap();
-    let secret = body["data"]["secret"].as_str().unwrap().to_owned();
-    assert!(
-        body["data"]["otpauth_url"]
-            .as_str()
-            .unwrap()
-            .starts_with("otpauth://totp/")
-    );
+    assert_eq!(response.headers()[header::CONTENT_TYPE], "image/png");
+    let cookie = response.headers()[header::SET_COOKIE]
+        .to_str()
+        .unwrap()
+        .to_owned();
+    let secret = cookie
+        .split(';')
+        .find_map(|part| part.trim().strip_prefix("2fa_secret="))
+        .expect("2fa_secret cookie")
+        .to_owned();
+    let body = axum::body::to_bytes(response.into_body(), usize::MAX)
+        .await
+        .unwrap();
+    assert!(body.starts_with(b"\x89PNG\r\n\x1a\n"));
+    assert!(body.len() > 100);
 
     let code = komari_auth::generate_code_at(&secret, chrono::Utc::now().timestamp()).unwrap();
     let request = with_cookies(
@@ -664,8 +795,9 @@ async fn admin_logs_and_clipboard() {
 
     let (status, body) = call(&app, bearer(Method::GET, "/api/admin/logs", Body::empty())).await;
     assert_eq!(status, StatusCode::OK);
-    assert_eq!(body["total"], 1);
-    assert_eq!(body["logs"][0]["message"], "hello");
+    assert_eq!(body["data"]["total"], 1);
+    assert_eq!(body["data"]["logs"][0]["message"], "hello");
+    assert!(body.get("total").is_none());
 
     let (status, _) = call(
         &app,
@@ -719,6 +851,17 @@ async fn admin_logs_and_clipboard() {
     .await;
     assert_eq!(status, StatusCode::OK);
     assert!(state.db.clipboard().list().unwrap().is_empty());
+
+    let (status, _) = call(
+        &app,
+        bearer(
+            Method::POST,
+            &format!("/api/admin/clipboard/{id}/remove"),
+            Body::empty(),
+        ),
+    )
+    .await;
+    assert_eq!(status, StatusCode::INTERNAL_SERVER_ERROR);
 }
 
 #[tokio::test]
@@ -799,6 +942,34 @@ async fn admin_notification_rules() {
     .await;
     assert_eq!(body["data"][0]["name"], "cpu high");
 
+    // Editing preserves fields the caller did not set, including last_notified.
+    let notified_at = komari_db::LocalTime::now().add_seconds(-60);
+    state
+        .db
+        .notifications()
+        .load_set_last_notified(task_id, notified_at)
+        .unwrap();
+    let (status, _) = call(
+        &app,
+        bearer(
+            Method::POST,
+            "/api/admin/notification/load/edit",
+            json_body(json!({"notifications": [{"id": task_id, "name": "renamed"}]})),
+        ),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    let (_, body) = call(
+        &app,
+        bearer(Method::GET, "/api/admin/notification/load", Body::empty()),
+    )
+    .await;
+    assert_eq!(body["data"][0]["name"], "renamed");
+    assert_eq!(
+        body["data"][0]["last_notified"],
+        serde_json::to_value(notified_at).unwrap()
+    );
+
     let (status, _) = call(
         &app,
         bearer(
@@ -809,6 +980,28 @@ async fn admin_notification_rules() {
     )
     .await;
     assert_eq!(status, StatusCode::OK);
+
+    // Deleting a missing rule and editing id=0 are Go 500s.
+    let (status, _) = call(
+        &app,
+        bearer(
+            Method::POST,
+            "/api/admin/notification/load/delete",
+            json_body(json!({"id": [task_id]})),
+        ),
+    )
+    .await;
+    assert_eq!(status, StatusCode::INTERNAL_SERVER_ERROR);
+    let (status, _) = call(
+        &app,
+        bearer(
+            Method::POST,
+            "/api/admin/notification/load/edit",
+            json_body(json!({"notifications": [{"id": 0, "name": "new"}]})),
+        ),
+    )
+    .await;
+    assert_eq!(status, StatusCode::INTERNAL_SERVER_ERROR);
 }
 
 #[tokio::test]
@@ -867,8 +1060,37 @@ async fn admin_user_update_and_favicon() {
         .unwrap();
     assert!(updated.check_password("new-password"));
 
+    // The password change invalidated every session, including the caller's.
+    let (status, _) = call(
+        &app,
+        with_cookie(
+            request(Method::GET, "/api/admin/settings", Body::empty()),
+            &format!("session_token={session}"),
+        ),
+    )
+    .await;
+    assert_eq!(status, StatusCode::UNAUTHORIZED);
+
+    // A missing user is a 500, matching Go's accounts.UpdateUser error path.
+    let (status, body) = call(
+        &app,
+        bearer(
+            Method::POST,
+            "/api/admin/update/user",
+            json_body(json!({"uuid": "missing", "password": "new-password"})),
+        ),
+    )
+    .await;
+    assert_eq!(status, StatusCode::INTERNAL_SERVER_ERROR);
+    assert_eq!(body["message"], "user not found: missing");
+
+    // 3 MB favicon is above Axum's default 2 MB limit but below the 5 MB cap.
     let request = with_header(
-        bearer(Method::PUT, "/api/admin/update/favicon", Body::from("icon")),
+        bearer(
+            Method::PUT,
+            "/api/admin/update/favicon",
+            Body::from(vec![7u8; 3 * 1024 * 1024]),
+        ),
         header::CONTENT_TYPE,
         "image/x-icon",
     );

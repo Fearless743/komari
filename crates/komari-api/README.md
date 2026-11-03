@@ -64,10 +64,13 @@ transports share `rpc::dispatch`, the namespace checks (`guest`/`client`/
 - `common:getNodes`, `common:getNodesLatestStatus`, `common:getMe`,
   `common:getPublicInfo`, `common:getVersion`, `common:getNodeRecentStatus`,
   `common:getRecords`
-- `admin:getClients`, `admin:getClient`, `admin:getSettings`,
-  `admin:saveSettings`, `admin:addClient`, `admin:editClient`,
-  `admin:removeClient`
 - internal `rpc.ping`, `rpc.version`, `rpc.methods`, `rpc.help`
+
+The Go backend has no `admin:*` RPC methods, so they are **not** in the default
+registry. Set `KOMARI_RPC_ADMIN_METHODS=true` to opt in to the extension
+methods (`admin:getClients`, `admin:getClient`, `admin:getSettings`,
+`admin:saveSettings`, `admin:addClient`, `admin:editClient`,
+`admin:removeClient`); `rpc.methods` then lists them too.
 
 Provider GET responses call `komari_ddns::redact_addition`,
 `komari_notify::redact_addition` or the local OAuth redactor; the database
@@ -75,9 +78,8 @@ keeps the complete `addition` JSON.
 
 Known differences:
 
-- `GET /api/admin/2fa/generate` returns the enrolment material as JSON
-  (`secret`, `otpauth_url`) instead of a PNG QR code; the `2fa_secret` cookie
-  and enable/disable flow are unchanged.
+- `GET /api/admin/2fa/generate` returns `image/png` QR code bytes and the
+  `2fa_secret` cookie, matching Go. The otpauth URL is not returned as JSON.
 - Theme upload/update/import endpoints are not implemented (listing, switching,
   deleting and per-theme settings are). They need ZIP/SSRF handling from the Go
   implementation.
@@ -85,8 +87,8 @@ Known differences:
   already-deleted clients are not returned.
 - `common:getPublicInfo` does not merge managed-theme defaults from
   `data/theme/<short>/komari-theme.json`.
-- `common:getMe` for an agent returns the resolved client UUID; the Go code has
-  an inverted error check and may return the token instead.
+- `common:getMe` for an agent returns the token in `uuid`, matching the
+  observable Go behaviour (its lookup error check is inverted).
 - Admin backup upload validates `komari-backup-markup` and stages
   `<data_dir>/backup.zip`; the server assembly must call
   `komari_db::restore_pending_backup` at startup (Go exits and restores on the
