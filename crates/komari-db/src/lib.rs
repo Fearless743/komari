@@ -26,7 +26,7 @@ pub mod util;
 
 pub use backup::{
     BACKUP_DB_NAME, BACKUP_MARKUP_NAME, BackupOptions, BackupReport, DEFAULT_DATA_DIR,
-    import_backup, import_backup_bytes, import_backup_file,
+    import_backup, import_backup_bytes, import_backup_file, restore_pending_backup,
 };
 pub use db::{DEFAULT_DB_FILE, Db, DbOptions};
 pub use error::{DbError, Result};

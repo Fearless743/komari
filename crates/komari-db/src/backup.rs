@@ -211,6 +211,7 @@ impl Db {
         destination: impl AsRef<Path>,
     ) -> Result<BackupReport> {
         let destination = destination.as_ref();
+        ensure_safe_destination(self, options, destination)?;
         let parent = non_empty_parent(destination);
         if !parent.as_os_str().is_empty() {
             fs::create_dir_all(parent)?;
@@ -421,6 +422,53 @@ pub fn import_backup_file(options: &BackupOptions, path: impl AsRef<Path>) -> Re
         }
     }
     import_backup(options, File::open(path)?)
+}
+
+fn ensure_safe_destination(db: &Db, options: &BackupOptions, destination: &Path) -> Result<()> {
+    let destination = normalize_path(destination);
+    let mut protected = Vec::new();
+    if let Some(path) = db.path() {
+        protected.push(path.to_path_buf());
+    }
+    protected.push(options.resolved_database_path());
+    protected.push(options.data_dir.join(BACKUP_DB_NAME));
+
+    for path in protected {
+        for candidate in [
+            path.clone(),
+            append_suffix(&path, "-wal"),
+            append_suffix(&path, "-shm"),
+        ] {
+            if normalize_path(&candidate) == destination {
+                return Err(DbError::InvalidData(format!(
+                    "backup destination {} would overwrite the live database",
+                    destination.display()
+                )));
+            }
+        }
+    }
+    Ok(())
+}
+
+fn append_suffix(path: &Path, suffix: &str) -> PathBuf {
+    let mut value = path.as_os_str().to_os_string();
+    value.push(suffix);
+    PathBuf::from(value)
+}
+
+/// Restore `<data_dir>/backup.zip` when present, mirroring the Go backend's
+/// startup restore. Returns `None` when no pending archive exists.
+///
+/// The archive is read into memory before the data directory is swapped, so
+/// the restore does not depend on the old directory (which contains the
+/// archive) surviving the replacement.
+pub fn restore_pending_backup(options: &BackupOptions) -> Result<Option<BackupReport>> {
+    let pending = options.data_dir.join("backup.zip");
+    if !pending.is_file() {
+        return Ok(None);
+    }
+    let bytes = fs::read(&pending)?;
+    import_backup_bytes(options, &bytes).map(Some)
 }
 
 fn import_guard(options: &BackupOptions) -> Result<ArcMutexGuard<RawMutex, ()>> {
