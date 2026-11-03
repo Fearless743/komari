@@ -4,7 +4,7 @@ use std::collections::HashMap;
 
 use axum::Router;
 use axum::body::Bytes;
-use axum::extract::{Query, State};
+use axum::extract::{DefaultBodyLimit, Query, State};
 use axum::http::StatusCode;
 use axum::http::header::HeaderMap;
 use axum::response::{IntoResponse, Response};
@@ -27,7 +27,10 @@ pub(crate) fn routes() -> Router<ApiState> {
         .route("/api/admin/update/user", post(update_user))
         .route(
             "/api/admin/update/favicon",
-            axum::routing::put(upload_favicon).post(delete_favicon),
+            axum::routing::put(upload_favicon)
+                .post(delete_favicon)
+                // The handler enforces 5 MB; raise Axum's 2 MB default first.
+                .layer(DefaultBodyLimit::max(5 * 1024 * 1024)),
         )
 }
 
@@ -144,6 +147,12 @@ pub(crate) async fn update_user(
         }
     }
 
+    match state.db.accounts().get_by_uuid(&request.uuid) {
+        Ok(Some(_)) => {}
+        Ok(None) => return internal(format!("user not found: {}", request.uuid)),
+        Err(error) => return internal(format!("Failed to update user: {error}")),
+    }
+
     if let Err(error) = state.db.accounts().update_profile(
         &request.uuid,
         request.username.as_deref(),
@@ -153,6 +162,10 @@ pub(crate) async fn update_user(
     }
     if let Some(password) = request.password.as_deref() {
         if let Err(error) = state.db.accounts().set_password(&request.uuid, password) {
+            return internal(format!("Failed to update user: {error}"));
+        }
+        // Go invalidates every session after an administrator password change.
+        if let Err(error) = state.db.sessions().delete_all() {
             return internal(format!("Failed to update user: {error}"));
         }
     }
