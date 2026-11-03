@@ -11,7 +11,7 @@ use serde::{Deserialize, Serialize};
 /// `Value` marshals to a JSON array and `Scan` accepts the text produced by SQLite.
 /// SQL `NULL` is treated as an empty array (the Go implementation would error;
 /// accepting `NULL` lets us read rows written by other tools without failing).
-#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize)]
 #[serde(transparent)]
 pub struct StringArray(pub Vec<String>);
 
@@ -39,7 +39,16 @@ impl StringArray {
     }
 
     /// Parse the JSON representation produced by `StringArray.Value`.
+    ///
+    /// Go's nil slice marshals to `null` and `json.Unmarshal("null", &slice)`
+    /// yields a nil slice, so `null` is accepted as an empty array. This also
+    /// keeps rows written by Go (`load_notifications.clients = 'null'`)
+    /// readable.
     pub fn from_json(value: &str) -> Result<Self, serde_json::Error> {
+        let trimmed = value.trim();
+        if trimmed.is_empty() || trimmed.eq_ignore_ascii_case("null") {
+            return Ok(Self::default());
+        }
         serde_json::from_str(value).map(Self)
     }
 }
@@ -100,6 +109,14 @@ impl AsRef<[String]> for StringArray {
     }
 }
 
+impl<'de> Deserialize<'de> for StringArray {
+    fn deserialize<D: serde::Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
+        // `null` mirrors Go's nil slice and maps to an empty array.
+        let values = Option::<Vec<String>>::deserialize(deserializer)?;
+        Ok(Self(values.unwrap_or_default()))
+    }
+}
+
 impl fmt::Display for StringArray {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.write_str(&self.to_json())
@@ -153,5 +170,22 @@ mod tests {
     #[test]
     fn empty_array_is_not_null() {
         assert_eq!(StringArray::default().to_json(), "[]");
+    }
+
+    #[test]
+    fn go_nil_array_is_accepted_everywhere() {
+        assert_eq!(
+            StringArray::from_json("null").unwrap(),
+            StringArray::default()
+        );
+        assert_eq!(
+            StringArray::from_json("  null ").unwrap(),
+            StringArray::default()
+        );
+        assert_eq!(StringArray::from_json("").unwrap(), StringArray::default());
+        let decoded: StringArray = serde_json::from_str("null").unwrap();
+        assert!(decoded.is_empty());
+        let decoded: StringArray = serde_json::from_str("[]").unwrap();
+        assert!(decoded.is_empty());
     }
 }

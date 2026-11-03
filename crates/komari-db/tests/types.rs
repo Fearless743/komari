@@ -93,6 +93,33 @@ fn string_array_round_trips_as_json() {
 }
 
 #[test]
+fn string_array_reads_go_nil_text() {
+    let db = scratch_db();
+    db.with_connection(|conn| {
+        conn.execute(
+            "INSERT INTO scratch_values (id, arr) VALUES (1, 'null')",
+            [],
+        )?;
+        conn.execute("INSERT INTO scratch_values (id, arr) VALUES (2, NULL)", [])?;
+        Ok(())
+    })
+    .unwrap();
+
+    for id in [1, 2] {
+        let loaded: StringArray = db
+            .with_connection(|conn| {
+                Ok(conn.query_row(
+                    "SELECT arr FROM scratch_values WHERE id = ?1",
+                    [id],
+                    |row| row.get(0),
+                )?)
+            })
+            .unwrap();
+        assert!(loaded.is_empty(), "row {id}");
+    }
+}
+
+#[test]
 fn local_time_parsing_accepts_every_go_layout() {
     let cases = [
         ("2026-06-23 01:00:31.6481286", "2026-06-23 01:00:31.6481286"),
