@@ -295,11 +295,11 @@ fn webhook_query_signatures_are_removed_but_unrelated_keys_remain() {
 
     let safe = redact_addition(
         "webhook",
-        r#"{"url":"https://hook.example/path?author=alice&monkey=1"}"#,
+        r#"{"url":"https://hook.example/path?secretary=alice&tokenizer=x&signature_pad=y&author=a&monkey=m"}"#,
     );
     assert_eq!(
         safe["url"],
-        "https://hook.example/path?author=alice&monkey=1"
+        "https://hook.example/path?secretary=alice&tokenizer=x&signature_pad=y&author=a&monkey=m"
     );
 }
 
