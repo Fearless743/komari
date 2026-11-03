@@ -23,9 +23,11 @@ pub mod error;
 pub mod factory;
 pub mod provider;
 pub mod providers;
+pub mod service;
 
 pub use error::DdnsError;
 pub use factory::{DdnsConstructor, DdnsFactory, factory};
 pub use provider::{
     ConfigurationItem, DdnsProvider, ProviderConfig, SyncContext, SyncResult, config_string,
 };
+pub use service::{DdnsService, merge_client_provider_config};
