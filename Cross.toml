@@ -1,0 +1,9 @@
+# cross does not forward arbitrary environment variables into the container.
+# These are required by the Rust build and by B14's komari-web/build.rs.
+[build.env]
+passthrough = [
+    "KOMARI_VERSION",
+    "KOMARI_VERSION_HASH",
+    "KOMARI_DEFAULT_THEME_DIR",
+    "CARGO_PROFILE_RELEASE_STRIP",
+]
