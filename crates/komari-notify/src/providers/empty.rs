@@ -9,6 +9,9 @@ use serde_json::Value;
 use crate::error::{NotifyError, Result};
 use crate::provider::{ConfigField, MessageSender};
 
+/// Configuration keys removed from external API responses.
+pub const SENSITIVE_FIELDS: &[&str] = &[];
+
 /// The empty provider has no configuration fields.
 #[derive(Clone, Debug, Default)]
 pub struct EmptySender;
@@ -39,6 +42,10 @@ impl MessageSender for EmptySender {
 
     fn config(&self) -> Value {
         Value::Object(serde_json::Map::new())
+    }
+
+    fn sensitive_fields(&self) -> &'static [&'static str] {
+        crate::providers::empty::SENSITIVE_FIELDS
     }
 
     async fn send_text(&self, _message: &str, _title: &str) -> Result<()> {

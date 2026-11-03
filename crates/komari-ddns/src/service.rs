@@ -165,7 +165,7 @@ impl DdnsService {
     pub fn load_provider(&self, name: &str, addition: &str) -> Result<(), DdnsError> {
         let mut provider = self.factory.create(name)?;
         let configuration: Value = serde_json::from_str(addition)
-            .map_err(|error| DdnsError::InvalidConfig(error.to_string()))?;
+            .map_err(|_| DdnsError::InvalidConfig("invalid provider configuration".to_owned()))?;
         provider.set_configuration(configuration)?;
         provider.init()?;
         let provider: Arc<dyn DdnsProviderTrait> = Arc::from(provider);
@@ -374,7 +374,9 @@ impl DdnsService {
         let Some(provider_config) = self.db.ddns_providers().get(&method)? else {
             return Ok(ProviderConfig::new());
         };
-        match serde_json::from_str(&provider_config.addition)? {
+        let value: Value = serde_json::from_str(&provider_config.addition)
+            .map_err(|_| DdnsError::InvalidConfig("invalid provider configuration".to_owned()))?;
+        match value {
             Value::Object(map) => Ok(map),
             _ => Err(DdnsError::InvalidConfig(
                 "provider configuration must be a JSON object".to_owned(),

@@ -65,7 +65,7 @@ impl ConfigurationItem {
 }
 
 /// Everything a provider needs to synchronize one client.
-#[derive(Clone, Debug, Default, Serialize, Deserialize)]
+#[derive(Clone, Default, Serialize, Deserialize)]
 #[serde(default)]
 pub struct SyncContext {
     pub ipv4: String,
@@ -76,6 +76,21 @@ pub struct SyncContext {
     pub force: bool,
     #[serde(skip_serializing_if = "ProviderConfig::is_empty")]
     pub provider_config: ProviderConfig,
+}
+
+impl std::fmt::Debug for SyncContext {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter
+            .debug_struct("SyncContext")
+            .field("ipv4", &self.ipv4)
+            .field("ipv6", &self.ipv6)
+            .field("client_uuid", &self.client_uuid)
+            .field("client_name", &self.client_name)
+            .field("triggered_by", &self.triggered_by)
+            .field("force", &self.force)
+            .field("provider_config", &"<redacted>")
+            .finish()
+    }
 }
 
 /// The outcome of one provider synchronization.
@@ -124,6 +139,12 @@ pub trait DdnsProvider: Send + Sync {
     /// Configuration fields exposed to the admin UI.
     fn configuration_items(&self) -> Vec<ConfigurationItem> {
         Vec::new()
+    }
+
+    /// Fields in `configuration()` that must be removed from public API
+    /// responses. The database keeps them unchanged.
+    fn sensitive_fields(&self) -> &'static [&'static str] {
+        &[]
     }
 
     /// Validate and prepare the provider. Called after `set_configuration`.

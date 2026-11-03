@@ -10,14 +10,26 @@ use crate::error::{NotifyError, Result};
 use crate::http::{HttpRequest, HttpResponse, HttpTransport, ReqwestTransport};
 use crate::provider::{ConfigField, MessageSender};
 
+/// Configuration keys removed from external API responses.
+pub const SENSITIVE_FIELDS: &[&str] = &["device_key"];
+
 /// Provider configuration (`bark.Addition`).
-#[derive(Clone, Debug, Default, Serialize, Deserialize)]
+#[derive(Clone, Default, Serialize, Deserialize)]
 #[serde(default)]
 pub struct BarkConfig {
     pub server_url: String,
     pub device_key: String,
     pub icon: String,
     pub level: String,
+}
+
+impl std::fmt::Debug for BarkConfig {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        let redacted = crate::redact::redact_serialized("bark", self);
+        f.debug_struct("BarkConfig")
+            .field("config", &redacted)
+            .finish()
+    }
 }
 
 /// Bark text sender.
@@ -36,7 +48,7 @@ impl BarkSender {
     }
 
     pub fn from_value(value: Value) -> Result<Self> {
-        let config: BarkConfig = serde_json::from_value(value)?;
+        let config: BarkConfig = crate::provider::deserialize_config("bark", value)?;
         let sender = Self::new(config);
         sender.init_sync()?;
         Ok(sender)
@@ -46,7 +58,7 @@ impl BarkSender {
         value: Value,
         transport: Arc<dyn HttpTransport>,
     ) -> Result<Self> {
-        let config: BarkConfig = serde_json::from_value(value)?;
+        let config: BarkConfig = crate::provider::deserialize_config("bark", value)?;
         let sender = Self::with_transport(config, transport);
         sender.init_sync()?;
         Ok(sender)
@@ -125,6 +137,10 @@ impl MessageSender for BarkSender {
         serde_json::to_value(&self.config).unwrap_or(Value::Null)
     }
 
+    fn sensitive_fields(&self) -> &'static [&'static str] {
+        crate::providers::bark::SENSITIVE_FIELDS
+    }
+
     async fn init(&self) -> Result<()> {
         self.init_sync()
     }
@@ -161,8 +177,6 @@ fn check_response(response: HttpResponse) -> Result<()> {
         // `Option` accepts JSON null; any other wrong type is a decode error.
         #[serde(default)]
         code: Option<i64>,
-        #[serde(default)]
-        message: Option<String>,
     }
 
     // Go decodes into a struct: non-JSON is an error (treated as success for
@@ -183,12 +197,10 @@ fn check_response(response: HttpResponse) -> Result<()> {
         _ => return Ok(()),
     };
     let code = parsed.code.unwrap_or(0);
-    let message = parsed.message.unwrap_or_default();
 
     if code != 200 {
-        return Err(NotifyError::Send(format!(
-            "bark API error (code: {code}): {message}"
-        )));
+        // Bark's message can contain server details; only report the code.
+        return Err(NotifyError::Send(format!("bark API error (code: {code})")));
     }
     Ok(())
 }

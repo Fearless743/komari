@@ -10,12 +10,24 @@ use crate::error::{NotifyError, Result};
 use crate::http::{HttpRequest, HttpResponse, HttpTransport, ReqwestTransport};
 use crate::provider::{ConfigField, MessageSender};
 
+/// Configuration keys removed from external API responses.
+pub const SENSITIVE_FIELDS: &[&str] = &["api_url", "sendkey", "send_key", "token"];
+
 /// Provider configuration (`serverchan3.Addition`).
-#[derive(Clone, Debug, Default, Serialize, Deserialize)]
+#[derive(Clone, Default, Serialize, Deserialize)]
 #[serde(default)]
 pub struct ServerChan3Config {
     pub api_url: String,
     pub tags: String,
+}
+
+impl std::fmt::Debug for ServerChan3Config {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        let redacted = crate::redact::redact_serialized("Server酱³", self);
+        f.debug_struct("ServerChan3Config")
+            .field("config", &redacted)
+            .finish()
+    }
 }
 
 /// Server酱³ sender.
@@ -34,7 +46,7 @@ impl ServerChan3Sender {
     }
 
     pub fn from_value(value: Value) -> Result<Self> {
-        let config: ServerChan3Config = serde_json::from_value(value)?;
+        let config: ServerChan3Config = crate::provider::deserialize_config("Server酱³", value)?;
         Ok(Self::new(config))
     }
 
@@ -42,7 +54,7 @@ impl ServerChan3Sender {
         value: Value,
         transport: Arc<dyn HttpTransport>,
     ) -> Result<Self> {
-        let config: ServerChan3Config = serde_json::from_value(value)?;
+        let config: ServerChan3Config = crate::provider::deserialize_config("Server酱³", value)?;
         Ok(Self::with_transport(config, transport))
     }
 
@@ -95,6 +107,10 @@ impl MessageSender for ServerChan3Sender {
         serde_json::to_value(&self.config).unwrap_or(Value::Null)
     }
 
+    fn sensitive_fields(&self) -> &'static [&'static str] {
+        crate::providers::serverchan3::SENSITIVE_FIELDS
+    }
+
     async fn send_text(&self, message: &str, title: &str) -> Result<()> {
         let api_url = self.config.api_url.trim();
         if api_url.is_empty() {
@@ -119,15 +135,9 @@ impl MessageSender for ServerChan3Sender {
 
 fn check_response(response: HttpResponse) -> Result<()> {
     if !(200..300).contains(&response.status) {
-        let body = response.body_text().trim();
-        if body.is_empty() {
-            return Err(NotifyError::Send(format!(
-                "接口返回非 2xx 状态码: {}",
-                response.status
-            )));
-        }
+        // The remote body may contain credentials; only report the status.
         return Err(NotifyError::Send(format!(
-            "接口返回非 2xx 状态码: {}，响应: {body}",
+            "接口返回非 2xx 状态码: {}",
             response.status
         )));
     }

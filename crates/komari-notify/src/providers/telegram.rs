@@ -10,14 +10,26 @@ use crate::error::{NotifyError, Result};
 use crate::http::{HttpRequest, HttpResponse, HttpTransport, ReqwestTransport, form_encode};
 use crate::provider::{ConfigField, MessageSender};
 
+/// Configuration keys removed from external API responses.
+pub const SENSITIVE_FIELDS: &[&str] = &["bot_token"];
+
 /// Provider configuration (`telegram.Addition`).
-#[derive(Clone, Debug, Default, Serialize, Deserialize)]
+#[derive(Clone, Default, Serialize, Deserialize)]
 #[serde(default)]
 pub struct TelegramConfig {
     pub bot_token: String,
     pub chat_id: String,
     pub message_thread_id: String,
     pub endpoint: String,
+}
+
+impl std::fmt::Debug for TelegramConfig {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        let redacted = crate::redact::redact_serialized("telegram", self);
+        f.debug_struct("TelegramConfig")
+            .field("config", &redacted)
+            .finish()
+    }
 }
 
 /// Telegram text sender.
@@ -36,7 +48,7 @@ impl TelegramSender {
     }
 
     pub fn from_value(value: Value) -> Result<Self> {
-        let config: TelegramConfig = serde_json::from_value(value)?;
+        let config: TelegramConfig = crate::provider::deserialize_config("telegram", value)?;
         Ok(Self::new(config))
     }
 
@@ -44,7 +56,7 @@ impl TelegramSender {
         value: Value,
         transport: Arc<dyn HttpTransport>,
     ) -> Result<Self> {
-        let config: TelegramConfig = serde_json::from_value(value)?;
+        let config: TelegramConfig = crate::provider::deserialize_config("telegram", value)?;
         Ok(Self::with_transport(config, transport))
     }
 
@@ -110,6 +122,10 @@ impl MessageSender for TelegramSender {
         serde_json::to_value(&self.config).unwrap_or(Value::Null)
     }
 
+    fn sensitive_fields(&self) -> &'static [&'static str] {
+        crate::providers::telegram::SENSITIVE_FIELDS
+    }
+
     async fn send_text(&self, message: &str, title: &str) -> Result<()> {
         let full_message = if title.is_empty() {
             message.to_owned()
@@ -140,16 +156,14 @@ fn check_response(response: HttpResponse) -> Result<()> {
     #[derive(Deserialize)]
     struct TelegramResponse {
         ok: bool,
-        #[serde(default)]
-        description: String,
+        #[serde(default, rename = "description")]
+        _description: String,
     }
 
     let parsed: TelegramResponse = serde_json::from_slice(&response.body)?;
     if !parsed.ok {
-        return Err(NotifyError::Send(format!(
-            "telegram API error: {}",
-            parsed.description
-        )));
+        // Telegram descriptions can echo chat/user data; keep the error generic.
+        return Err(NotifyError::Send("telegram API error".to_owned()));
     }
     Ok(())
 }

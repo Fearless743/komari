@@ -1,0 +1,13 @@
+{
+  "name": "Komari",
+  "short": "default",
+  "description": "Komari default theme",
+  "version": "1.0.0",
+  "author": "Akizon77",
+  "url": "https://github.com/Fearless743/komari-web",
+  "preview": "preview.png",
+  "configuration": {
+    "type": "managed",
+    "data": []
+  }
+}

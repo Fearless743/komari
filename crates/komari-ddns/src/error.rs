@@ -21,9 +21,10 @@ pub enum DdnsError {
     #[error("ddns record not found: {0}")]
     RecordNotFound(String),
 
-    /// An HTTP request failed before a response was received.
+    /// An HTTP request failed before a response was received. The URL is
+    /// stripped because webhook URLs may embed credentials.
     #[error("http request failed: {0}")]
-    Http(#[from] reqwest::Error),
+    Http(reqwest::Error),
 
     /// An HTTP endpoint returned a non-success status code.
     #[error("{service} returned status {status}: {body}")]
@@ -58,5 +59,13 @@ impl DdnsError {
     /// Whether this error means a Cloudflare record lookup found nothing.
     pub fn is_record_not_found(&self) -> bool {
         matches!(self, Self::RecordNotFound(_))
+    }
+}
+
+impl From<reqwest::Error> for DdnsError {
+    fn from(error: reqwest::Error) -> Self {
+        // `without_url` keeps credentials embedded in a webhook URL out of
+        // logs, audit entries and `ddns_sync_history.error`.
+        Self::Http(error.without_url())
     }
 }
