@@ -28,32 +28,39 @@ fn cloudflare_redacts_token_and_zone_but_keeps_other_fields() {
 }
 
 #[test]
-fn webhook_redacts_headers_and_body_but_keeps_public_settings() {
+fn webhook_redacts_url_headers_and_body_but_keeps_public_settings() {
     let addition = r#"{"url":"https://hooks.example.com/abc","method":"POST","content_type":"application/json","headers":"{\"Authorization\":\"Bearer header-secret\"}","body":"{\"token\":\"body-secret\"}","response_json_path":"data.record_id"}"#;
     let redacted = redact_addition("webhook", addition);
     assert_eq!(
         redacted,
         json!({
-            "url": "https://hooks.example.com/abc",
             "method": "POST",
             "content_type": "application/json",
             "response_json_path": "data.record_id"
         })
     );
     let serialized = redacted.to_string();
+    assert!(!serialized.contains("hooks.example.com"));
     assert!(!serialized.contains("header-secret"));
     assert!(!serialized.contains("body-secret"));
 }
 
 #[test]
-fn webhook_removes_url_when_it_embeds_credentials() {
-    let addition = r#"{"url":"https://user:password@hooks.example.com/secret-path","method":"POST","headers":"{\"Authorization\":\"Bearer header-secret\"}","body":"body-secret"}"#;
-    let redacted = redact_addition("webhook", addition);
-    assert_eq!(redacted, json!({"method": "POST"}));
-    let serialized = redacted.to_string();
-    assert!(!serialized.contains("user:password"));
-    assert!(!serialized.contains("header-secret"));
-    assert!(!serialized.contains("body-secret"));
+fn webhook_removes_url_credentials_and_path_or_query_tokens() {
+    for addition in [
+        r#"{"url":"https://user:password@hooks.example.com/secret-path","method":"POST","headers":"{\"Authorization\":\"Bearer header-secret\"}","body":"body-secret"}"#,
+        r#"{"url":"https://hooks.slack.com/services/T000/B000/path-secret?token=query-secret","method":"POST"}"#,
+        r#"{"url":"https://discord.com/api/webhooks/123/path-secret","method":"POST"}"#,
+    ] {
+        let redacted = redact_addition("webhook", addition);
+        assert_eq!(redacted, json!({"method": "POST"}));
+        let serialized = redacted.to_string();
+        assert!(!serialized.contains("user:password"));
+        assert!(!serialized.contains("path-secret"));
+        assert!(!serialized.contains("query-secret"));
+        assert!(!serialized.contains("header-secret"));
+        assert!(!serialized.contains("body-secret"));
+    }
 }
 
 #[test]
@@ -157,6 +164,42 @@ fn debug_output_does_not_contain_secrets() {
 }
 
 #[test]
+fn configuration_errors_do_not_echo_secret_values() {
+    let error = CloudflareProvider::new()
+        .set_configuration(json!("cloudflare-secret-token"))
+        .expect_err("top-level string is invalid");
+    assert!(!error.to_string().contains("cloudflare-secret-token"));
+    assert!(
+        error
+            .to_string()
+            .contains("invalid cloudflare configuration")
+    );
+
+    let error = WebhookProvider::new()
+        .set_configuration(json!("webhook-secret-token"))
+        .expect_err("top-level string is invalid");
+    assert!(!error.to_string().contains("webhook-secret-token"));
+    assert!(error.to_string().contains("invalid webhook configuration"));
+}
+
+#[test]
+fn sync_context_debug_redacts_provider_configuration() {
+    let mut provider_config = serde_json::Map::new();
+    provider_config.insert("api_token".to_owned(), json!("context-secret-token"));
+    provider_config.insert("hostname".to_owned(), json!("node.example.com"));
+    let context = komari_ddns::SyncContext {
+        ipv4: "1.2.3.4".to_owned(),
+        client_uuid: "client-1".to_owned(),
+        provider_config,
+        ..komari_ddns::SyncContext::default()
+    };
+    let debug = format!("{context:?}");
+    assert!(!debug.contains("context-secret-token"));
+    assert!(!debug.contains("node.example.com"));
+    assert!(debug.contains("<redacted>"));
+}
+
+#[test]
 fn factory_declares_sensitive_fields() {
     let factory = DdnsFactory::with_builtins();
     assert_eq!(
@@ -165,7 +208,7 @@ fn factory_declares_sensitive_fields() {
     );
     assert_eq!(
         factory.sensitive_fields("webhook"),
-        Some(vec!["headers", "body"])
+        Some(vec!["url", "headers", "body"])
     );
     assert_eq!(factory.sensitive_fields("empty"), Some(Vec::new()));
     assert_eq!(factory.sensitive_fields("missing"), None);
