@@ -57,6 +57,9 @@ fn run_server(global: &GlobalArgs, args: ServerArgs) -> Result<()> {
         db_port = config.db.port,
         theme = %config.theme,
         allow_cors = config.allow_cors,
+        body_limit = config
+            .body_limit
+            .unwrap_or(komari_api::server::DEFAULT_BODY_LIMIT),
         log_level = %config.log_level,
         enable_cloudflared = config.enable_cloudflared,
         ws_disable_origin = config.ws_disable_origin,

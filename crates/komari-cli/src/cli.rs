@@ -134,6 +134,14 @@ pub struct GlobalArgs {
         help = "Disable WebSocket origin checks [env: KOMARI_WS_DISABLE_ORIGIN]"
     )]
     pub ws_disable_origin: Option<bool>,
+
+    #[arg(
+        long = "body-limit",
+        global = true,
+        value_name = "BYTES",
+        help = "Maximum normal HTTP request body size in bytes [env: KOMARI_BODY_LIMIT]"
+    )]
+    pub body_limit: Option<usize>,
 }
 
 #[derive(Debug, Subcommand)]

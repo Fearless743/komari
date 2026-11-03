@@ -48,14 +48,13 @@ use axum::http::{HeaderValue, Method, StatusCode, header};
 use axum::middleware::{self, Next};
 use axum::response::{IntoResponse, Response};
 use axum::routing::any;
-use komari_auth::{AuthLayer, PrivateSite};
+use komari_auth::{AuthLayer, BufferedBodyLimit, PrivateSite, payload_too_large_response};
 use komari_config::Config;
 use komari_db::{BackupOptions, Db, DbError, restore_pending_backup};
 use komari_ddns::DdnsService;
 use komari_geoip::GeoIpService;
 use komari_web::WebAssets;
 use tokio::net::TcpListener;
-use tower_http::limit::RequestBodyLimitLayer;
 use tower_http::trace::{DefaultOnResponse, MakeSpan, TraceLayer};
 use tracing::{Level, error, info, warn};
 
@@ -66,13 +65,14 @@ use crate::state::{ApiConfig, ApiState};
 pub const DEFAULT_LISTEN: &str = "0.0.0.0:25774";
 /// Default SQLite database path, matching the Go backend.
 pub const DEFAULT_DB_FILE: &str = "data/komari.db";
-/// Default request-body limit (16 MiB).
+/// Default normal request-body limit (16 MiB).
 ///
-/// The limit is a streaming layer applied before authentication, so it cannot
-/// be overridden per route. Deployments that accept large backup uploads
-/// through B06 should raise [`ServerConfig::body_limit_bytes`] (the Go backend
-/// has no such limit) or terminate uploads at a reverse proxy.
+/// The limit is applied before authentication, so oversized chunked bodies are
+/// rejected with 413 rather than being buffered. Admin backup uploads use
+/// [`ServerConfig::backup_body_limit_bytes`] instead.
 pub const DEFAULT_BODY_LIMIT: usize = 16 * 1024 * 1024;
+/// Default limit for admin backup uploads (2 GiB).
+pub const DEFAULT_BACKUP_BODY_LIMIT: usize = 2 * 1024 * 1024 * 1024;
 
 /// Startup configuration for the HTTP server.
 #[derive(Clone, Debug)]
@@ -85,6 +85,9 @@ pub struct ServerConfig {
     pub api: ApiConfig,
     pub background: BackgroundConfig,
     pub body_limit_bytes: usize,
+    /// Limit for `/api/admin/upload/backup`; backups may exceed the normal
+    /// request limit.
+    pub backup_body_limit_bytes: usize,
     /// Install tower-http's request/response tracing layer.
     pub request_logging: bool,
     /// Maximum time graceful shutdown waits for half-open connections.
@@ -101,6 +104,7 @@ impl Default for ServerConfig {
             api: ApiConfig::default(),
             background: BackgroundConfig::default(),
             body_limit_bytes: DEFAULT_BODY_LIMIT,
+            backup_body_limit_bytes: DEFAULT_BACKUP_BODY_LIMIT,
             request_logging: true,
             shutdown_timeout: Duration::from_secs(5),
         }
@@ -124,6 +128,7 @@ impl ServerConfig {
                 ws_disable_origin: config.ws_disable_origin,
                 ..ApiConfig::default()
             },
+            body_limit_bytes: config.body_limit.unwrap_or(DEFAULT_BODY_LIMIT),
             ..Self::default()
         }
     }
@@ -312,10 +317,16 @@ impl ServerBuilder {
         router = router
             .layer(PrivateSite::new(auth.clone()))
             .layer(AuthLayer::new(auth))
-            // A real body-stream limit must wrap `AuthLayer`, which buffers
-            // non-GET bodies before extractors run. `DefaultBodyLimit` alone
-            // would be bypassed by that buffering.
-            .layer(RequestBodyLimitLayer::new(config.body_limit_bytes))
+            // The limit is inserted as a request extension before `AuthLayer`
+            // buffers non-GET bodies, so chunked oversized bodies also become
+            // 413 instead of being silently treated as unauthenticated.
+            .layer(middleware::from_fn_with_state(
+                BodyLimits {
+                    normal: config.body_limit_bytes,
+                    backup: config.backup_body_limit_bytes,
+                },
+                body_limit,
+            ))
             // CORS wraps the body limit so a 413 still carries CORS headers,
             // matching the Go middleware order.
             .layer(middleware::from_fn_with_state(
@@ -588,6 +599,40 @@ pub async fn run(config: ServerConfig) -> Result<()> {
 
 async fn ping() -> &'static str {
     "pong"
+}
+
+#[derive(Clone, Copy, Debug)]
+struct BodyLimits {
+    normal: usize,
+    backup: usize,
+}
+
+fn is_backup_upload(path: &str) -> bool {
+    path.starts_with("/api/admin/upload/backup")
+}
+
+async fn body_limit(
+    State(limits): State<BodyLimits>,
+    mut request: Request,
+    next: Next,
+) -> Response {
+    let limit = if is_backup_upload(request.uri().path()) {
+        limits.backup
+    } else {
+        limits.normal
+    };
+    if let Some(length) = request
+        .headers()
+        .get(header::CONTENT_LENGTH)
+        .and_then(|value| value.to_str().ok())
+        .and_then(|value| value.parse::<usize>().ok())
+    {
+        if length > limit {
+            return payload_too_large_response();
+        }
+    }
+    request.extensions_mut().insert(BufferedBodyLimit(limit));
+    next.run(request).await
 }
 
 /// Request span that logs the path but never the query string.

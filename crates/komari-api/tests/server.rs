@@ -22,7 +22,7 @@ use komari_oauth::{
 use komari_web::WebAssets;
 use serde_json::Value;
 use tempfile::TempDir;
-use tokio::io::AsyncWriteExt;
+use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::{TcpListener, TcpStream};
 use tokio::sync::oneshot;
 use tokio::task::JoinHandle;
@@ -472,11 +472,13 @@ async fn browser_websocket_rejects_guests_in_private_site_mode() {
 #[tokio::test]
 async fn request_body_limit_is_enforced_before_auth() {
     let dir = TempDir::new().expect("temp dir");
+    let db = memory_db();
+    db.config().set("allow_cors", &true).expect("allow cors");
     let config = ServerConfig {
         body_limit_bytes: 16,
         ..server_config(&dir)
     };
-    let server = build(config, memory_db()).await;
+    let server = build(config, db).await;
     let running = start(server).await;
     let client = http_client();
 
@@ -487,6 +489,92 @@ async fn request_body_limit_is_enforced_before_auth() {
         .await
         .expect("oversized request");
     assert_eq!(response.status(), reqwest::StatusCode::PAYLOAD_TOO_LARGE);
+    assert_eq!(
+        response
+            .headers()
+            .get("access-control-allow-origin")
+            .and_then(|value| value.to_str().ok()),
+        Some("*")
+    );
+
+    running.stop().await;
+}
+
+#[tokio::test]
+async fn chunked_oversized_body_returns_413_with_cors() {
+    let dir = TempDir::new().expect("temp dir");
+    let db = memory_db();
+    db.config().set("allow_cors", &true).expect("allow cors");
+    let config = ServerConfig {
+        body_limit_bytes: 16,
+        ..server_config(&dir)
+    };
+    let server = build(config, db).await;
+    let running = start(server).await;
+
+    let request = concat!(
+        "POST /api/clients/register HTTP/1.1\r\n",
+        "Host: localhost\r\n",
+        "Transfer-Encoding: chunked\r\n",
+        "Content-Type: application/json\r\n",
+        "Origin: https://dashboard.example\r\n",
+        "Connection: close\r\n\r\n",
+        "10\r\n0123456789abcdef\r\n",
+        "10\r\n0123456789abcdef\r\n",
+        "0\r\n\r\n"
+    );
+    let mut stream = TcpStream::connect(&running.address).await.expect("connect");
+    stream
+        .write_all(request.as_bytes())
+        .await
+        .expect("write chunked request");
+    let mut response = Vec::new();
+    tokio::time::timeout(Duration::from_secs(3), stream.read_to_end(&mut response))
+        .await
+        .expect("response timeout")
+        .expect("read response");
+    let response = String::from_utf8_lossy(&response);
+    assert!(response.starts_with("HTTP/1.1 413"), "{response}");
+    assert!(
+        response
+            .to_ascii_lowercase()
+            .contains("access-control-allow-origin: *"),
+        "{response}"
+    );
+
+    running.stop().await;
+}
+
+#[tokio::test]
+async fn backup_upload_path_has_a_larger_body_limit() {
+    let dir = TempDir::new().expect("temp dir");
+    let config = ServerConfig {
+        body_limit_bytes: 16 * 1024 * 1024,
+        backup_body_limit_bytes: 32 * 1024 * 1024,
+        ..server_config(&dir)
+    };
+    let server = build(config, memory_db()).await;
+    let running = start(server).await;
+    let client = http_client();
+    let body = "x".repeat(17 * 1024 * 1024);
+
+    let response = client
+        .post(format!("{}/api/clients/register", running.base))
+        .body(body.clone())
+        .send()
+        .await
+        .expect("normal oversized request");
+    assert_eq!(response.status(), reqwest::StatusCode::PAYLOAD_TOO_LARGE);
+
+    // The backup path is not implemented by B09, so the request may end in
+    // 401/404, but it must not be rejected by the normal 16 MiB limit.
+    let response = client
+        .post(format!("{}/api/admin/upload/backup", running.base))
+        .body(body)
+        .send()
+        .await
+        .expect("backup request");
+    assert_ne!(response.status(), reqwest::StatusCode::PAYLOAD_TOO_LARGE);
 
     running.stop().await;
 }
