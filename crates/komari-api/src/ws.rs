@@ -369,7 +369,7 @@ pub fn check_origin(headers: &HeaderMap, disable: bool) -> bool {
     else {
         return false;
     };
-    origin_host.eq_ignore_ascii_case(host)
+    origin_host == host
 }
 
 /// `GET /api/clients/report` — agent WebSocket.
@@ -523,12 +523,13 @@ pub async fn clients_ws(State(state): State<ApiState>, request: Request) -> Resp
         }
     };
     if !state.allow_cors() && !check_origin(&parts.headers, state.ws_disable_origin()) {
-        // gorilla/websocket's upgrader writes this plain-text body.
-        return (
-            StatusCode::FORBIDDEN,
-            "request origin not allowed by Upgrader.CheckOrigin",
-        )
-            .into_response();
+        // Go's `http.Error(w, http.StatusText(403), 403)` body.
+        return Response::builder()
+            .status(StatusCode::FORBIDDEN)
+            .header(http::header::CONTENT_TYPE, "text/plain; charset=utf-8")
+            .header("x-content-type-options", "nosniff")
+            .body(axum::body::Body::from("Forbidden\n"))
+            .expect("static 403 response is valid");
     }
     ws.on_upgrade(move |socket| handle_browser_socket(state, socket))
 }
