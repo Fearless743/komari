@@ -29,7 +29,8 @@ use komari_notify::NotificationService;
 use komari_notify::notifier::offline::OfflineNotifier;
 use komari_notify::notifier::traffic::{TrafficTracker, TrafficUsage};
 use komari_notify::notifier::{
-    OnlineDecision, check_expire, check_traffic, next_run, run_all_load_tasks,
+    OnlineDecision, check_and_auto_renewal, check_expire, check_traffic, next_run,
+    run_all_load_tasks,
 };
 use komari_web::WebAssets;
 use tokio::sync::broadcast::error::RecvError;
@@ -107,7 +108,7 @@ impl BackgroundTasks {
         tasks.spawn_ddns_sync(ddns, state.db.clone(), config);
         tasks.spawn_notification_tick(state.clone(), config);
         tasks.spawn_offline_notifications(state.clone(), config);
-        tasks.spawn_expire_notifications(state.db.clone(), config);
+        tasks.spawn_expire_notifications(state.clone(), config);
         tasks
     }
 
@@ -363,6 +364,16 @@ impl BackgroundTasks {
                         Ok(event) => {
                             match event.kind {
                                 ClientEventKind::Online => {
+                                    let online = state.hub.is_ws_connected(&event.uuid);
+                                    if let Ok(Some(client)) = db.clients().get(&event.uuid) {
+                                        match check_and_auto_renewal(&db, &client, online, Utc::now()) {
+                                            Ok(Some(event)) => deliver(&db, &event).await,
+                                            Ok(None) => {}
+                                            Err(error) => {
+                                                tracing::warn!(%error, "auto-renewal failed");
+                                            }
+                                        }
+                                    }
                                     match notifier.handle_online(&event.uuid, event.connection_id) {
                                         Ok(Some(OnlineDecision::Notify)) => {
                                             if let Ok(Some(client)) = db.clients().get(&event.uuid) {
@@ -431,9 +442,10 @@ impl BackgroundTasks {
         });
     }
 
-    fn spawn_expire_notifications(&self, db: Arc<Db>, _config: &BackgroundConfig) {
+    fn spawn_expire_notifications(&self, state: ApiState, _config: &BackgroundConfig) {
         let cancel = self.cancel.clone();
         self.spawn("expire-notifications", async move {
+            let db = state.db.clone();
             loop {
                 let now = Utc::now();
                 let delay = (next_run(now) - now)
@@ -448,6 +460,23 @@ impl BackgroundTasks {
                     Ok(Some(check)) => deliver(&db, &check.event).await,
                     Ok(None) => {}
                     Err(error) => tracing::warn!(%error, "expiry notification check failed"),
+                }
+                // Go also runs auto-renewal once per day for every client; the
+                // renewal helper itself skips clients that are not online.
+                match db.clients().list() {
+                    Ok(clients) => {
+                        for client in clients {
+                            let online = state.hub.is_ws_connected(&client.uuid);
+                            match check_and_auto_renewal(&db, &client, online, Utc::now()) {
+                                Ok(Some(event)) => deliver(&db, &event).await,
+                                Ok(None) => {}
+                                Err(error) => {
+                                    tracing::warn!(%error, "auto-renewal failed");
+                                }
+                            }
+                        }
+                    }
+                    Err(error) => tracing::warn!(%error, "failed to list clients for renewal"),
                 }
             }
         });
