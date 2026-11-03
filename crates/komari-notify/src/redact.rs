@@ -119,34 +119,58 @@ fn is_url_field(key: &str) -> bool {
 /// (plus a few suffix checks) so unrelated names such as `author` or `monkey`
 /// are not redacted.
 pub(crate) fn is_sensitive_credential_key(key: &str) -> bool {
-    let key = normalize_key(key);
+    // Exact normalized names only. Substring matching would misclassify
+    // `secretary`, `tokenizer` and `signature_pad`.
     matches!(
-        key.as_str(),
+        normalize_key(key).as_str(),
         "token"
             | "accesstoken"
+            | "refreshtoken"
+            | "idtoken"
+            | "bearertoken"
             | "authtoken"
+            | "apitoken"
+            | "csrftoken"
+            | "xsrftoken"
+            | "securitytoken"
+            | "xauthtoken"
+            | "xapitoken"
+            | "xamzsecuritytoken"
+            | "xamzcredential"
+            | "awsaccesskeyid"
+            | "xgoogcredential"
             | "auth"
             | "authorization"
             | "apikey"
+            | "xapikey"
             | "key"
+            | "accesskey"
+            | "privatekey"
+            | "signingkey"
+            | "sharedkey"
             | "secret"
             | "clientsecret"
+            | "sharedsecret"
+            | "appsecret"
+            | "consumersecret"
+            | "oauthsecret"
+            | "secretkey"
             | "password"
             | "passwd"
             | "sig"
             | "signature"
+            | "xsignature"
+            | "xamzsignature"
+            | "xhubsignature"
+            | "xhubsignature256"
+            | "xgoogsignature"
             | "hmac"
+            | "xhmac"
+            | "hmacsha256"
             | "digest"
             | "credential"
             | "credentials"
-            | "sharedsecret"
-            | "accesskey"
-            | "secretkey"
-    ) || key.contains("token")
-        || key.contains("secret")
-        || key.contains("signature")
-        || key.contains("apikey")
-        || key.contains("hmac")
+    )
 }
 
 /// True when a URL carries userinfo, a credential-like query parameter, or a
@@ -179,10 +203,11 @@ fn url_path_has_token(url: &reqwest::Url) -> bool {
     let path = url.path().to_ascii_lowercase();
 
     if host == "api.telegram.org" && path.starts_with("/bot") {
-        // The default endpoint is `/bot`; a token is appended directly after
-        // it (`/bot123:SECRET`). Do not remove the token-less default.
+        // The default endpoint is `/bot`; a token may be appended directly
+        // (`/bot123:SECRET`) or after one slash (`/bot/SECRET`).
         let remainder = &path[4..];
-        if !remainder.is_empty() && !remainder.starts_with('/') {
+        let remainder = remainder.strip_prefix('/').unwrap_or(remainder);
+        if !remainder.is_empty() {
             return true;
         }
     }
@@ -202,7 +227,18 @@ fn url_path_has_token(url: &reqwest::Url) -> bool {
     {
         return true;
     }
-    false
+
+    // Common self-hosted patterns: /token/<secret>, /key/<secret>,
+    // /secret/<secret>, /webhook/<secret>, /send/<sendkey>. This deliberately
+    // treats a non-empty segment after the marker as a token.
+    const MARKERS: &[&str] = &["token", "key", "secret", "webhook", "send"];
+    let segments = path
+        .split('/')
+        .filter(|segment| !segment.is_empty())
+        .collect::<Vec<_>>();
+    segments
+        .windows(2)
+        .any(|pair| MARKERS.contains(&pair[0]) && !pair[1].is_empty())
 }
 
 /// URL rendering used by `Debug`: scheme + host + port only. Paths and query
@@ -227,12 +263,8 @@ pub(crate) fn redact_url_for_debug(raw: &str) -> String {
 /// Header names whose values must not appear in `Debug` output.
 pub(crate) fn is_sensitive_header(name: &str) -> bool {
     let name = normalize_key(name);
-    name == "authorization"
-        || name == "proxyauthorization"
-        || name == "cookie"
-        || name == "setcookie"
-        || name == "xauth"
-        || is_sensitive_credential_key(&name)
-        || name.ends_with("auth")
-        || name.ends_with("key")
+    matches!(
+        name.as_str(),
+        "authorization" | "proxyauthorization" | "cookie" | "setcookie" | "xauth"
+    ) || is_sensitive_credential_key(&name)
 }
