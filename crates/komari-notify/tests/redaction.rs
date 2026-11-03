@@ -283,6 +283,10 @@ fn webhook_query_signatures_are_removed_but_unrelated_keys_remain() {
         "?signature=SIGNATURE_SECRET",
         "?X-Amz-Signature=SIGNATURE_SECRET",
         "?x-hub-signature-256=SIGNATURE_SECRET",
+        "?access_token=ACCESS_SECRET",
+        "?client_secret=CLIENT_SECRET",
+        "?x-amz-credential=CREDENTIAL_SECRET",
+        "?hmac=HMAC_SECRET",
     ] {
         let addition = format!(r#"{{"url":"https://hook.example/path{query}"}}"#);
         let safe = redact_addition("webhook", &addition);
@@ -314,6 +318,15 @@ fn all_url_fields_are_checked_for_credentials() {
     );
     assert!(telegram_slash.get("endpoint").is_none());
 
+    let telegram_default_slash = redact_addition(
+        "telegram",
+        r#"{"endpoint":"https://api.telegram.org/bot/","bot_token":"x"}"#,
+    );
+    assert_eq!(
+        telegram_default_slash["endpoint"],
+        "https://api.telegram.org/bot/"
+    );
+
     let bark = redact_addition(
         "bark",
         r#"{"server_url":"https://user:pass@bark.example/path","device_key":"x"}"#,
@@ -332,6 +345,22 @@ fn all_url_fields_are_checked_for_credentials() {
         r#"{"url":"https://hook.example/webhook/CUSTOM_SECRET"}"#,
     );
     assert!(custom_webhook.get("url").is_none());
+
+    for path in ["/send/SECRET", "/key/SECRET", "/secret/SECRET"] {
+        let addition = format!(r#"{{"url":"https://hook.example{path}"}}"#);
+        let safe = redact_addition("webhook", &addition);
+        assert!(safe.get("url").is_none(), "{path} was not redacted");
+    }
+
+    for path in ["/send/message", "/webhook/events", "/token/refresh"] {
+        let addition = format!(r#"{{"url":"https://hook.example{path}"}}"#);
+        let safe = redact_addition("webhook", &addition);
+        assert_eq!(
+            safe["url"],
+            format!("https://hook.example{path}"),
+            "{path} should be preserved"
+        );
+    }
 
     let plain = redact_addition(
         "bark",
@@ -354,7 +383,15 @@ fn http_debug_hides_path_tokens_and_signature_headers() {
         .header("X-Auth", "X_AUTH_SECRET")
         .header("X-Hub-Signature-256", "HUB_SIGNATURE_SECRET")
         .header("X-Amz-Signature", "AMZ_SIGNATURE_SECRET")
+        .header("X-Amz-Credential", "AMZ_CREDENTIAL_SECRET")
+        .header("X-Amz-Security-Token", "AMZ_SECURITY_TOKEN_SECRET")
+        .header("X-Goog-Credential", "GOOG_CREDENTIAL_SECRET")
         .header("X-Api-Key", "API_KEY_SECRET")
+        .header("X-Authorization", "X_AUTHORIZATION_SECRET")
+        .header(
+            "X-Forwarded-Authorization",
+            "FORWARDED_AUTHORIZATION_SECRET",
+        )
         .header("hmac", "HMAC_SECRET")
         .header("sig", "SIG_SECRET")
         .header("X-Test", "visible");
@@ -363,7 +400,12 @@ fn http_debug_hides_path_tokens_and_signature_headers() {
     assert!(!debug.contains("X_AUTH_SECRET"));
     assert!(!debug.contains("HUB_SIGNATURE_SECRET"));
     assert!(!debug.contains("AMZ_SIGNATURE_SECRET"));
+    assert!(!debug.contains("AMZ_CREDENTIAL_SECRET"));
+    assert!(!debug.contains("AMZ_SECURITY_TOKEN_SECRET"));
+    assert!(!debug.contains("GOOG_CREDENTIAL_SECRET"));
     assert!(!debug.contains("API_KEY_SECRET"));
+    assert!(!debug.contains("X_AUTHORIZATION_SECRET"));
+    assert!(!debug.contains("FORWARDED_AUTHORIZATION_SECRET"));
     assert!(!debug.contains("HMAC_SECRET"));
     assert!(!debug.contains("SIG_SECRET"));
     assert!(debug.contains("visible"));
@@ -409,6 +451,27 @@ fn debug_redacts_bark_url_and_keeps_serverchan_metadata() {
         script: "JS_SCRIPT_SECRET".to_owned(),
     };
     assert!(!format!("{javascript:?}").contains("JS_SCRIPT_SECRET"));
+}
+
+#[test]
+fn debug_redacts_webhook_and_telegram_urls() {
+    let webhook = WebhookConfig {
+        url: "https://hook.example/path?token=WEBHOOK_QUERY_SECRET".to_owned(),
+        ..WebhookConfig::default()
+    };
+    let debug = format!("{webhook:?}");
+    assert!(!debug.contains("WEBHOOK_QUERY_SECRET"));
+    assert!(debug.contains("hook.example"));
+
+    let telegram = TelegramConfig {
+        endpoint: "https://api.telegram.org/bot/TELEGRAM_PATH_SECRET".to_owned(),
+        bot_token: "TELEGRAM_TOKEN_SECRET".to_owned(),
+        ..TelegramConfig::default()
+    };
+    let debug = format!("{telegram:?}");
+    assert!(!debug.contains("TELEGRAM_PATH_SECRET"));
+    assert!(!debug.contains("TELEGRAM_TOKEN_SECRET"));
+    assert!(debug.contains("api.telegram.org"));
 }
 
 #[tokio::test]
