@@ -149,7 +149,10 @@ entries, 512 MiB per entry, 2 GiB total uncompressed and 2 GiB for the archive
 itself, with a 200:1 compression-ratio guard. `include_data = false` produces a
 database-only archive; `allow_legacy_schema = true` accepts databases that
 predate the current table set so `Db::migrate()` can add the missing tables
-afterwards.
+afterwards. Set `pre_restore_backup_dir` to opt into the Go backend's
+`./backup/{timestamp}.zip` pre-restore archive; it is best effort and disabled
+by default so a library call never writes outside the configured data
+directory unless asked.
 
 ### Archive layout (Go parity)
 
@@ -177,7 +180,9 @@ The archive is inspected before anything is written:
    missing tables are rejected unless legacy schemas are explicitly allowed.
 5. Files are extracted into a sibling staging directory, then the whole data
    directory is replaced with `rename(2)`. A failure at any point removes the
-   staging directory and leaves the existing data untouched.
+   staging directory and leaves the existing data untouched. If
+   `pre_restore_backup_dir` is set, a best-effort snapshot of the old data is
+   written there first, matching the Go startup restore.
 
 Imports into the same data directory are serialized: a concurrent attempt
 returns `DbError::BackupInProgress`. Different data directories can be
@@ -235,7 +240,9 @@ real configuration values.
   does on startup.
 - Backup symlinks are skipped on export and rejected on import. Encrypted ZIP
   entries are rejected. Files added after a backup was taken are removed by a
-  restore, matching the Go restore semantics.
+  restore, matching the Go restore semantics. The Go `./backup/{timestamp}.zip`
+  pre-restore archive is available through `pre_restore_backup_dir` but is not
+  enabled by default.
 - Schema compatibility is checked by table names; the Go backend has no
   explicit schema version field, so no numeric version is stored in the
   archive.
