@@ -178,10 +178,44 @@ impl LocalTime {
         Err(format!("unable to parse time string {value:?}"))
     }
 
-    /// Construct from a `DateTime` in any timezone, keeping its wall clock
-    /// components (matching Go's `LocalTime.Scan(time.Time)`).
+    /// Convert an absolute date-time to the application timezone's wall clock.
+    ///
+    /// This is the Rust equivalent of Go's `FromTime(t)` followed by
+    /// `LocalTime.Value()` (which calls `.In(GetAppLocation())`).
+    pub fn from_instant<Tz: TimeZone>(value: DateTime<Tz>) -> Self {
+        if timezone_is_utc() {
+            Self(value.with_timezone(&Utc).naive_utc())
+        } else {
+            Self(value.with_timezone(&Local).naive_local())
+        }
+    }
+
+    /// Alias for [`LocalTime::from_instant`].
     pub fn from_datetime<Tz: TimeZone>(value: DateTime<Tz>) -> Self {
-        Self(value.naive_local())
+        Self::from_instant(value)
+    }
+
+    /// Add an absolute duration in seconds and convert the result back to the
+    /// application timezone's wall clock.
+    ///
+    /// Adding to the absolute instant (instead of the naive wall clock) keeps
+    /// session expiry correct across DST transitions, matching Go's
+    /// `time.Now().Add(duration)`.
+    pub fn add_seconds(self, seconds: i64) -> Self {
+        if self.is_zero() {
+            return self;
+        }
+        let duration = chrono::TimeDelta::try_seconds(seconds).unwrap_or_default();
+        let absolute = if timezone_is_utc() {
+            self.0.and_utc()
+        } else {
+            Local
+                .from_local_datetime(&self.0)
+                .earliest()
+                .map(|value| value.with_timezone(&Utc))
+                .unwrap_or_else(|| self.0.and_utc())
+        };
+        Self::from_instant(absolute + duration)
     }
 }
 

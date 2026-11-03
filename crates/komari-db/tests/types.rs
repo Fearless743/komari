@@ -162,3 +162,46 @@ fn unix_timestamp_helpers_are_consistent() {
     assert!(!timestamp.is_zero());
     assert_eq!(timestamp.timestamp(), Some(1_782_180_031));
 }
+
+#[test]
+fn from_instant_converts_to_the_application_timezone() {
+    // 01:00 at +08:00 is an absolute instant; conversion must preserve it
+    // regardless of whether TZ is UTC or a named zone.
+    let source = chrono::DateTime::parse_from_rfc3339("2026-06-23T01:00:31+08:00").unwrap();
+    let converted = LocalTime::from_datetime(source);
+    assert_eq!(converted.timestamp(), Some(source.timestamp()));
+    assert_eq!(
+        converted.add_seconds(0).timestamp(),
+        Some(source.timestamp())
+    );
+}
+
+#[test]
+fn adding_seconds_uses_absolute_time() {
+    let start = LocalTime::parse("2026-01-15 12:00:00").unwrap();
+    let later = start.add_seconds(3600);
+    assert_eq!(
+        later.timestamp().unwrap() - start.timestamp().unwrap(),
+        3600
+    );
+
+    let session = komari_db::models::Session::new("user", 3600, "ua", "127.0.0.1", "password");
+    let difference = session.expires.timestamp().unwrap() - session.created_at.timestamp().unwrap();
+    assert!((3599..=3601).contains(&difference));
+}
+
+#[test]
+fn dst_boundary_is_handled_when_the_host_uses_a_dst_zone() {
+    // The assertion only makes sense with a known DST timezone. CI normally
+    // runs with TZ unset (UTC) and skips; developers can run
+    // `TZ=America/New_York cargo test -p komari-db dst_boundary`.
+    if std::env::var("TZ").ok().as_deref() != Some("America/New_York") {
+        eprintln!("TZ is not America/New_York; skipping DST assertion");
+        return;
+    }
+    // 2026-03-08 is the US DST start. 48 absolute hours after noon on the 7th
+    // is 13:00 local on the 9th, not 12:00.
+    let start = LocalTime::parse("2026-03-07 12:00:00").unwrap();
+    let later = start.add_seconds(48 * 3600);
+    assert_eq!(later.to_storage_string(), "2026-03-09 13:00:00.0000000");
+}

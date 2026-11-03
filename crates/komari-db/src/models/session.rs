@@ -31,9 +31,7 @@ impl Session {
         login_method: impl Into<String>,
     ) -> Self {
         let now = LocalTime::now();
-        let expires = LocalTime::from_naive(
-            now.to_naive() + chrono::TimeDelta::try_seconds(expires_in_seconds).unwrap_or_default(),
-        );
+        let expires = now.add_seconds(expires_in_seconds);
         Self {
             uuid: user_uuid.into(),
             session: generate_random_string(32),

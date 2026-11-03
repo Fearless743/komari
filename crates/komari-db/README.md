@@ -110,6 +110,10 @@ Errors are defined by `DbError` (`thiserror`); lookups return
 - JSON is `null` for the zero value and RFC 3339 in the application timezone
   otherwise;
 - `TZ` selects the application timezone (unset/empty means UTC, matching Go).
+- `LocalTime::from_instant` converts absolute date-times into the application
+  timezone (the equivalent of Go `FromTime` + `.In(GetAppLocation())`), and
+  `LocalTime::add_seconds` adds an absolute duration, so session expiry stays
+  correct across DST transitions.
 
 `StringArray` stores a JSON array of strings, matching `models.StringArray`.
 
