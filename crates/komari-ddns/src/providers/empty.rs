@@ -35,7 +35,9 @@ impl DdnsProvider for EmptyProvider {
     }
 
     async fn delete_record(&self, _record_id: &str) -> Result<(), DdnsError> {
-        Ok(())
+        Err(DdnsError::Provider(
+            "empty DDNS provider cannot delete records".to_owned(),
+        ))
     }
 }
 

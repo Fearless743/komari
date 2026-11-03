@@ -397,7 +397,11 @@ async fn cloudflare_deletes_record_with_authentication() {
     assert_eq!(requests[0].header("authorization"), Some("Bearer token"));
 
     let empty = EmptyProvider;
-    empty.delete_record("record-1").await.expect("empty delete");
+    let error = empty
+        .delete_record("record-1")
+        .await
+        .expect_err("empty provider must not claim deletion");
+    assert!(error.to_string().contains("cannot delete records"));
 
     let mut webhook = WebhookProvider::new();
     webhook.set_configuration(json!({})).expect("config");

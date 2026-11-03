@@ -263,6 +263,23 @@ async fn empty_addresses_are_skipped_even_when_forced() {
 }
 
 #[tokio::test]
+async fn delete_record_requires_a_loaded_provider_and_delegates() {
+    let db = database();
+    let unloaded = DdnsService::new(Arc::clone(&db));
+    assert!(matches!(
+        unloaded.delete_record("record-1").await,
+        Err(DdnsError::NotConfigured(message)) if message.contains("no DDNS provider")
+    ));
+
+    let (service, _) = service(&db, "", 2);
+    let error = service
+        .delete_record("record-1")
+        .await
+        .expect_err("test provider does not support deletion");
+    assert!(error.to_string().contains("does not support deleting"));
+}
+
+#[tokio::test]
 async fn load_provider_validates_name_and_configuration() {
     let db = database();
     let (service, _) = service(&db, "", 2);

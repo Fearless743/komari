@@ -293,6 +293,19 @@ impl DdnsService {
         Ok(())
     }
 
+    /// Delete a DNS record through the currently loaded provider.
+    ///
+    /// This is a non-Go extension; see the crate README for provider support
+    /// and the `empty` provider's error semantics.
+    pub async fn delete_record(&self, record_id: &str) -> Result<(), DdnsError> {
+        let Some(provider) = self.current_provider() else {
+            return Err(DdnsError::NotConfigured(
+                "no DDNS provider is loaded".to_owned(),
+            ));
+        };
+        provider.delete_record(record_id).await
+    }
+
     /// Run a provider with the same exponential backoff as Go and record the
     /// final outcome in `ddns_sync_history`.
     pub async fn sync_with_retry(
