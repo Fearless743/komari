@@ -41,7 +41,7 @@ layout (it never panics silently).
 The placeholder is **not** a usable UI. Release builds must set
 `KOMARI_DEFAULT_THEME_DIR`.
 
-## Serving behaviour (Go parity)
+## Serving behaviour
 
 | Request | Behaviour |
 | --- | --- |
@@ -49,13 +49,34 @@ The placeholder is **not** a usable UI. Release builds must set
 | `/themes/{id}/{path}` | `data/theme/{id}/{path}` first, then the embedded default theme |
 | unknown `GET`/`HEAD` path | active theme's `dist{path}`, otherwise `dist/index.html` |
 | `/admin*` | default theme's `index.html`, no site replacements |
-| `/api`, `/api/*` | always 404, never the SPA |
-| other methods on unknown paths | 404 |
+| `/api`, `/api/*` | always 404, never the SPA (intentional divergence, see below) |
+| other methods on static/unknown paths | 404 |
 
-Theme selection uses the configured theme short name. If
-`data/theme/<theme>/komari-theme.json` is missing or invalid, `default` is used.
-Files missing from an installed theme fall back to the embedded default on a
-per-file basis, matching the Go `getFileContent` helper.
+Theme selection uses the configured theme short name. A theme is considered
+available when `data/theme/<theme>/dist/index.html` is readable; a valid
+`komari-theme.json` is only required for listings, previews and theme settings.
+This matches Go, which serves any theme file that exists. If the configured
+theme has no readable index, `default` is used. Files missing from an installed
+theme fall back to the embedded default on a per-file basis, matching the Go
+`getFileContent` helper.
+
+### Differences from Go
+
+* **`/api/*` is never the SPA.** Go's `NoRoute` currently serves `index.html` for
+  an unknown `GET /api/...`; this crate returns 404 so API typos never look like
+  a successful HTML response. This is the B14 requirement, not an accident.
+* **Theme availability is based on `dist/index.html`, not on
+  `komari-theme.json`.** Invalid or missing metadata no longer disables serving;
+  it only makes the theme absent from `list_themes` and theme settings.
+* **`list_themes` returns an empty list when `data/theme` does not exist.**
+  This mirrors Go's early return; Go normally creates the directory in `init`,
+  so the server layer should create `data/theme` during startup.
+* **Static routes reject non-GET/HEAD with 404.** Gin's `NoRoute` also returns
+  404 for these methods; this crate uses `any` plus an explicit method check to
+  avoid Axum's default 405.
+* **MIME types follow Go's built-ins** for the common cases: `.ico` is
+  `image/vnd.microsoft.icon`, `.json` is `application/json` without a charset,
+  and `.xml` is `text/xml; charset=utf-8`.
 
 `index.html` is rewritten in a single pass:
 
@@ -76,8 +97,11 @@ Single-pass replacement matters: injected HTML is not scanned again.
 * Strong `ETag` and `304 Not Modified` for `If-None-Match`.
 * `Last-Modified` when the source exposes a timestamp.
 * `HEAD` returns headers without a body.
+* All static responses carry `Vary: Accept-Encoding`, including identity
+  responses, so shared caches keep encodings separate.
 * Optional pre-compressed `.br` / `.gz` siblings are served when the client
-  accepts them, with `Content-Encoding` and `Vary: Accept-Encoding`. Disable
+  accepts them. Negotiation honours `q` values, `q=0`, and `*`, and falls back
+  to the next acceptable coding when the preferred file is missing. Disable
   with `WebConfig::precompressed = false`.
 
 ## Path safety
@@ -104,13 +128,17 @@ let assets = Arc::new(WebAssets::new(WebConfig {
 }));
 
 // Update values when settings change.
-assets.set_theme("my-theme");
+assets.try_set_theme("my-theme").expect("installed theme");
 assets.set_site_meta(SiteMeta {
     sitename: "My Monitor".into(),
     description: "status page".into(),
     custom_head: String::new(),
     custom_body: String::new(),
 });
+
+// Load these from the `tempory_share_token` /
+// `tempory_share_token_expire_at` config rows whenever they change.
+assets.set_temp_share_token("share-token", 1_900_000_000);
 
 // Merge the static routes into the application router and use the fallback.
 let app = komari_web::routes(assets.clone()).fallback({
@@ -153,26 +181,53 @@ let app: axum::Router<AppState> = komari_web::routes_for::<AppState>(assets)
 }
 ```
 
-`name` and `short` are required. `list_themes` returns the embedded default
-first, then valid directories below `data/theme`, skipping unreadable or
-invalid configs with a warning. Preview lookup tries `preview`, then
-`preview.png`, then `perview.png`.
+`name` and `short` are required for metadata/API use. `list_themes` returns an
+empty list when `data/theme` is absent (Go parity); otherwise it returns the
+embedded default first, then valid directories below `data/theme`, skipping
+unreadable or invalid configs with a warning. Preview lookup tries `preview`,
+then `preview.png`, then `perview.png`, and prefers files owned by the theme
+before falling back to the embedded default.
 
-## Known limitations
+## Known limitations and integration responsibilities
 
 * `configuration` is kept as opaque JSON; theme settings persistence belongs to
   the API/database crates.
 * Theme upload, import, deletion and update (Go `api/admin/theme.go`) are not
   implemented here.
+* The API/database layer owns persistence of the selected theme. Call
+  `try_set_theme` after saving the config row; `set_theme` remains an unchecked
+  restore helper.
+* Temporary share links need the server layer to load
+  `tempory_share_token` / `tempory_share_token_expire_at` from the database and
+  call `set_temp_share_token` (or `clear_temp_share_token`). The fallback then
+  sets the `temp_key` cookie; without that wiring, share links will not work.
+  This is B03/B09 integration work, not a missing fallback path.
+* `list_themes` does not create `data/theme`; the server should create it during
+  startup, as Go's `public` init does.
 * Pre-compressed variants are only served if the theme package ships them; the
   crate does not compress on the fly.
 * `Range` requests are not implemented; static assets are returned whole.
 * The embedded theme is selected at compile time, so changing
   `KOMARI_DEFAULT_THEME_DIR` requires a rebuild.
+* The placeholder documentation lives at `crates/komari-web/PLACEHOLDER_THEME.md`,
+  outside `defaultTheme/`, so it is not embedded or publicly reachable.
 
 ## Tests
 
+The suite builds temporary themes and does not depend on the embedded theme's
+file names or contents. Run it against both the committed placeholder and a
+real frontend build:
+
 ```sh
+# Placeholder theme (fresh checkout)
 cargo test -p komari-web
 cargo clippy -p komari-web --all-targets -- -D warnings
+
+# Real frontend build
+KOMARI_DEFAULT_THEME_DIR=/path/to/komari-web cargo test -p komari-web
+KOMARI_DEFAULT_THEME_DIR=/path/to/komari-web \
+  cargo clippy -p komari-web --all-targets -- -D warnings
 ```
+
+CI should run the second pair when the frontend checkout is available.
+
