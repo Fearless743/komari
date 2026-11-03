@@ -210,7 +210,9 @@ pub fn verify_2fa(db: &Db, user_uuid: &str, code: &str) -> Result<bool> {
     if user.two_factor.is_empty() {
         return Ok(false);
     }
-    verify_code_at(&user.two_factor, code, now_unix())
+    // Go `totp.Validate` returns a bool and swallows malformed secrets, so a
+    // corrupt row must fail login with "invalid code", not a 500.
+    Ok(verify_code_at(&user.two_factor, code, now_unix()).unwrap_or(false))
 }
 
 fn counter_at(unix_time: i64, period: u64) -> u64 {
@@ -367,6 +369,13 @@ mod tests {
                 .is_empty()
         );
         assert!(!verify_2fa(&db, &uuid, &code).unwrap());
+    }
+
+    #[test]
+    fn verify_2fa_treats_a_corrupt_secret_as_false() {
+        let (db, uuid) = database_with_user();
+        db.accounts().enable_2fa(&uuid, "not-base32!").unwrap();
+        assert!(!verify_2fa(&db, &uuid, "123456").unwrap());
     }
 
     #[test]
