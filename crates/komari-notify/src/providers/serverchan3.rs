@@ -23,7 +23,7 @@ pub struct ServerChan3Config {
 
 impl std::fmt::Debug for ServerChan3Config {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        let redacted = crate::redact::redact_serialized("serverchan3", self);
+        let redacted = crate::redact::redact_serialized("Server酱³", self);
         f.debug_struct("ServerChan3Config")
             .field("config", &redacted)
             .finish()
@@ -135,15 +135,9 @@ impl MessageSender for ServerChan3Sender {
 
 fn check_response(response: HttpResponse) -> Result<()> {
     if !(200..300).contains(&response.status) {
-        let body = response.body_text().trim();
-        if body.is_empty() {
-            return Err(NotifyError::Send(format!(
-                "接口返回非 2xx 状态码: {}",
-                response.status
-            )));
-        }
+        // The remote body may contain credentials; only report the status.
         return Err(NotifyError::Send(format!(
-            "接口返回非 2xx 状态码: {}，响应: {body}",
+            "接口返回非 2xx 状态码: {}",
             response.status
         )));
     }

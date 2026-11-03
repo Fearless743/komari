@@ -156,16 +156,14 @@ fn check_response(response: HttpResponse) -> Result<()> {
     #[derive(Deserialize)]
     struct TelegramResponse {
         ok: bool,
-        #[serde(default)]
-        description: String,
+        #[serde(default, rename = "description")]
+        _description: String,
     }
 
     let parsed: TelegramResponse = serde_json::from_slice(&response.body)?;
     if !parsed.ok {
-        return Err(NotifyError::Send(format!(
-            "telegram API error: {}",
-            parsed.description
-        )));
+        // Telegram descriptions can echo chat/user data; keep the error generic.
+        return Err(NotifyError::Send("telegram API error".to_owned()));
     }
     Ok(())
 }

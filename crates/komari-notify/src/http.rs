@@ -201,18 +201,26 @@ impl HttpTransport for ReqwestTransport {
             builder = builder.body(body);
         }
 
-        let response = builder
-            .send()
-            .await
-            .map_err(|error| NotifyError::Http(error.to_string()))?;
+        let response = builder.send().await.map_err(reqwest_error)?;
         let status = response.status().as_u16();
-        let body = response
-            .bytes()
-            .await
-            .map_err(|error| NotifyError::Http(error.to_string()))?
-            .to_vec();
+        let body = response.bytes().await.map_err(reqwest_error)?.to_vec();
         Ok(HttpResponse { status, body })
     }
+}
+
+/// Map a reqwest error without ever including the request URL (which can
+/// contain bot tokens, sendkeys or webhook path tokens).
+fn reqwest_error(error: reqwest::Error) -> NotifyError {
+    let kind = if error.is_timeout() {
+        "timeout"
+    } else if error.is_connect() {
+        "connect"
+    } else if error.is_body() || error.is_decode() {
+        "response body"
+    } else {
+        "request"
+    };
+    NotifyError::Http(format!("{kind} failed"))
 }
 
 /// Percent-encode one `application/x-www-form-urlencoded` component the same

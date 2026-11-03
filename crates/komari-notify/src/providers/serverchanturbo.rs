@@ -25,7 +25,7 @@ pub struct ServerChanTurboConfig {
 
 impl std::fmt::Debug for ServerChanTurboConfig {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        let redacted = crate::redact::redact_serialized("serverchanturbo", self);
+        let redacted = crate::redact::redact_serialized("Server酱Turbo", self);
         f.debug_struct("ServerChanTurboConfig")
             .field("config", &redacted)
             .finish()
@@ -141,15 +141,9 @@ impl MessageSender for ServerChanTurboSender {
 
 fn check_response(response: HttpResponse) -> Result<()> {
     if !(200..300).contains(&response.status) {
-        let body = response.body_text().trim();
-        if body.is_empty() {
-            return Err(NotifyError::Send(format!(
-                "serverchanturbo: 接口返回非 2xx 状态码: {}",
-                response.status
-            )));
-        }
+        // The remote body may contain credentials; only report the status.
         return Err(NotifyError::Send(format!(
-            "serverchanturbo: 接口返回非 2xx 状态码: {}，响应: {body}",
+            "serverchanturbo: 接口返回非 2xx 状态码: {}",
             response.status
         )));
     }

@@ -222,10 +222,10 @@ impl MessageSender for WebhookSender {
 
 fn check_response(response: HttpResponse) -> Result<()> {
     if !(200..300).contains(&response.status) {
+        // Never echo the remote body: it can contain tokens or secrets.
         return Err(NotifyError::Send(format!(
-            "webhook request failed with status {}: {}",
-            response.status,
-            response.body_text()
+            "webhook request failed with status {}",
+            response.status
         )));
     }
     Ok(())

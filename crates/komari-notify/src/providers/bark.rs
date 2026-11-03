@@ -177,8 +177,6 @@ fn check_response(response: HttpResponse) -> Result<()> {
         // `Option` accepts JSON null; any other wrong type is a decode error.
         #[serde(default)]
         code: Option<i64>,
-        #[serde(default)]
-        message: Option<String>,
     }
 
     // Go decodes into a struct: non-JSON is an error (treated as success for
@@ -199,12 +197,10 @@ fn check_response(response: HttpResponse) -> Result<()> {
         _ => return Ok(()),
     };
     let code = parsed.code.unwrap_or(0);
-    let message = parsed.message.unwrap_or_default();
 
     if code != 200 {
-        return Err(NotifyError::Send(format!(
-            "bark API error (code: {code}): {message}"
-        )));
+        // Bark's message can contain server details; only report the code.
+        return Err(NotifyError::Send(format!("bark API error (code: {code})")));
     }
     Ok(())
 }

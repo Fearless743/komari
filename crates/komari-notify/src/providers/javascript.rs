@@ -25,7 +25,7 @@ pub struct JavaScriptConfig {
 
 impl std::fmt::Debug for JavaScriptConfig {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        let redacted = crate::redact::redact_serialized("javascript", self);
+        let redacted = crate::redact::redact_serialized("Javascript", self);
         f.debug_struct("JavaScriptConfig")
             .field("config", &redacted)
             .finish()
