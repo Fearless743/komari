@@ -5,7 +5,7 @@
 //! that report over plain HTTP POST. Presence is kept in milliseconds via the
 //! injectable [`Clock`](crate::Clock) so tests are deterministic.
 
-use std::collections::{BTreeSet, HashMap};
+use std::collections::{BTreeSet, HashMap, HashSet};
 use std::sync::atomic::{AtomicI64, Ordering};
 use std::sync::{Arc, Mutex, RwLock};
 use std::time::Duration;
@@ -507,11 +507,23 @@ fn process_agent_message(state: &ApiState, uuid: &str, payload: &[u8]) -> bool {
 
 /// `GET /api/clients` — browser WebSocket used by the dashboard.
 ///
-/// Login/session handling and hidden-client filtering are completed in the web
-/// task; this implementation exposes the same `get` / `get <uuid>` protocol so
-/// the route is usable today.
+/// Mirrors `api.GetClients`:
+///
+/// * a valid `session_token` cookie marks the viewer as logged in;
+/// * guests do not see clients whose `hidden` flag is set;
+/// * guests are rejected when private-site mode is enabled and they have no
+///   valid temporary-share cookie;
+/// * the `get` / `get <uuid>` protocol is unchanged.
 pub async fn clients_ws(State(state): State<ApiState>, request: Request) -> Response {
     let (mut parts, _body) = request.into_parts();
+    let context = AuthContext::from_request_parts(&mut parts, &state)
+        .await
+        .expect("AuthContext extraction is infallible");
+
+    if private_site_denied(&state, &context, parts.uri.path(), &parts.headers) {
+        return komari_auth::private_site_unauthorized_response();
+    }
+
     let ws = match WebSocketUpgrade::from_request_parts(&mut parts, &state).await {
         Ok(ws) => ws,
         Err(_) => {
@@ -531,10 +543,98 @@ pub async fn clients_ws(State(state): State<ApiState>, request: Request) -> Resp
             .body(axum::body::Body::from("Forbidden\n"))
             .expect("static 403 response is valid");
     }
-    ws.on_upgrade(move |socket| handle_browser_socket(state, socket))
+
+    // Go only treats a valid session cookie as a login. API keys and agent
+    // tokens do not unlock hidden clients.
+    let is_login = context.role == Role::Admin && context.session_token.is_some();
+    let hidden = if is_login {
+        HashSet::new()
+    } else {
+        hidden_clients(&state)
+    };
+    ws.on_upgrade(move |socket| handle_browser_socket(state, is_login, hidden, socket))
 }
 
-async fn handle_browser_socket(state: ApiState, mut socket: WebSocket) {
+/// UUIDs hidden from anonymous dashboard viewers.
+fn hidden_clients(state: &ApiState) -> HashSet<String> {
+    match state.db.clients().list() {
+        Ok(clients) => clients
+            .into_iter()
+            .filter(|client| client.hidden)
+            .map(|client| client.uuid)
+            .collect(),
+        Err(error) => {
+            tracing::warn!(%error, "failed to load hidden clients");
+            HashSet::new()
+        }
+    }
+}
+
+/// Go's `PrivateSiteMiddleware` for the browser socket when the router is used
+/// without the server's global middleware stack.
+fn private_site_denied(
+    state: &ApiState,
+    context: &AuthContext,
+    path: &str,
+    headers: &HeaderMap,
+) -> bool {
+    if !context.is_guest() || komari_auth::is_public_path(path) || !path.starts_with("/api") {
+        return false;
+    }
+    let enabled = state
+        .db
+        .config()
+        .get_as::<bool>("private_site")
+        .ok()
+        .flatten()
+        .unwrap_or(false);
+    enabled && !temporary_access(state, headers)
+}
+
+/// Whether the request carries the configured temporary-share cookie.
+fn temporary_access(state: &ApiState, headers: &HeaderMap) -> bool {
+    let Some(cookie) = cookie_value(headers, "temp_key") else {
+        return false;
+    };
+    if cookie.is_empty() {
+        return false;
+    }
+    let Ok(Some(token)) = state.db.config().get_as::<String>("tempory_share_token") else {
+        return false;
+    };
+    let Ok(Some(expires_at)) = state
+        .db
+        .config()
+        .get_as::<i64>("tempory_share_token_expire_at")
+    else {
+        return false;
+    };
+    let now = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|duration| duration.as_secs() as i64)
+        .unwrap_or_default();
+    !token.is_empty() && cookie == token && expires_at >= now
+}
+
+fn cookie_value(headers: &HeaderMap, name: &str) -> Option<String> {
+    headers
+        .get_all(http::header::COOKIE)
+        .iter()
+        .filter_map(|value| value.to_str().ok())
+        .flat_map(|value| value.split(';'))
+        .filter_map(|pair| {
+            let (key, value) = pair.trim().split_once('=')?;
+            (key == name).then(|| value.to_owned())
+        })
+        .next()
+}
+
+async fn handle_browser_socket(
+    state: ApiState,
+    is_login: bool,
+    hidden: HashSet<String>,
+    mut socket: WebSocket,
+) {
     while let Some(message) = socket.recv().await {
         let message = match message {
             Ok(message) => message,
@@ -574,15 +674,20 @@ async fn handle_browser_socket(state: ApiState, mut socket: WebSocket) {
             continue;
         };
 
+        let visible = |uuid: &str| {
+            (is_login || !hidden.contains(uuid))
+                && filter.as_deref().is_none_or(|wanted| wanted == uuid)
+        };
+
         let online: Vec<String> = state
             .hub
             .online_uuids()
             .into_iter()
-            .filter(|uuid| filter.as_deref().is_none_or(|wanted| wanted == uuid))
+            .filter(|uuid| visible(uuid))
             .collect();
         let mut data = serde_json::Map::new();
         for (uuid, mut report) in state.hub.latest_reports() {
-            if filter.as_deref().is_some_and(|wanted| wanted != uuid) {
+            if !visible(&uuid) {
                 continue;
             }
             report.uuid.clear();
