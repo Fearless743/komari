@@ -128,9 +128,13 @@ impl Sessions<'_> {
     }
 
     /// Remove every session that expired before the supplied timestamp.
+    /// Sessions with a `NULL`/zero expiry (legacy rows) are also removed.
     pub fn delete_expired_before(&self, now: LocalTime) -> Result<usize> {
         let conn = self.db.conn();
-        Ok(conn.execute("DELETE FROM sessions WHERE expires < ?1", [now])?)
+        Ok(conn.execute(
+            "DELETE FROM sessions WHERE expires < ?1 OR expires IS NULL",
+            [now],
+        )?)
     }
 
     /// Refresh `latest_online`, `latest_user_agent` and `latest_ip`.

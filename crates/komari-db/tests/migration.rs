@@ -39,6 +39,58 @@ fn migration_can_run_twice_in_memory() {
 }
 
 #[test]
+fn legacy_sessions_without_expiry_are_expired() {
+    let dir = TempDir::new("old-sessions");
+    let path = dir.join("komari.db");
+    let db = Db::open(&path).unwrap();
+
+    db.with_connection(|conn| {
+        conn.execute_batch(
+            "CREATE TABLE sessions (\
+                 `uuid` varchar(36), \
+                 `session` varchar(255) PRIMARY KEY, \
+                 `user_agent` text, \
+                 `latest_online` timestamp\
+             );\
+             INSERT INTO sessions (uuid, session, user_agent) VALUES ('user', 'old-session', 'agent');\
+             INSERT INTO sessions (uuid, session, user_agent) VALUES ('user', 'null-expiry', 'agent');",
+        )?;
+        Ok(())
+    })
+    .unwrap();
+
+    db.migrate().unwrap();
+
+    // The migration backfills a past timestamp for the newly added column.
+    let migrated = db.sessions().get("old-session").unwrap().unwrap();
+    assert_eq!(
+        migrated.expires.to_storage_string(),
+        "1970-01-01 00:00:00.0000000"
+    );
+
+    // `expires` is nullable on this legacy table, so exercise the NULL deletion
+    // path as well.
+    db.with_connection(|conn| {
+        conn.execute(
+            "UPDATE sessions SET expires = NULL WHERE session = 'null-expiry'",
+            [],
+        )?;
+        Ok(())
+    })
+    .unwrap();
+    assert_eq!(
+        db.sessions()
+            .delete_expired_before(LocalTime::now())
+            .unwrap(),
+        2
+    );
+
+    assert!(db.sessions().get("old-session").unwrap().is_none());
+    assert!(db.sessions().get("null-expiry").unwrap().is_none());
+    assert!(komari_db::models::Session::default().is_expired());
+}
+
+#[test]
 fn migration_adds_columns_before_building_indexes() {
     let dir = TempDir::new("old-indexed");
     let path = dir.join("komari.db");

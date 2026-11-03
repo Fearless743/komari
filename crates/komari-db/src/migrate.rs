@@ -404,6 +404,14 @@ impl Db {
         add_missing_columns(&tx)?;
         // Indexes last: they can reference columns added in the step above.
         tx.execute_batch(INDEX_SQL)?;
+        // Older `sessions` tables had no `expires` column, so the additive
+        // migration leaves NULL. Treat those sessions as long expired instead
+        // of leaving them valid forever.
+        tx.execute(
+            "UPDATE sessions SET expires = '1970-01-01 00:00:00.0000000' \
+             WHERE expires IS NULL",
+            [],
+        )?;
         tx.commit()?;
         Ok(())
     }

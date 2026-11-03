@@ -47,7 +47,13 @@ impl Session {
     }
 
     pub fn is_expired(&self) -> bool {
-        !self.expires.is_zero() && self.expires < LocalTime::now()
+        // A missing/zero expiry can only come from an old schema or corrupt
+        // data; treat it as expired rather than immortal. Go sessions always
+        // had a non-null `expires`, so this only tightens legacy handling.
+        if self.expires.is_zero() {
+            return true;
+        }
+        self.expires < LocalTime::now()
     }
 }
 
