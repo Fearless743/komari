@@ -1,12 +1,14 @@
 //! `/api/rpc2`: JSON-RPC 2.0 over HTTP POST and WebSocket.
 
 use axum::Router;
-use axum::body::to_bytes;
+use axum::body::{Body, to_bytes};
 use axum::extract::ws::{Message, WebSocket, WebSocketUpgrade};
 use axum::extract::{FromRequestParts, Request, State};
+use axum::http::Method;
 use axum::http::StatusCode;
+use axum::http::header::CONTENT_TYPE;
 use axum::response::{IntoResponse, Response};
-use axum::routing::get;
+use axum::routing::any;
 use serde_json::json;
 
 use super::context::{RpcContext, detect};
@@ -17,7 +19,20 @@ use crate::ws::check_origin;
 
 /// Routes for `/api/rpc2` (GET WebSocket, POST JSON-RPC).
 pub fn rpc_router() -> Router<ApiState> {
-    Router::new().route("/api/rpc2", get(rpc_ws).post(rpc_post))
+    Router::new().route("/api/rpc2", any(rpc_entry))
+}
+
+async fn rpc_entry(State(state): State<ApiState>, request: Request) -> Response {
+    let method = request.method().clone();
+    match method {
+        Method::GET => rpc_ws(State(state), request).await,
+        Method::POST => rpc_post(State(state), request).await,
+        _ => (
+            StatusCode::METHOD_NOT_ALLOWED,
+            axum::Json(json!({"error": "method not allowed"})),
+        )
+            .into_response(),
+    }
 }
 
 /// Standalone router with state applied.
@@ -44,14 +59,12 @@ async fn rpc_context(
 async fn rpc_ws(State(state): State<ApiState>, request: Request) -> Response {
     let (mut parts, _body) = request.into_parts();
     if !state.allow_cors() && !check_origin(&parts.headers, state.ws_disable_origin()) {
-        return (
-            StatusCode::BAD_REQUEST,
-            axum::Json(json!({
-                "status": "error",
-                "error": "Failed to upgrade to WebSocket.Request origin not allowed",
-            })),
-        )
-            .into_response();
+        return Response::builder()
+            .status(StatusCode::FORBIDDEN)
+            .header(CONTENT_TYPE, "text/plain; charset=utf-8")
+            .header("x-content-type-options", "nosniff")
+            .body(Body::from("Forbidden\n"))
+            .expect("static 403 response is valid");
     }
 
     let context = rpc_context(&state, &parts.headers, &parts.uri).await;
