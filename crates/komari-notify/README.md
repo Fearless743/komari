@@ -47,15 +47,20 @@ API 响应中，含以下内容的 URL 字段会被移除：
 - 凭据类 query 参数（精确名单：`token`、`access_token`、`auth`、
   `authorization`、`api_key`、`key`、`secret`、`password`、`sig`、
   `signature`、`x-amz-signature`、`x-hub-signature-256`、`hmac` 等；
-  `author`、`monkey` 这类无关键不会被误删）；
+  采用规范化后的精确匹配，不做任意子串匹配，因此 `author`、`monkey`、
+  `secretary`、`tokenizer`、`signature_pad` 不会被误删）；
 - 已知 webhook 路径 token：Slack `hooks.slack.com/services/...`、
   Discord `/api/webhooks/...`、Microsoft Teams `/webhook...`；
-- Telegram Bot API 路径中直接拼接的 token（`api.telegram.org/bot<token>`）。
+- 常见自建路径段后的 token：`/token/<secret>`、`/key/<secret>`、
+  `/secret/<secret>`、`/webhook/<secret>`、`/send/<sendkey>`；
+- Telegram Bot API 路径中的 token（`api.telegram.org/bot<token>` 或
+  `api.telegram.org/bot/<token>`）。
 
 启发式限制：未知自建服务把 token 放在普通路径段时，API 脱敏无法自动识别；
 但 `Debug` 输出对所有 URL 一律只保留 scheme + host + port，路径和 query 全部
 隐藏，因此日志不会泄露。远端非 2xx 响应体和 Telegram/Bark 错误描述也不再拼入
-`NotifyError`，避免响应内容回显 secret。
+`NotifyError`，避免响应内容回显 secret。serde 配置错误只保留 provider、
+字段路径和错误类别，不拼接原始诊断文本。
 
 | Provider | 移除的字段 |
 | --- | --- |
@@ -70,7 +75,8 @@ API 响应中，含以下内容的 URL 字段会被移除：
 
 配置结构体的 `Debug` 输出同样经过脱敏；所有 URL 字段只显示 scheme + host +
 port，路径/query 隐藏。`HttpRequest` 的 `Debug` 不显示请求体和敏感请求头
-（`Authorization`、`X-Auth`、`X-Hub-Signature-256`、`X-Api-Key` 等），
+（`Authorization`、`X-Auth`、`X-Hub-Signature-256`、`X-Amz-Signature`、
+`X-Api-Key`、`hmac`、`sig` 等），
 `HttpResponse` 只显示 body 长度，`EmailEnvelope` 不显示密码和 MIME 原文。
 
 ## Known differences

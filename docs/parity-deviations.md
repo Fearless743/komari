@@ -36,16 +36,19 @@ verbatim, including tokens. The Rust API must return a redacted copy.
 **URL handling:** all URL-shaped fields (`url`, `URL`, `server_url`, `endpoint`,
 `api_url`) are checked. Credential detection covers userinfo, an exact
 credential-query list (`token`, `sig`, `signature`, `x-amz-signature`,
-`x-hub-signature-256`, `hmac`, ...), known Slack/Discord/Teams path tokens and
-Telegram bot tokens embedded in the path. Unrelated keys such as `author` and
-`monkey` are not removed.
+`x-hub-signature-256`, `hmac`, ...), known Slack/Discord/Teams path tokens,
+common self-hosted markers (`/token/`, `/key/`, `/secret/`, `/webhook/`,
+`/send/`) and Telegram bot tokens embedded in the path. Names are matched
+exactly after normalization; unrelated keys such as `author`, `monkey`,
+`secretary`, `tokenizer` and `signature_pad` are not removed.
 
 **Debug/logging:** every URL in `Debug` output is reduced to scheme + host +
 port (paths and query strings are hidden). Sensitive headers include
 `Authorization`, `X-Auth`, `X-Hub-Signature-256`, `X-Api-Key` and similar.
 `HttpRequest` bodies and `HttpResponse` bodies are never printed; remote
 response bodies/descriptions are not included in errors. Registry type errors
-are sanitized so serde never echoes the offending value.
+retain only provider, field path and serde error category, never the offending
+value or raw diagnostic text.
 
 **Known heuristic limit:** tokens placed in arbitrary path segments of an
 unknown self-hosted service are not auto-detected by the API redactor. Debug
