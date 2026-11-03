@@ -24,8 +24,8 @@
 #   KOMARI_DEFAULT_THEME_DIR   Theme directory embedded by komari-web
 #   PACKAGE                    Optional package; default builds --workspace
 #   PROFILE                    Cargo profile: release (default) or dev
-#   TARGET                     Optional Rust target triple for cross builds
-#   CROSS                      Cross executable (default: cross if on PATH)
+#   TARGET                     Optional Rust target triple
+#   CROSS                      Optional build command override (e.g. cargo/cross)
 #   OUT_DIR                    Output directory (default: dist)
 #   CARGO                      Cargo executable (default: cargo)
 
@@ -60,21 +60,6 @@ fi
 export KOMARI_VERSION="$VERSION"
 export KOMARI_VERSION_HASH="$VERSION_HASH"
 
-# B14 resolves relative theme paths against crates/komari-web, not the repo
-# root, so normalize to an absolute path here.
-if [[ -n "${KOMARI_DEFAULT_THEME_DIR:-}" ]]; then
-  THEME_DIR="$KOMARI_DEFAULT_THEME_DIR"
-  if [[ "$THEME_DIR" != /* ]]; then
-    THEME_DIR="$ROOT_DIR/$THEME_DIR"
-  fi
-  if [[ ! -d "$THEME_DIR" ]]; then
-    echo "error: KOMARI_DEFAULT_THEME_DIR is not a directory: $KOMARI_DEFAULT_THEME_DIR" >&2
-    exit 1
-  fi
-  THEME_DIR="$(cd "$THEME_DIR" && pwd)"
-  export KOMARI_DEFAULT_THEME_DIR="$THEME_DIR"
-fi
-
 # Match the Go release build's `-ldflags "-s -w"` (strip symbols).
 if [[ "$PROFILE" == "release" ]]; then
   export CARGO_PROFILE_RELEASE_STRIP="${CARGO_PROFILE_RELEASE_STRIP:-symbols}"
@@ -86,6 +71,71 @@ touch crates/komari-cli/src/version.rs
 
 HOST_TARGET="$(rustc -vV | sed -n 's/^host: //p')"
 
+# cross is only needed for Linux musl targets. Same-OS cross builds (for
+# example macOS x86_64 on Apple Silicon) use the native cargo/linker, matching
+# the CI matrix's use_cross:false entries.
+USE_CROSS=false
+if [[ -n "$TARGET" && "$TARGET" != "$HOST_TARGET" ]]; then
+  case "$TARGET" in
+    *-unknown-linux-musl) USE_CROSS=true ;;
+  esac
+fi
+
+if [[ -n "$CROSS" ]]; then
+  BUILD_CMD="$CROSS"
+elif [[ "$USE_CROSS" == true ]]; then
+  if command -v cross >/dev/null 2>&1; then
+    BUILD_CMD="cross"
+  else
+    echo "error: cross-compiling to $TARGET requires 'cross' (or set CROSS)." >&2
+    echo "       Install it with: cargo install cross --locked" >&2
+    exit 1
+  fi
+else
+  BUILD_CMD="$CARGO"
+fi
+BUILD_CMD_NAME="$(basename "$BUILD_CMD")"
+
+# Resolve the theme to an absolute path for validation and marker checks.
+THEME_DIR=""
+if [[ -n "${KOMARI_DEFAULT_THEME_DIR:-}" ]]; then
+  THEME_DIR="$KOMARI_DEFAULT_THEME_DIR"
+  if [[ "$THEME_DIR" != /* ]]; then
+    THEME_DIR="$ROOT_DIR/$THEME_DIR"
+  fi
+  if [[ ! -d "$THEME_DIR" ]]; then
+    echo "error: KOMARI_DEFAULT_THEME_DIR is not a directory: $KOMARI_DEFAULT_THEME_DIR" >&2
+    exit 1
+  fi
+  THEME_DIR="$(cd "$THEME_DIR" && pwd)"
+
+  if [[ "$BUILD_CMD_NAME" == "cross" ]]; then
+    # cross mounts the repository at /project and B14 resolves relative theme
+    # paths against crates/komari-web. An absolute host path is not visible
+    # inside the container, so pass a repo-relative path instead.
+    case "$THEME_DIR" in
+      "$ROOT_DIR"/*) ;;
+      *)
+        echo "error: cross builds require KOMARI_DEFAULT_THEME_DIR inside the repository." >&2
+        echo "       Copy the theme into the repo (for example .komari-theme) and retry." >&2
+        exit 1
+        ;;
+    esac
+    if command -v python3 >/dev/null 2>&1; then
+      REL_THEME="$(python3 -c 'import os, sys; print(os.path.relpath(sys.argv[1], sys.argv[2]))' \
+        "$THEME_DIR" "$ROOT_DIR/crates/komari-web")"
+    elif realpath --relative-to="$ROOT_DIR/crates/komari-web" "$THEME_DIR" >/dev/null 2>&1; then
+      REL_THEME="$(realpath --relative-to="$ROOT_DIR/crates/komari-web" "$THEME_DIR")"
+    else
+      echo "error: cannot compute a relative theme path for cross; install python3 or realpath." >&2
+      exit 1
+    fi
+    export KOMARI_DEFAULT_THEME_DIR="$REL_THEME"
+  else
+    export KOMARI_DEFAULT_THEME_DIR="$THEME_DIR"
+  fi
+fi
+
 build_args=(build --locked --profile "$PROFILE")
 if [[ -n "$PACKAGE" ]]; then
   build_args+=(-p "$PACKAGE")
@@ -95,21 +145,6 @@ else
 fi
 if [[ -n "$TARGET" ]]; then
   build_args+=(--target "$TARGET")
-fi
-
-if [[ -n "$TARGET" && "$TARGET" != "$HOST_TARGET" ]]; then
-  if [[ -n "$CROSS" ]]; then
-    BUILD_CMD="$CROSS"
-  elif command -v cross >/dev/null 2>&1; then
-    BUILD_CMD="cross"
-  else
-    echo "error: cross-compiling to $TARGET requires 'cross' (or set CROSS)." >&2
-    echo "       Install it with: cargo install cross --locked" >&2
-    echo "       Native runners are recommended for macOS/Windows targets." >&2
-    exit 1
-  fi
-else
-  BUILD_CMD="$CARGO"
 fi
 
 "$BUILD_CMD" "${build_args[@]}"
@@ -136,10 +171,19 @@ if [[ ! -f "$BINARY" ]]; then
   exit 1
 fi
 
-# `CARGO_PROFILE_RELEASE_STRIP` covers native builds; strip explicitly as well
-# so `cross` builds and custom linkers get the Go `-s -w` equivalent.
-if [[ "$PROFILE" == "release" && "$BIN_NAME" != *.exe ]] && command -v strip >/dev/null 2>&1; then
-  strip "$BINARY"
+# Host strip only works for the host architecture. Cross builds rely on
+# CARGO_PROFILE_RELEASE_STRIP (set above) and/or the cross container toolchain.
+if [[ "$PROFILE" == "release" && "$BIN_NAME" != *.exe ]]; then
+  if [[ -z "$TARGET" || "$TARGET" == "$HOST_TARGET" ]]; then
+    if command -v strip >/dev/null 2>&1; then
+      strip "$BINARY"
+    else
+      echo "warning: strip not found; binary may retain symbols" >&2
+    fi
+  else
+    echo "note: not running host strip for cross target $TARGET" >&2
+    echo "      relying on CARGO_PROFILE_RELEASE_STRIP=${CARGO_PROFILE_RELEASE_STRIP:-unset}" >&2
+  fi
 fi
 
 mkdir -p "$OUT_DIR"
@@ -148,8 +192,21 @@ cp -f "$BINARY" "$OUT_DIR/$BIN_NAME"
 echo "Built $OUT_DIR/$BIN_NAME"
 echo "  version: $KOMARI_VERSION"
 echo "  hash:    $KOMARI_VERSION_HASH"
-if [[ -n "${KOMARI_DEFAULT_THEME_DIR:-}" ]]; then
-  echo "  theme:   $KOMARI_DEFAULT_THEME_DIR"
+if [[ -n "$THEME_DIR" ]]; then
+  echo "  theme:   $THEME_DIR"
+  MARKER=""
+  if [[ -f "$THEME_DIR/dist/index.html" ]]; then
+    MARKER="$(grep -oE 'assets/[A-Za-z0-9._-]+\.(js|css)' "$THEME_DIR/dist/index.html" | head -n1 || true)"
+  fi
+  if [[ -n "$MARKER" ]] && grep -a -q "$MARKER" "$BINARY"; then
+    echo "  theme:   linked into the binary"
+  else
+    echo "  warning: theme is embedded in komari-web but not linked into komari-cli yet (B09);" >&2
+    echo "           this binary does not contain the UI." >&2
+  fi
 else
-  echo "  theme:   komari-web placeholder (set KOMARI_DEFAULT_THEME_DIR for a real UI)"
+  echo "  theme:   B14 placeholder (set KOMARI_DEFAULT_THEME_DIR for a real UI)"
+  if [[ ! -f crates/komari-web/build.rs ]]; then
+    echo "  warning: crates/komari-web/build.rs is missing (B14 not merged)" >&2
+  fi
 fi
