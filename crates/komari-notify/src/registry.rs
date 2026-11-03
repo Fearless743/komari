@@ -72,10 +72,10 @@ impl ProviderRegistration {
         }
 
         let value: Value = serde_json::from_str(addition)
-            .map_err(|error| invalid_config(self.name, &error.to_string()))?;
+            .map_err(|error| invalid_config(self.name, error.classify()))?;
         match (self.constructor)(normalize_addition(value)) {
             Ok(provider) => Ok(provider),
-            Err(NotifyError::Json(error)) => Err(invalid_config(self.name, &error.to_string())),
+            Err(NotifyError::Json(error)) => Err(invalid_config(self.name, error.classify())),
             Err(error) => Err(error),
         }
     }
@@ -94,13 +94,11 @@ impl Default for ProviderRegistry {
 
 /// Build an `InvalidConfig` message without echoing JSON values.
 ///
-/// serde embeds the offending value in quotes (for example
-/// `invalid type: string "PORT_SECRET"`); replace every quoted segment while
-/// keeping the provider name and the rest of the diagnostic.
-fn invalid_config(provider: &str, message: &str) -> NotifyError {
+/// Only the provider name and serde's error category are retained; the raw
+/// diagnostic (which embeds offending values) is never included.
+fn invalid_config(provider: &str, category: serde_json::error::Category) -> NotifyError {
     NotifyError::InvalidConfig(format!(
-        "failed to load config for provider {provider}: {}",
-        crate::provider::sanitize_serde_message(message)
+        "failed to load config for provider {provider}: invalid JSON ({category:?})"
     ))
 }
 

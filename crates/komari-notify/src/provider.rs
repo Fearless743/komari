@@ -58,30 +58,10 @@ pub(crate) fn deserialize_config<T: DeserializeOwned>(provider: &str, value: Val
             path.as_str()
         };
         NotifyError::InvalidConfig(format!(
-            "failed to load config for provider {provider}: field {path}: {}",
-            sanitize_serde_message(&error.inner().to_string())
+            "failed to load config for provider {provider}: field {path}: invalid {:?} value",
+            error.inner().classify()
         ))
     })
-}
-
-/// Replace quoted/backticked values in a serde diagnostic with `<redacted>`.
-pub(crate) fn sanitize_serde_message(message: &str) -> String {
-    let mut result = String::with_capacity(message.len());
-    let mut delimiter = None;
-    for character in message.chars() {
-        match delimiter {
-            Some(open) if character == open => delimiter = None,
-            Some(_) => {}
-            None if character == '"' || character == '`' => {
-                result.push(character);
-                result.push_str("<redacted>");
-                result.push(character);
-                delimiter = Some(character);
-            }
-            None => result.push(character),
-        }
-    }
-    result
 }
 
 /// Optional capability matching Go's `IEventMessageSender`.
