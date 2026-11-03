@@ -20,42 +20,43 @@ pub fn should_skip_notification(task: &LoadNotification, now: DateTime<Utc>) -> 
 /// `.NET`-style metric lookup used by `getMetricValue`.
 pub fn get_metric_value(record: &Record, metric: &str, client: Option<&Client>) -> f32 {
     match metric {
-        "cpu" => record.cpu,
-        "gpu" => record.gpu,
-        "net_in" | "netin" => bytes_per_second_to_mbps(record.net_in),
-        "net_out" | "netout" => bytes_per_second_to_mbps(record.net_out),
-        "ram" => percentage(
+        "cpu" | "Cpu" => record.cpu,
+        "gpu" | "Gpu" => record.gpu,
+        "net_in" | "netin" | "NetIn" => bytes_per_second_to_mbps(record.net_in),
+        "net_out" | "netout" | "NetOut" => bytes_per_second_to_mbps(record.net_out),
+        "ram" | "Ram" => percentage(
             record.ram,
             record.ram_total,
             client.map(|value| value.mem_total).unwrap_or(0),
         ),
-        "swap" => percentage(
+        "swap" | "Swap" => percentage(
             record.swap,
             record.swap_total,
             client.map(|value| value.swap_total).unwrap_or(0),
         ),
-        "disk" => percentage(
+        "disk" | "Disk" => percentage(
             record.disk,
             record.disk_total,
             client.map(|value| value.disk_total).unwrap_or(0),
         ),
-        "load" => record.load,
-        "temp" => record.temp,
-        "ram_total" => record.ram_total as f32,
-        "swap_total" => record.swap_total as f32,
-        "disk_total" => record.disk_total as f32,
-        "net_total_up" => record.net_total_up as f32,
-        "net_total_down" => record.net_total_down as f32,
-        "process" => record.process as f32,
-        "connections" => record.connections as f32,
-        "connections_udp" => record.connections_udp as f32,
+        "load" | "Load" => record.load,
+        "temp" | "Temp" => record.temp,
+        "ram_total" | "RamTotal" => record.ram_total as f32,
+        "swap_total" | "SwapTotal" => record.swap_total as f32,
+        "disk_total" | "DiskTotal" => record.disk_total as f32,
+        "net_total_up" | "NetTotalUp" => record.net_total_up as f32,
+        "net_total_down" | "NetTotalDown" => record.net_total_down as f32,
+        "process" | "Process" => record.process as f32,
+        "connections" | "Connections" => record.connections as f32,
+        "connections_udp" | "ConnectionsUdp" => record.connections_udp as f32,
+        // Go falls back to reflection over the record's exported fields.
         _ => 0.0,
     }
 }
 
 fn percentage(used: i64, record_total: i64, client_total: i64) -> f32 {
     // Go only checks `record.*Total > 0`, then divides by the client's total.
-    if record_total > 0 && used >= 0 {
+    if record_total > 0 {
         // Dividing by a zero client total yields infinity, exactly like Go.
         used as f32 / client_total as f32 * 100.0
     } else {
@@ -120,9 +121,12 @@ pub fn execute_load_task(
         }
     }
 
-    // Go updates last_notified even when no client is overloaded.
+    // Go updates last_notified even when no client is overloaded, and a
+    // failed update only logs; it must not suppress the event.
     task.last_notified = window_end;
-    db.notifications().load_update(task)?;
+    let _ = db
+        .notifications()
+        .load_set_last_notified(task.id, window_end);
 
     if overloaded.is_empty() {
         return Ok(None);
@@ -137,7 +141,12 @@ pub fn execute_load_task(
     }))
 }
 
-/// Evaluate every stored load rule.
+/// Evaluate every stored load rule once.
+///
+/// Go's `LoadNotificationService` owns per-interval tickers, `Reload` and a
+/// stop channel. This crate exposes only the one-shot evaluation; the caller
+/// owns periodic scheduling, consistently with the offline/traffic/expiry
+/// loops.
 pub fn run_all_load_tasks(db: &Db, now: DateTime<Utc>) -> Result<Vec<EventMessage>> {
     let mut events = Vec::new();
     for mut task in db.notifications().load_list()? {
@@ -216,6 +225,7 @@ mod tests {
             ..Record::default()
         };
         assert_eq!(get_metric_value(&record, "ram", Some(&client)), 50.0);
+        assert_eq!(get_metric_value(&record, "Ram", Some(&client)), 50.0);
         assert_eq!(get_metric_value(&record, "unknown", Some(&client)), 0.0);
     }
 
@@ -227,5 +237,6 @@ mod tests {
         };
         assert_eq!(get_metric_value(&record, "net_in", None), 8.0);
         assert_eq!(get_metric_value(&record, "netin", None), 8.0);
+        assert_eq!(get_metric_value(&record, "NetIn", None), 8.0);
     }
 }

@@ -159,6 +159,16 @@ impl Notifications<'_> {
         )?)
     }
 
+    /// Update only the cooldown timestamp, matching Go's
+    /// `updateLastNotified` (`Update("last_notified", ...)`).
+    pub fn load_set_last_notified(&self, id: i64, at: LocalTime) -> Result<usize> {
+        let conn = self.db.conn();
+        Ok(conn.execute(
+            "UPDATE load_notifications SET last_notified = ?1 WHERE id = ?2",
+            params![at, id],
+        )?)
+    }
+
     /// Insert when `id == 0`, otherwise update.
     pub fn load_save(&self, notification: &mut LoadNotification) -> Result<i64> {
         if notification.id == 0 {

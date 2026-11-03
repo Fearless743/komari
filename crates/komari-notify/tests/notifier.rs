@@ -137,6 +137,28 @@ fn load_task_emits_event_and_updates_cooldown() {
     assert!(execute_load_task(&db, &mut task, now).unwrap().is_none());
 }
 
+#[test]
+fn load_task_without_a_stored_id_still_returns_the_event() {
+    let db = enabled_db();
+    let client = db.clients().create_named("loaded").unwrap();
+    let now = Utc::now();
+
+    let mut record = Record::new(&client.uuid);
+    record.time = LocalTime::from_instant(now - TimeDelta::minutes(1));
+    record.cpu = 95.0;
+    db.records().insert(&record).unwrap();
+
+    let mut task = LoadNotification::new("cpu high", "cpu");
+    task.clients = komari_db::StringArray::new([client.uuid]);
+    task.threshold = 80.0;
+    task.ratio = 0.8;
+    task.interval = 15;
+    assert_eq!(task.id, 0);
+
+    let event = execute_load_task(&db, &mut task, now).unwrap().unwrap();
+    assert_eq!(event.event, "Alert");
+}
+
 #[tokio::test]
 async fn service_falls_back_to_empty_and_reports_disabled() {
     let db = Db::open_in_memory().unwrap();
