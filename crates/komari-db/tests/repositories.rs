@@ -861,4 +861,11 @@ fn json_field_names_match_the_go_models() {
     let offline = serde_json::to_value(&offline).unwrap();
     assert!(offline.get("client_info").is_some());
     assert!(offline["client_info"].is_object());
+
+    // `client_info: null` is accepted and becomes the zero-value client.
+    let decoded: OfflineNotification =
+        serde_json::from_str(r#"{"client":"c1","client_info":null}"#).unwrap();
+    assert_eq!(decoded.client, "c1");
+    assert!(decoded.client_info.uuid.is_empty());
+    assert!(decoded.client_info.token.is_empty());
 }

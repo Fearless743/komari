@@ -13,6 +13,7 @@ pub struct OfflineNotification {
     ///
     /// Go declares this as a value type (`Client`, not `*Client`), so it is
     /// always present in JSON even when it is the zero value.
+    #[serde(deserialize_with = "deserialize_client_or_default")]
     pub client_info: Client,
     pub enable: bool,
     pub grace_period: i64,
@@ -29,6 +30,15 @@ impl OfflineNotification {
             client_info: Client::default(),
         }
     }
+}
+
+/// `OfflineNotification.client_info` is a value type in Go; JSON `null` leaves
+/// it at the zero value instead of failing deserialization.
+fn deserialize_client_or_default<'de, D>(deserializer: D) -> Result<Client, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    Ok(Option::<Client>::deserialize(deserializer)?.unwrap_or_default())
 }
 
 impl FromRow for OfflineNotification {
