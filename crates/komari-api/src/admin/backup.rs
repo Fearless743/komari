@@ -2,16 +2,18 @@
 //!
 //! * Download uses [`komari_db::Db::export_backup`], which produces the same
 //!   `komari.db` + `data/**` + `komari-backup-markup` ZIP as the Go backend.
-//! * Upload validates the marker file and stages the archive as
-//!   `<data_dir>/backup.zip`, where the server assembly restores it on the next
-//!   start with [`komari_db::restore_pending_backup`] (Go exits and lets the
-//!   startup hook apply it).
+//! * Upload streams the multipart field to a temporary file (so large backups
+//!   are not buffered in memory), validates the marker file and stages the
+//!   archive as `<data_dir>/backup.zip`, where the server assembly restores it
+//!   on the next start with [`komari_db::restore_pending_backup`] (Go exits and
+//!   lets the startup hook apply it).
 
-use std::io::{Cursor, Write};
+use std::fs::File;
+use std::io::Write;
 use std::sync::Arc;
 
 use axum::Router;
-use axum::extract::{Multipart, State};
+use axum::extract::{DefaultBodyLimit, Multipart, State};
 use axum::http::StatusCode;
 use axum::http::header::{CONTENT_DISPOSITION, CONTENT_TYPE};
 use axum::response::{IntoResponse, Response};
@@ -24,10 +26,17 @@ use super::{audit, bad_request, internal};
 use crate::response;
 use crate::state::ApiState;
 
+/// Hard cap for an uploaded archive (2 GiB, matching `BackupOptions`).
+const MAX_BACKUP_BYTES: u64 = 2 * 1024 * 1024 * 1024;
+
 pub(crate) fn routes() -> Router<ApiState> {
     Router::new()
         .route("/api/admin/download/backup", get(download_backup))
-        .route("/api/admin/upload/backup", post(upload_backup))
+        .route(
+            "/api/admin/upload/backup",
+            // Axum's default body limit is 2 MB; real backups are much larger.
+            post(upload_backup).layer(DefaultBodyLimit::disable()),
+        )
 }
 
 /// `GET /api/admin/download/backup` — Go `admin.DownloadBackup`.
@@ -68,45 +77,88 @@ pub(crate) async fn upload_backup(
     admin: RequireAdmin,
     mut multipart: Multipart,
 ) -> Response {
-    let mut upload: Option<(String, Vec<u8>)> = None;
+    let data_dir = state.data_dir();
+    if let Err(error) = std::fs::create_dir_all(&data_dir) {
+        return internal(format!("Error creating data directory: {error}"));
+    }
+
+    let temporary = data_dir.join(format!(
+        ".backup-upload-{}-{}.zip",
+        std::process::id(),
+        chrono::Utc::now().timestamp_micros()
+    ));
+    let mut received = false;
+
     loop {
-        match multipart.next_field().await {
-            Ok(Some(field)) => {
-                let name = field.name().unwrap_or_default().to_owned();
-                if name != "backup" {
-                    continue;
-                }
-                let file_name = field.file_name().unwrap_or_default().to_owned();
-                match field.bytes().await {
-                    Ok(bytes) => {
-                        upload = Some((file_name, bytes.to_vec()));
-                        break;
-                    }
-                    Err(error) => {
-                        return bad_request(format!("Error getting uploaded file: {error}"));
-                    }
-                }
-            }
+        let field = match multipart.next_field().await {
+            Ok(Some(field)) => field,
             Ok(None) => break,
             Err(error) => {
+                let _ = std::fs::remove_file(&temporary);
                 return bad_request(format!("Error getting uploaded file: {error}"));
             }
+        };
+        if field.name() != Some("backup") {
+            continue;
         }
+        let file_name = field.file_name().unwrap_or_default().to_owned();
+        if !file_name.to_ascii_lowercase().ends_with(".zip") {
+            let _ = std::fs::remove_file(&temporary);
+            return bad_request("Uploaded file must be a ZIP archive");
+        }
+
+        let mut file = match File::create(&temporary) {
+            Ok(file) => file,
+            Err(error) => {
+                return internal(format!("Error saving uploaded file: {error}"));
+            }
+        };
+        let mut size = 0u64;
+        let mut field = field;
+        loop {
+            match field.chunk().await {
+                Ok(Some(chunk)) => {
+                    size = size.saturating_add(chunk.len() as u64);
+                    if size > MAX_BACKUP_BYTES {
+                        let _ = std::fs::remove_file(&temporary);
+                        return response::error_status(
+                            StatusCode::PAYLOAD_TOO_LARGE,
+                            "Uploaded backup is too large",
+                        );
+                    }
+                    if let Err(error) = file.write_all(&chunk) {
+                        let _ = std::fs::remove_file(&temporary);
+                        return internal(format!("Error saving uploaded file: {error}"));
+                    }
+                }
+                Ok(None) => break,
+                Err(error) => {
+                    let _ = std::fs::remove_file(&temporary);
+                    return bad_request(format!("Error getting uploaded file: {error}"));
+                }
+            }
+        }
+        if let Err(error) = file.sync_all() {
+            let _ = std::fs::remove_file(&temporary);
+            return internal(format!("Error saving uploaded file: {error}"));
+        }
+        received = true;
+        break;
     }
 
-    let Some((file_name, bytes)) = upload else {
+    if !received {
         return bad_request("Error getting uploaded file: missing backup field");
-    };
-    if !file_name.to_ascii_lowercase().ends_with(".zip") {
-        return bad_request("Uploaded file must be a ZIP archive");
-    }
-    if bytes.is_empty() {
-        return bad_request("Uploaded file is empty");
     }
 
-    let mut archive = match zip::ZipArchive::new(Cursor::new(&bytes)) {
+    let mut archive = match File::open(&temporary)
+        .map_err(|error| error.to_string())
+        .and_then(|file| zip::ZipArchive::new(file).map_err(|error| error.to_string()))
+    {
         Ok(archive) => archive,
-        Err(error) => return internal(format!("Error opening zip file: {error}")),
+        Err(error) => {
+            let _ = std::fs::remove_file(&temporary);
+            return internal(format!("Error opening zip file: {error}"));
+        }
     };
     let has_markup = (0..archive.len()).any(|index| {
         archive
@@ -115,30 +167,23 @@ pub(crate) async fn upload_backup(
             .unwrap_or(false)
     });
     if !has_markup {
+        let _ = std::fs::remove_file(&temporary);
         return bad_request("Invalid backup file: missing komari-backup-markup file");
     }
+    drop(archive);
 
-    let data_dir = state.data_dir();
-    if let Err(error) = std::fs::create_dir_all(&data_dir) {
-        return internal(format!("Error creating data directory: {error}"));
-    }
     let path = data_dir.join("backup.zip");
-    let temporary = data_dir.join("backup.zip.tmp");
-    let write_result = (|| -> std::io::Result<()> {
-        let mut file = std::fs::File::create(&temporary)?;
-        file.write_all(&bytes)?;
-        file.sync_all()?;
-        std::fs::rename(&temporary, &path)
-    })();
-    if let Err(error) = write_result {
+    if let Err(error) = std::fs::rename(&temporary, &path) {
         let _ = std::fs::remove_file(&temporary);
         return internal(format!("Error saving uploaded file: {error}"));
     }
 
     audit(&state, &admin, "upload backup", "warn");
-    response::success(json!({
+    // Go returns a top-level message and the fixed `./data/backup.zip` path.
+    axum::Json(json!({
+        "status": "success",
         "message": "Backup uploaded successfully. The service will restart and apply the backup.",
-        "path": path.display().to_string(),
+        "path": "./data/backup.zip",
     }))
     .into_response()
 }
