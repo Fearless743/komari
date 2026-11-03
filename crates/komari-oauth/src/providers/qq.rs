@@ -1,9 +1,9 @@
 //! QQ aggregation-login provider.
 //!
-//! This is a direct port of Go's `utils/oauth/qq`. The aggregation platform
-//! (`https://login.qjqq.cn` by default) returns a redirect URL from
-//! `connect.php?act=login` and user information from
-//! `connect.php?act=callback`. Both responses use the same `{code, msg}`
+//! This is a direct port of Go's `utils/oauth/qq`. Once an aggregation URL is
+//! configured (the admin UI suggests `https://login.qjqq.cn`), the platform
+//! returns a redirect URL from `connect.php?act=login` and user information
+//! from `connect.php?act=callback`. Both responses use the same `{code, msg}`
 //! error convention.
 
 use std::fmt;
@@ -13,9 +13,9 @@ use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
 use crate::error::{OAuthError, Result, debug_secret, redact_secrets};
-use crate::http::{json_response, string_field, value_to_string};
+use crate::http::{json_response, string_field};
 use crate::provider::OAuthProvider;
-use crate::redirect::checked_redirect_uri;
+use crate::redirect::{checked_redirect_uri, checked_redirect_uri_for_base};
 use crate::state::StateStore;
 use crate::types::{AuthorizationRequest, ExchangeRequest, TokenSet, UserInfo, sanitize_raw};
 
@@ -31,6 +31,8 @@ pub struct QqConfig {
     pub app_id: String,
     pub app_key: String,
     pub login_type: String,
+    /// Optional public callback base used to reject foreign redirect hosts.
+    pub redirect_base: String,
 }
 
 impl fmt::Debug for QqConfig {
@@ -41,6 +43,7 @@ impl fmt::Debug for QqConfig {
             .field("app_id", &self.app_id)
             .field("app_key", &debug_secret(&self.app_key))
             .field("login_type", &self.login_type)
+            .field("redirect_base", &self.redirect_base)
             .finish()
     }
 }
@@ -68,6 +71,14 @@ impl QqProvider {
     fn base_url(&self) -> &str {
         self.config.aggregation_url.trim_end_matches('/')
     }
+
+    fn validate_redirect_uri<'a>(&self, uri: &'a str) -> Result<&'a str> {
+        if self.config.redirect_base.trim().is_empty() {
+            checked_redirect_uri(uri)
+        } else {
+            checked_redirect_uri_for_base(uri, &self.config.redirect_base)
+        }
+    }
 }
 
 #[async_trait]
@@ -91,11 +102,9 @@ impl OAuthProvider for QqProvider {
     }
 
     async fn init(&self) -> Result<()> {
-        if self.config.aggregation_url.trim().is_empty() {
-            return Err(OAuthError::InvalidConfig(
-                "aggregation_url is required".to_owned(),
-            ));
-        }
+        // Go initializes a provider even with the zero-value configuration;
+        // the missing aggregation URL is reported when an authorization URL is
+        // actually requested.
         Ok(())
     }
 
@@ -105,7 +114,12 @@ impl OAuthProvider for QqProvider {
     }
 
     async fn authorization_url(&self, redirect_uri: &str) -> Result<AuthorizationRequest> {
-        checked_redirect_uri(redirect_uri)?;
+        let redirect_uri = self.validate_redirect_uri(redirect_uri)?;
+        if self.base_url().is_empty() {
+            return Err(OAuthError::InvalidConfig(
+                "aggregation_url is required".to_owned(),
+            ));
+        }
         let request_url = format!(
             "{}/connect.php?act=login&appid={}&appkey={}&type={}&redirect_uri={}",
             self.base_url(),
@@ -202,11 +216,9 @@ impl OAuthProvider for QqProvider {
 }
 
 fn subject_from(value: &Value) -> Option<String> {
-    // Go only accepts social_uid. openid/unionid are retained as metadata but
-    // must never become the account subject.
+    // Go only accepts a string social_uid. openid/unionid are retained as
+    // metadata but must never become the account subject.
     string_field(value, "social_uid")
-        .or_else(|| value.get("social_uid").and_then(value_to_string))
-        .filter(|subject| !subject.is_empty())
 }
 
 fn encode(value: &str) -> String {

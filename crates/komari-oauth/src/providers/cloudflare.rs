@@ -14,7 +14,7 @@ use crate::error::{OAuthError, Result};
 use crate::http::callback_error;
 use crate::jwt::{JwtVerifier, VerifiedJwt};
 use crate::provider::OAuthProvider;
-use crate::redirect::checked_redirect_uri;
+use crate::redirect::{checked_redirect_uri, checked_redirect_uri_for_base};
 use crate::state::StateStore;
 use crate::types::{
     AuthorizationRequest, CallbackRequest, ExchangeRequest, OAuthUser, TokenSet, UserInfo,
@@ -31,6 +31,8 @@ pub struct CloudflareConfig {
     /// of the `Cf-Access-Jwt-Assertion` header. Disabled by default to match
     /// Go and to keep browser callbacks header-only.
     pub allow_query_token: bool,
+    /// Optional public callback base used to reject foreign redirect hosts.
+    pub redirect_base: String,
 }
 
 /// Cloudflare Access provider instance.
@@ -58,6 +60,14 @@ impl CloudflareProvider {
 
     async fn verified_user(&self, jwt: &str) -> Result<VerifiedJwt> {
         self.verifier.verify(jwt).await
+    }
+
+    fn validate_redirect_uri<'a>(&self, uri: &'a str) -> Result<&'a str> {
+        if self.config.redirect_base.trim().is_empty() {
+            checked_redirect_uri(uri)
+        } else {
+            checked_redirect_uri_for_base(uri, &self.config.redirect_base)
+        }
     }
 
     fn user_from_claims(&self, verified: VerifiedJwt) -> Result<OAuthUser> {
@@ -123,7 +133,7 @@ impl OAuthProvider for CloudflareProvider {
     }
 
     async fn authorization_url(&self, redirect_uri: &str) -> Result<AuthorizationRequest> {
-        checked_redirect_uri(redirect_uri)?;
+        let redirect_uri = self.validate_redirect_uri(redirect_uri)?;
         // Go uses an 8-character state for Cloudflare Access.
         let state = crate::state::random_string(8);
         self.states.issue_with_state(redirect_uri, &state);
@@ -136,6 +146,11 @@ impl OAuthProvider for CloudflareProvider {
     }
 
     async fn exchange_code(&self, request: ExchangeRequest<'_>) -> Result<TokenSet> {
+        if !self.config.allow_query_token {
+            return Err(OAuthError::Unsupported(
+                "Cloudflare Access exchange_code requires allow_query_token".to_owned(),
+            ));
+        }
         let verified = self.verified_user(request.code).await?;
         Ok(TokenSet {
             access_token: request.code.to_owned(),

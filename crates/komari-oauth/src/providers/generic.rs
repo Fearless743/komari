@@ -16,7 +16,7 @@ use crate::error::{OAuthError, Result, debug_secret, redact_secrets};
 use crate::http::{json_response, parse_token_set, string_field, value_to_string};
 use crate::jwt::{JwtVerifier, VerifiedJwt};
 use crate::provider::OAuthProvider;
-use crate::redirect::checked_redirect_uri;
+use crate::redirect::{checked_redirect_uri, checked_redirect_uri_for_base};
 use crate::state::{Pkce, StateStore, random_string};
 use crate::types::{
     AuthorizationRequest, CallbackQuery, ExchangeRequest, TokenSet, UserInfo, sanitize_raw,
@@ -46,6 +46,8 @@ pub struct GenericConfig {
     pub use_pkce: bool,
     /// Send an OIDC `nonce` and verify it in the `id_token`.
     pub use_nonce: bool,
+    /// Optional public callback base used to reject foreign redirect hosts.
+    pub redirect_base: String,
 }
 
 impl fmt::Debug for GenericConfig {
@@ -64,6 +66,7 @@ impl fmt::Debug for GenericConfig {
             .field("id_token_required", &self.id_token_required)
             .field("use_pkce", &self.use_pkce)
             .field("use_nonce", &self.use_nonce)
+            .field("redirect_base", &self.redirect_base)
             .finish()
     }
 }
@@ -103,6 +106,14 @@ impl GenericProvider {
 
     fn secrets(&self) -> Vec<&str> {
         vec![&self.config.client_secret, &self.config.client_id]
+    }
+
+    fn validate_redirect_uri<'a>(&self, uri: &'a str) -> Result<&'a str> {
+        if self.config.redirect_base.trim().is_empty() {
+            checked_redirect_uri(uri)
+        } else {
+            checked_redirect_uri_for_base(uri, &self.config.redirect_base)
+        }
     }
 
     fn discovery(&self) -> Option<OidcDiscovery> {
@@ -165,12 +176,15 @@ impl GenericProvider {
     }
 
     /// All discovery-provided values are already configured explicitly.
+    ///
+    /// When `id_token` validation is enabled, the user-info endpoint is
+    /// optional because the verified claims are sufficient.
     fn has_explicit_oidc_config(&self) -> bool {
         !self.config.issuer.is_empty()
             && !self.config.auth_url.is_empty()
             && !self.config.token_url.is_empty()
-            && !self.config.user_info_url.is_empty()
             && !self.config.jwks_url.is_empty()
+            && (!self.config.user_info_url.is_empty() || self.should_validate_id_token())
     }
 
     fn verifier(&self) -> Result<Arc<JwtVerifier>> {
@@ -212,18 +226,20 @@ impl GenericProvider {
                 "user_id_field is required".to_owned(),
             ));
         }
-        let field = value.get(&self.config.user_id_field).ok_or_else(|| {
+        // A verified OIDC subject is always `sub`, regardless of the generic
+        // user-info field configured for non-OIDC providers.
+        let field_name = if self.should_validate_id_token() {
+            "sub"
+        } else {
+            self.config.user_id_field.as_str()
+        };
+        let field = value.get(field_name).ok_or_else(|| {
             OAuthError::UserInfo(format!(
-                "user id field '{}' not found in user info response",
-                self.config.user_id_field
+                "user id field '{field_name}' not found in user info response"
             ))
         })?;
-        value_to_string(field).ok_or_else(|| {
-            OAuthError::UserInfo(format!(
-                "user id field '{}' is null",
-                self.config.user_id_field
-            ))
-        })
+        value_to_string(field)
+            .ok_or_else(|| OAuthError::UserInfo(format!("user id field '{field_name}' is null")))
     }
 }
 
@@ -302,7 +318,7 @@ impl OAuthProvider for GenericProvider {
     }
 
     async fn authorization_url(&self, redirect_uri: &str) -> Result<AuthorizationRequest> {
-        checked_redirect_uri(redirect_uri)?;
+        let redirect_uri = self.validate_redirect_uri(redirect_uri)?;
         let auth_url = self.auth_endpoint()?;
 
         let pkce = if self.config.use_pkce {
@@ -377,7 +393,7 @@ impl OAuthProvider for GenericProvider {
         match id_token {
             Some(id_token) if self.should_validate_id_token() => {
                 let verified = self.validate_id_token(&id_token, request.nonce).await?;
-                tokens.id_token_claims = Some(verified.payload);
+                tokens.id_token_claims = Some(sanitize_raw(verified.payload));
             }
             Some(_) => {
                 // Go's generic provider ignores id_token. Do not retain an

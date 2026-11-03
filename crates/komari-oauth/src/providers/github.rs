@@ -14,7 +14,7 @@ use serde_json::Value;
 use crate::error::{OAuthError, Result, debug_secret, redact_secrets};
 use crate::http::{json_response, parse_token_set, string_field, value_to_string};
 use crate::provider::OAuthProvider;
-use crate::redirect::checked_redirect_uri;
+use crate::redirect::{checked_redirect_uri, checked_redirect_uri_for_base};
 use crate::state::StateStore;
 use crate::types::{AuthorizationRequest, ExchangeRequest, TokenSet, UserInfo, sanitize_raw};
 
@@ -42,6 +42,8 @@ pub struct GithubConfig {
     /// Fetch `/user/emails` when the user profile has no public email.
     #[serde(default = "default_true")]
     pub fetch_email: bool,
+    /// Optional public callback base used to reject foreign redirect hosts.
+    pub redirect_base: String,
 }
 
 impl Default for GithubConfig {
@@ -54,6 +56,7 @@ impl Default for GithubConfig {
             user_api_url: GITHUB_USER_URL.to_owned(),
             email_api_url: GITHUB_EMAILS_URL.to_owned(),
             fetch_email: true,
+            redirect_base: String::new(),
         }
     }
 }
@@ -69,6 +72,7 @@ impl fmt::Debug for GithubConfig {
             .field("user_api_url", &self.user_api_url)
             .field("email_api_url", &self.email_api_url)
             .field("fetch_email", &self.fetch_email)
+            .field("redirect_base", &self.redirect_base)
             .finish()
     }
 }
@@ -91,6 +95,14 @@ impl GithubProvider {
 
     fn secrets(&self) -> Vec<&str> {
         vec![&self.config.client_secret, &self.config.client_id]
+    }
+
+    fn validate_redirect_uri<'a>(&self, uri: &'a str) -> Result<&'a str> {
+        if self.config.redirect_base.trim().is_empty() {
+            checked_redirect_uri(uri)
+        } else {
+            checked_redirect_uri_for_base(uri, &self.config.redirect_base)
+        }
     }
 
     async fn email_from_api(&self, access_token: &str) -> Option<String> {
@@ -156,7 +168,7 @@ impl OAuthProvider for GithubProvider {
     }
 
     async fn authorization_url(&self, redirect_uri: &str) -> Result<AuthorizationRequest> {
-        checked_redirect_uri(redirect_uri)?;
+        let redirect_uri = self.validate_redirect_uri(redirect_uri)?;
         let state = self.states.issue(redirect_uri, None, None);
         let url = format!(
             "{}?client_id={}&state={}&scope=user:email",

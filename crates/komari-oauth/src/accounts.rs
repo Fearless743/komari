@@ -9,6 +9,7 @@
 use komari_db::Db;
 use komari_db::models::User;
 use komari_db::util::generate_password;
+use serde::{Deserialize, Serialize};
 
 use crate::error::{OAuthError, Result};
 use crate::types::OAuthUser;
@@ -49,7 +50,10 @@ impl SsoIdentity {
 }
 
 /// The information the session layer needs after a successful OAuth login.
-#[derive(Clone, Debug, PartialEq, Eq)]
+///
+/// This deliberately excludes the password hash and is safe to serialize into
+/// an API response.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct SessionUser {
     pub uuid: String,
     pub username: String,
@@ -168,10 +172,12 @@ impl<'a> AccountLinker<'a> {
         self.find_or_create(&oauth_user.identity(), preferred)
     }
 
-    /// Go-compatible login lookup: return the bound account or
-    /// [`OAuthError::AccountNotBound`] (the API layer maps this to 401).
-    pub fn login(&self, identity: &SsoIdentity) -> Result<User> {
-        self.find(identity)?.ok_or(OAuthError::AccountNotBound)
+    /// Go-compatible login lookup: return the bound account as a
+    /// [`SessionUser`] or [`OAuthError::AccountNotBound`] (the API layer maps
+    /// this to 401).
+    pub fn login(&self, identity: &SsoIdentity) -> Result<SessionUser> {
+        let user = self.find(identity)?.ok_or(OAuthError::AccountNotBound)?;
+        Ok(SessionUser::from(&user))
     }
 
     /// Bind an external identity to an existing account.
@@ -378,6 +384,22 @@ mod tests {
             linker.rebind(&user.uuid, &SsoIdentity::new("github", "third")),
             Err(crate::OAuthError::AlreadyBound)
         ));
+    }
+
+    #[test]
+    fn login_returns_a_serializable_session_user_without_the_password_hash() {
+        let db = database();
+        let linker = AccountLinker::new(&db);
+        let identity = SsoIdentity::new("github", "session-user");
+        linker
+            .find_or_create(&identity, Some("session-user"))
+            .unwrap();
+        let session = linker.login(&identity).unwrap();
+        let value = serde_json::to_value(&session).unwrap();
+        assert_eq!(value["username"], "session-user");
+        assert_eq!(value["sso_id"], "github_session-user");
+        assert!(value.get("passwd").is_none());
+        assert!(!value.to_string().contains("passwd"));
     }
 
     #[test]
