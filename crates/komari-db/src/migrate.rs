@@ -521,7 +521,15 @@ fn read_legacy_config(
     table: &str,
 ) -> crate::error::Result<Vec<(String, LegacyCell)>> {
     let columns = actual_columns(tx, table)?;
-    let mut stmt = tx.prepare(&format!("SELECT * FROM `{table}` LIMIT 1"))?;
+    let order = if columns
+        .iter()
+        .any(|column| column.eq_ignore_ascii_case("id"))
+    {
+        "ORDER BY `id` DESC"
+    } else {
+        "ORDER BY rowid DESC"
+    };
+    let mut stmt = tx.prepare(&format!("SELECT * FROM `{table}` {order} LIMIT 1"))?;
     let mut rows = stmt.query([])?;
     let Some(row) = rows.next()? else {
         return Ok(Vec::new());

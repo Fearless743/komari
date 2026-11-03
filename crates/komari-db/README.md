@@ -142,9 +142,8 @@ real configuration values.
 - The percentile-based record compaction (`records` -> `records_long_term`) is
   not ported yet; the tables and queries are available, so callers can read
   long-term data written by the Go backend.
-- Legacy pre-1.1.4 single-row `configs` tables and the legacy `client_infos`
-  merge are not converted automatically. The current key/value `configs`
-  schema is supported; the legacy `Config` model is provided for reference.
+- The legacy `client_infos` merge is not performed automatically; databases
+  from before that rename should be opened once with the Go backend first.
 - The pre-1.0.2 migrations that moved OAuth/notification settings out of the
   old `configs` columns are not re-run; databases from that era should be
   opened once with the Go backend first.
