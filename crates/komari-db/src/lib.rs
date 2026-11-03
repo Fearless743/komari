@@ -14,12 +14,15 @@
 //! # }
 //! ```
 
+pub mod db;
 pub mod error;
 pub mod json;
+pub mod migrate;
 pub mod models;
 pub mod time;
 pub mod util;
 
+pub use db::{DEFAULT_DB_FILE, Db, DbOptions};
 pub use error::{DbError, Result};
 pub use json::StringArray;
 pub use time::LocalTime;
