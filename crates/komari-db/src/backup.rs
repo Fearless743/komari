@@ -86,6 +86,11 @@ pub struct BackupOptions {
     /// Accept databases that predate the current schema. Missing tables can
     /// then be added by [`Db::migrate`] after the import (default `false`).
     pub allow_legacy_schema: bool,
+    /// Optional directory for a best-effort pre-restore archive, mirroring the
+    /// Go backend's `./backup/{timestamp}.zip`. `None` (the default) disables
+    /// the extra archive so the library does not write outside `data_dir`
+    /// unless asked to.
+    pub pre_restore_backup_dir: Option<PathBuf>,
 }
 
 impl Default for BackupOptions {
@@ -102,6 +107,7 @@ impl Default for BackupOptions {
             max_archive_bytes: 2 * 1024 * 1024 * 1024,
             require_markup: true,
             allow_legacy_schema: false,
+            pre_restore_backup_dir: None,
         }
     }
 }
@@ -154,6 +160,9 @@ pub struct BackupReport {
     pub legacy_schema: bool,
     /// Whether an existing data directory was replaced.
     pub replaced_existing: bool,
+    /// Best-effort pre-restore archive, when
+    /// [`BackupOptions::pre_restore_backup_dir`] was configured.
+    pub pre_restore_archive: Option<PathBuf>,
 }
 
 /// One entry discovered while walking the data directory.
@@ -288,6 +297,7 @@ impl Db {
             total_uncompressed_bytes,
             legacy_schema: false,
             replaced_existing: false,
+            pre_restore_archive: None,
         })
     }
 
@@ -342,6 +352,7 @@ pub fn import_backup<R: Read + Seek>(
     }
 
     let legacy_schema = validate_database(&database_file, options)?;
+    let pre_restore_archive = create_pre_restore_archive(options);
     let replaced_existing = replace_data_dir(&staging.path, &options.data_dir)?;
     staging.disarm();
 
@@ -361,7 +372,35 @@ pub fn import_backup<R: Read + Seek>(
         total_uncompressed_bytes,
         legacy_schema,
         replaced_existing,
+        pre_restore_archive,
     })
+}
+
+/// Mirror the Go startup restore, which archives the current data directory to
+/// `./backup/{timestamp}.zip` before deleting it. Failures are ignored because
+/// a broken old database must not prevent an operator from restoring a good
+/// backup.
+fn create_pre_restore_archive(options: &BackupOptions) -> Option<PathBuf> {
+    let directory = options.pre_restore_backup_dir.as_ref()?;
+    let database = options.resolved_database_path();
+    if !options.data_dir.is_dir() || !database.is_file() {
+        return None;
+    }
+
+    fs::create_dir_all(directory).ok()?;
+    let stamp = chrono::Local::now().format("%Y%m%d-%H%M%S").to_string();
+    let mut archive = directory.join(format!("{stamp}.zip"));
+    let mut counter = 1;
+    while archive.exists() {
+        archive = directory.join(format!("{stamp}-{counter}.zip"));
+        counter += 1;
+    }
+
+    let db = Db::open_read_only(&database).ok()?;
+    let mut export_options = options.clone();
+    export_options.pre_restore_backup_dir = None;
+    db.export_backup_to(&export_options, &archive).ok()?;
+    Some(archive)
 }
 
 /// Import a backup from an in-memory ZIP.
