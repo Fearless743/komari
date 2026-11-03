@@ -1,6 +1,5 @@
 # Build output
 target/
-dist/
 
 # Version control and CI metadata
 .git/
@@ -19,8 +18,8 @@ data/
 .env.*
 *.log
 
-# Frontend dependencies (the built output in web/dist is kept)
-web/node_modules/
+# Frontend dependencies and intermediate checkouts (built theme output is kept)
+.komari-web-src/
 **/node_modules/
 
 # Documentation and local editor files

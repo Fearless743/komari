@@ -11,8 +11,10 @@ target/
 /dist/
 *.rs.bk
 
-# Frontend dependencies (web/dist is tracked via .gitkeep)
-web/node_modules/
+# Local frontend checkout used for theme builds
+/.komari-theme/
+/.komari-web-src/
+/public/defaultTheme/
 **/node_modules/
 
 # Downloaded GeoIP databases (stored under data/ at runtime)

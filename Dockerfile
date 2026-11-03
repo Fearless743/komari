@@ -2,16 +2,17 @@
 
 # Komari Rust backend image.
 #
-# Build:
+# Build (default: embed the placeholder theme committed by B14):
 #   docker build -t komari:local .
+#
+# Build with a real frontend checkout (the directory must contain `dist/`,
+# `komari-theme.json` and `preview.png`/`perview.png`):
 #   docker build \
+#     --build-arg KOMARI_THEME_SRC=.komari-theme \
+#     --build-arg KOMARI_DEFAULT_THEME_DIR=/src/theme \
 #     --build-arg KOMARI_VERSION=1.2.3 \
 #     --build-arg KOMARI_VERSION_HASH=$(git rev-parse HEAD) \
 #     -t komari:local .
-#
-# The frontend is owned by task B14. Its production build is copied from
-# `KOMARI_WEB_DIST` (relative to the build context) into /app/web. The
-# committed placeholder is web/dist.
 
 ARG RUST_VERSION=1.98
 
@@ -19,7 +20,7 @@ ARG RUST_VERSION=1.98
 # Dependency cache: cargo-chef builds third-party crates in a separate layer.
 # ---------------------------------------------------------------------------
 FROM rust:${RUST_VERSION}-bookworm AS chef
-RUN cargo install cargo-chef --locked
+RUN cargo install cargo-chef --version 0.1.78 --locked
 WORKDIR /src
 
 FROM chef AS planner
@@ -34,11 +35,20 @@ FROM chef AS builder
 COPY --from=planner /src/recipe.json recipe.json
 RUN cargo chef cook --release --locked --recipe-path recipe.json --package komari-cli
 
-# Frontend static assets (B14). Override with a real build output directory.
-ARG KOMARI_WEB_DIST=web/dist
-COPY ${KOMARI_WEB_DIST}/ /app/web/
+# Frontend theme source, relative to the build context. The default is B14's
+# committed placeholder; CI and release builds pass a real komari-web checkout.
+ARG KOMARI_THEME_SRC=crates/komari-web/defaultTheme
+COPY ${KOMARI_THEME_SRC}/ /src/theme/
 
 COPY . .
+
+# B14's komari-web/build.rs reads KOMARI_DEFAULT_THEME_DIR at compile time and
+# embeds that directory with rust-embed. The default path exists after
+# `COPY . .` on a tree that includes B14. A real theme copied to /src/theme is
+# selected by passing --build-arg KOMARI_DEFAULT_THEME_DIR=/src/theme.
+ARG KOMARI_DEFAULT_THEME_DIR=/src/crates/komari-web/defaultTheme
+ENV KOMARI_DEFAULT_THEME_DIR=${KOMARI_DEFAULT_THEME_DIR} \
+    CARGO_PROFILE_RELEASE_STRIP=symbols
 
 # Version injection mirrors the Go release workflow's ldflags:
 #   -X .../utils.CurrentVersion  -> KOMARI_VERSION
@@ -48,7 +58,10 @@ ARG KOMARI_VERSION_HASH=unknown
 ENV KOMARI_VERSION=${KOMARI_VERSION} \
     KOMARI_VERSION_HASH=${KOMARI_VERSION_HASH}
 
-RUN cargo build --release --locked -p komari-cli \
+# Build the whole workspace so komari-web (B14) is compiled and its embedded
+# theme is available to the HTTP integration. The final `komari` binary is
+# still produced by komari-cli.
+RUN cargo build --release --locked --workspace \
     && strip target/release/komari
 
 # ---------------------------------------------------------------------------
@@ -63,7 +76,7 @@ LABEL org.opencontainers.image.title="Komari" \
       org.opencontainers.image.description="A simple server monitoring tool" \
       org.opencontainers.image.version="${KOMARI_VERSION}" \
       org.opencontainers.image.revision="${KOMARI_VERSION_HASH}" \
-      org.opencontainers.image.source="https://github.com/komari-monitor/komari" \
+      org.opencontainers.image.source="https://github.com/Fearless743/komari" \
       org.opencontainers.image.licenses="MIT"
 
 RUN apt-get update \
@@ -71,11 +84,10 @@ RUN apt-get update \
     && rm -rf /var/lib/apt/lists/* \
     && groupadd --system --gid 10001 komari \
     && useradd --system --uid 10001 --gid komari --home-dir /app --shell /usr/sbin/nologin komari \
-    && mkdir -p /app/data /app/web \
+    && mkdir -p /app/data \
     && chown -R komari:komari /app
 
 COPY --from=builder /src/target/release/komari /usr/local/bin/komari
-COPY --from=builder /app/web /app/web
 
 RUN chmod 0755 /usr/local/bin/komari \
     && chown -R komari:komari /app
@@ -89,13 +101,12 @@ ENV KOMARI_LISTEN=0.0.0.0:25774 \
     KOMARI_DB_PORT=3306 \
     KOMARI_DB_USER=root \
     KOMARI_DB_PASS= \
-    KOMARI_DB_NAME=komari \
-    KOMARI_WEB_DIR=/app/web
+    KOMARI_DB_NAME=komari
 
 WORKDIR /app
 
 # SQLite database, downloaded GeoIP database (data/GeoLite2-Country.mmdb) and
-# themes all live under /app/data, matching the Go backend's working directory.
+# installed themes all live under /app/data, matching the Go backend.
 VOLUME ["/app/data"]
 
 USER komari
