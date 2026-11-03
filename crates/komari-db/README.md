@@ -110,6 +110,81 @@ added for `komari-notify` (B07) to mirror Go's `updateLastNotified`, which runs
 does not change the schema, and leaves the existing B02 `load_update`/`load_save`
 interfaces untouched.
 
+## Backup export and import
+
+`komari-db` can produce and consume the same `backup.zip` layout as the Go
+backend's admin download/upload endpoints, without depending on HTTP:
+
+```rust
+use komari_db::{BackupOptions, Db, import_backup_file};
+
+# fn main() -> komari_db::Result<()> {
+let db = Db::open("data/komari.db")?;
+db.migrate()?;
+
+// Stream into memory, or write atomically to a path.
+let options = BackupOptions::new("data");
+let bytes = db.export_backup(&options)?;
+db.export_backup_to(&options, "backup-2026-11-04.zip")?;
+
+// Restore into a data directory (typically on the next process start).
+let report = import_backup_file(&BackupOptions::new("data"), "backup-2026-11-04.zip")?;
+println!("restored {} data files", report.data_entries);
+# let _ = bytes;
+# Ok(())
+# }
+```
+
+| Function | Purpose |
+| --- | --- |
+| `Db::export_backup(&options)` | return the archive as `Vec<u8>` |
+| `Db::export_backup_to(&options, path)` | write to a temporary file and rename into place |
+| `import_backup(&options, reader)` | restore from any `Read + Seek` source |
+| `import_backup_bytes(&options, bytes)` | restore from memory |
+| `import_backup_file(&options, path)` | restore from a ZIP file |
+
+`BackupOptions` defaults match the Go backend: `data_dir = "./data"`,
+database at `<data_dir>/komari.db`, marker required. Limits default to 10 000
+entries, 512 MiB per entry, 2 GiB total uncompressed and 2 GiB for the archive
+itself, with a 200:1 compression-ratio guard. `include_data = false` produces a
+database-only archive; `allow_legacy_schema = true` accepts databases that
+predate the current table set so `Db::migrate()` can add the missing tables
+afterwards.
+
+### Archive layout (Go parity)
+
+| Entry | Content |
+| --- | --- |
+| `komari.db` | consistent SQLite snapshot created with `VACUUM INTO` (committed WAL content included) |
+| `<relative path>` | every file below `data_dir`, excluding SQLite files and transient files |
+| `komari-backup-markup` | marker file at the archive root, same text and timestamp as Go |
+
+The export walk skips `*.db`, `*.db-wal`, `*.db-shm`, `backup.zip`, the marker,
+the destination archive itself, common temporary suffixes (`.tmp`, `.part`,
+`.swp`, `~`, ...) and symbolic links. Directory entries are preserved.
+
+### Import safety
+
+The archive is inspected before anything is written:
+
+1. ZIP Slip protection rejects absolute paths, `..`, backslashes, NUL bytes and
+   symlink entries.
+2. Entry count, per-entry size, total uncompressed size, archive size and
+   compression ratio are enforced.
+3. The marker and `komari.db` must exist at the root (the marker can be
+   disabled with `require_markup(false)`).
+4. The database is opened read-only and must pass `PRAGMA integrity_check`;
+   missing tables are rejected unless legacy schemas are explicitly allowed.
+5. Files are extracted into a sibling staging directory, then the whole data
+   directory is replaced with `rename(2)`. A failure at any point removes the
+   staging directory and leaves the existing data untouched.
+
+Imports into the same data directory are serialized: a concurrent attempt
+returns `DbError::BackupInProgress`. Different data directories can be
+restored in parallel. Errors are explicit variants of `DbError`
+(`InvalidBackup`, `UnsafeBackupPath`, `BackupLimit`, `BackupIntegrity`,
+`BackupSchema`, `BackupInProgress`, `Zip`, `Io`).
+
 ## Time and JSON compatibility
 
 `LocalTime` mirrors `models/UTCTime.go` exactly:
@@ -151,6 +226,19 @@ real configuration values.
 ## Known limitations
 
 - Only SQLite is implemented; the Go MySQL path is not ported.
+- Backup import replaces the whole data directory and therefore requires the
+  database to live at `<data_dir>/komari.db` (the Go layout). A
+  `database_path` pointing elsewhere is rejected instead of performing a
+  non-atomic two-location restore.
+- An open `Db` handle keeps the old database inode after an import; reopen the
+  handle (or restart the process) before serving requests, as the Go backend
+  does on startup.
+- Backup symlinks are skipped on export and rejected on import. Encrypted ZIP
+  entries are rejected. Files added after a backup was taken are removed by a
+  restore, matching the Go restore semantics.
+- Schema compatibility is checked by table names; the Go backend has no
+  explicit schema version field, so no numeric version is stored in the
+  archive.
 - The percentile-based record compaction (`records` -> `records_long_term`) is
   not ported yet; the tables and queries are available, so callers can read
   long-term data written by the Go backend.
