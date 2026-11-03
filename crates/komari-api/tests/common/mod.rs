@@ -57,6 +57,23 @@ pub fn app_with_clock(
     (state, router)
 }
 
+/// State plus router for the admin API, with an isolated data directory.
+pub fn admin_app(data_dir: &std::path::Path) -> (ApiState, Router) {
+    let db = memory_db();
+    let state = ApiState::with_config(db, default_config())
+        .with_web_assets(Arc::new(komari_web::WebAssets::with_data_dir(data_dir)));
+    let router = komari_api::admin::admin_router_with_state(state.clone());
+    (state, router)
+}
+
+/// State plus router for `/api/rpc2`.
+pub fn rpc_app() -> (ApiState, Router) {
+    let db = memory_db();
+    let state = ApiState::with_config(db, default_config());
+    let router = komari_api::rpc::rpc_router_with_state(state.clone());
+    (state, router)
+}
+
 pub fn set_auto_key(state: &ApiState, key: &str) {
     state
         .db
