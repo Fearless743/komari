@@ -298,6 +298,11 @@ async fn resolve_request_context(
     (context, axum::extract::Request::from_parts(parts, body))
 }
 
+/// The extractor resolves API keys, sessions and query tokens on its own, but
+/// axum does not expose the request body to `FromRequestParts`. Put [`AuthLayer`],
+/// [`RequireRole`] or [`PrivateSite`] in front of the route to authenticate a
+/// non-GET JSON `token` field; the layer inserts this extractor's result into
+/// request extensions and also restores the body for the handler.
 impl<S> FromRequestParts<S> for AuthContext
 where
     S: Send + Sync,
@@ -314,6 +319,66 @@ where
             authenticate_request_with(&state, &parts.headers, &parts.uri, &parts.method, None)
                 .await,
         )
+    }
+}
+
+/// Body-preserving authentication middleware.
+///
+/// Resolves identity (including non-GET JSON body `token`) once, inserts the
+/// resulting [`AuthContext`] into request extensions and restores the body.
+/// Direct [`AuthContext`] / [`RequireClient`] extractors then read the cached
+/// context, so POST body tokens work without adding a role restriction.
+#[derive(Clone, Debug)]
+pub struct AuthLayer {
+    state: AuthState,
+}
+
+impl AuthLayer {
+    pub fn new(state: AuthState) -> Self {
+        Self { state }
+    }
+}
+
+impl<S> Layer<S> for AuthLayer {
+    type Service = AuthLayerService<S>;
+
+    fn layer(&self, inner: S) -> Self::Service {
+        AuthLayerService {
+            inner,
+            state: self.state.clone(),
+        }
+    }
+}
+
+/// Service produced by [`AuthLayer`].
+#[derive(Clone, Debug)]
+pub struct AuthLayerService<S> {
+    inner: S,
+    state: AuthState,
+}
+
+impl<S> Service<axum::extract::Request> for AuthLayerService<S>
+where
+    S: Service<axum::extract::Request, Response = Response> + Clone + Send + 'static,
+    S::Future: Send + 'static,
+    S::Error: Send + 'static,
+{
+    type Response = Response;
+    type Error = S::Error;
+    type Future = Pin<Box<dyn Future<Output = Result<Self::Response, Self::Error>> + Send>>;
+
+    fn poll_ready(&mut self, cx: &mut Context<'_>) -> Poll<Result<(), Self::Error>> {
+        self.inner.poll_ready(cx)
+    }
+
+    fn call(&mut self, request: axum::extract::Request) -> Self::Future {
+        let state = self.state.clone();
+        let mut inner = self.inner.clone();
+
+        Box::pin(async move {
+            let (_, request) = resolve_request_context(&state, request).await;
+            inner.call(request).await
+        })
     }
 }
 
@@ -893,6 +958,57 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(&body[..], b"admin:admin");
+    }
+
+    #[tokio::test]
+    async fn auth_layer_enables_body_token_for_direct_extractors() {
+        async fn handler(context: AuthContext) -> String {
+            assert!(context.client_uuid.is_some());
+            context.role.to_string()
+        }
+
+        let fixture = fixture();
+        let token = fixture.client_token.clone();
+        let app = Router::new()
+            .route("/", post(handler))
+            .layer(AuthLayer::new(fixture.state.clone()))
+            .with_state(fixture.state);
+        let request = axum::http::Request::builder()
+            .method("POST")
+            .uri("/")
+            .body(Body::from(format!(r#"{{"token":"{token}"}}"#)))
+            .unwrap();
+        let response = app.oneshot(request).await.unwrap();
+        assert_eq!(response.status(), StatusCode::OK);
+        let body = axum::body::to_bytes(response.into_body(), usize::MAX)
+            .await
+            .unwrap();
+        assert_eq!(&body[..], b"client");
+    }
+
+    #[tokio::test]
+    async fn require_client_extractor_reads_body_token_behind_auth_layer() {
+        async fn handler(client: RequireClient) -> String {
+            client.0.role.to_string()
+        }
+
+        let fixture = fixture();
+        let token = fixture.client_token.clone();
+        let app = Router::new()
+            .route("/", post(handler))
+            .layer(AuthLayer::new(fixture.state.clone()))
+            .with_state(fixture.state);
+        let request = axum::http::Request::builder()
+            .method("POST")
+            .uri("/")
+            .body(Body::from(format!(r#"{{"token":"{token}"}}"#)))
+            .unwrap();
+        let response = app.oneshot(request).await.unwrap();
+        assert_eq!(response.status(), StatusCode::OK);
+        let body = axum::body::to_bytes(response.into_body(), usize::MAX)
+            .await
+            .unwrap();
+        assert_eq!(&body[..], b"client");
     }
 
     fn private_router(state: AuthState) -> Router {
