@@ -77,8 +77,8 @@ fn assert_config_shape(db: &Db) {
         return;
     }
 
-    if let Some(sitename) = config.get_as::<String>("sitename").expect("read sitename") {
-        assert!(!sitename.is_empty());
+    if let Some(sitename) = config.get("sitename").expect("read sitename") {
+        assert!(sitename.is_string());
     }
     if let Some(theme) = config.get("theme").expect("read theme") {
         assert!(theme.is_string());
@@ -87,7 +87,7 @@ fn assert_config_shape(db: &Db) {
         .get_as::<i64>("record_preserve_time")
         .expect("read record_preserve_time")
     {
-        assert!(preserve > 0);
+        assert!(preserve >= 0);
     }
     if let Some(sitename) = all.get("sitename") {
         assert!(sitename.is_string());
@@ -269,5 +269,17 @@ fn config_shape_without_sitename_is_accepted() {
     db.config().set("theme", "dark").unwrap();
 
     // No `sitename` key at all: shape validation must not assume it exists.
+    assert_config_shape(&db);
+}
+
+#[test]
+fn config_shape_allows_empty_values_and_zero_retention() {
+    let dir = TempDir::new("empty-config");
+    let path = dir.join("komari.db");
+    let db = Db::open(&path).unwrap();
+    db.migrate().unwrap();
+    db.config().set("sitename", "").unwrap();
+    db.config().set("record_preserve_time", &0_i64).unwrap();
+
     assert_config_shape(&db);
 }
