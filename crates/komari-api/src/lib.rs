@@ -17,6 +17,7 @@ mod clock;
 mod presence;
 mod report;
 mod response;
+pub mod server;
 mod state;
 pub mod ws;
 
@@ -26,6 +27,9 @@ pub use presence::{PresenceExpiry, PresenceTracker, PresenceUpdate};
 pub use report::{
     ConnectionsReport, CpuReport, DiskReport, GpuDetailReport, GpuDeviceInfo, LoadReport,
     NetworkReport, RamReport, Report, aggregate_reports, save_report, verify_report,
+};
+pub use server::{
+    BackgroundConfig, BackgroundTasks, OAuthRuntime, Server, ServerBuilder, ServerConfig,
 };
 pub use state::{ApiConfig, ApiState};
 pub use ws::{ClientEvent, ClientEventKind, ConnectionHandle, PresenceSource, WsHub, check_origin};
