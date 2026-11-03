@@ -202,6 +202,7 @@ async fn oauth_callback(
     let cookies = Cookies::parse(&headers);
     let state_cookie = cookies.get(OAUTH_STATE_COOKIE).unwrap_or_default();
     let clear_state = format!("{OAUTH_STATE_COOKIE}=; Path=/; Max-Age=0; HttpOnly");
+    let clear_binding = format!("{BINDING_COOKIE}=; Path=/; Max-Age=0; HttpOnly");
 
     let Some(provider) = state.runtime.current() else {
         return json_error(
@@ -275,7 +276,6 @@ async fn oauth_callback(
             .ok()
             .flatten()
             .is_some_and(|validation| validation.user.uuid == binding_uuid);
-        let clear_binding = format!("{BINDING_COOKIE}=; Path=/; Max-Age=0; HttpOnly");
         if !valid {
             return json_error(
                 StatusCode::INTERNAL_SERVER_ERROR,
@@ -304,13 +304,7 @@ async fn oauth_callback(
             ),
             "login",
         );
-        return redirect_with_cookies(
-            "/admin",
-            &[
-                clear_state,
-                format!("{BINDING_COOKIE}=; Path=/; Max-Age=0; HttpOnly"),
-            ],
-        );
+        return redirect_with_cookies("/admin", &[clear_state, clear_binding]);
     }
 
     let session_user = match linker.login(&identity) {
@@ -320,7 +314,7 @@ async fn oauth_callback(
                 StatusCode::UNAUTHORIZED,
                 "message",
                 "please log in and bind your external account first.",
-                std::slice::from_ref(&clear_state),
+                &[clear_state.clone(), clear_binding],
             );
         }
         Err(error) => {
@@ -329,7 +323,7 @@ async fn oauth_callback(
                 StatusCode::INTERNAL_SERVER_ERROR,
                 "message",
                 &error.to_string(),
-                std::slice::from_ref(&clear_state),
+                &[clear_state.clone(), clear_binding],
             );
         }
     };
@@ -349,7 +343,7 @@ async fn oauth_callback(
                 StatusCode::INTERNAL_SERVER_ERROR,
                 "message",
                 &error.to_string(),
-                std::slice::from_ref(&clear_state),
+                &[clear_state.clone(), clear_binding],
             );
         }
     };
@@ -360,7 +354,7 @@ async fn oauth_callback(
         .log(&ip, &session_user.uuid, "logged in (OAuth)", "login");
     let session_cookie =
         format!("{SESSION_COOKIE}={session}; Path=/; Max-Age={SESSION_MAX_AGE}; HttpOnly");
-    redirect_with_cookies("/admin", &[clear_state, session_cookie])
+    redirect_with_cookies("/admin", &[clear_state, clear_binding, session_cookie])
 }
 
 fn forwarded_scheme(headers: &HeaderMap) -> String {

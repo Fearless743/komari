@@ -67,8 +67,10 @@ pub const DEFAULT_LISTEN: &str = "0.0.0.0:25774";
 pub const DEFAULT_DB_FILE: &str = "data/komari.db";
 /// Default request-body limit (16 MiB).
 ///
-/// Admin backup uploads can raise this with [`ServerConfig::body_limit_bytes`]
-/// or disable it on their own route with axum's `DefaultBodyLimit`.
+/// The limit is a streaming layer applied before authentication, so it cannot
+/// be overridden per route. Deployments that accept large backup uploads
+/// through B06 should raise [`ServerConfig::body_limit_bytes`] (the Go backend
+/// has no such limit) or terminate uploads at a reverse proxy.
 pub const DEFAULT_BODY_LIMIT: usize = 16 * 1024 * 1024;
 
 /// Startup configuration for the HTTP server.
