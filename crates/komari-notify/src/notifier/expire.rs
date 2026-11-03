@@ -1,7 +1,7 @@
 //! Expiry notifications (Go `utils/notifier/expire.go`).
 
-use chrono::{DateTime, TimeDelta, Utc};
-use komari_db::models::{Client, EventMessage, message_event};
+use chrono::{DateTime, TimeDelta, Timelike, Utc};
+use komari_db::models::{EventMessage, message_event};
 use komari_db::{Db, LocalTime};
 
 use crate::error::Result;
@@ -38,18 +38,22 @@ pub fn check_expire(db: &Db, now: DateTime<Utc>) -> Result<Option<ExpireCheck>> 
         .unwrap_or(7);
 
     let check_time = LocalTime::from_instant(now);
-    let threshold = LocalTime::from_instant(now + TimeDelta::days(lead_days));
+    let now_ns = absolute_now_nanos(now);
+    let threshold_ns = now_ns + i128::from(lead_days) * NANOS_PER_DAY;
 
     let mut alerts = Vec::new();
     for client in db.clients().list()? {
-        if client.expired_at.is_zero() || client.expired_at < check_time {
+        let Some(expiry_ns) = absolute_nanos(client.expired_at) else {
+            continue;
+        };
+        if expiry_ns < now_ns {
             continue;
         }
-        if client.expired_at <= threshold {
+        if expiry_ns <= threshold_ns {
             alerts.push(ExpireAlert {
                 client_id: client.uuid.clone(),
                 name: client.name.clone(),
-                days_left: days_left(&client, now),
+                days_left: days_left_between(expiry_ns, now_ns),
             });
         }
     }
@@ -75,20 +79,32 @@ pub fn check_expire(db: &Db, now: DateTime<Utc>) -> Result<Option<ExpireCheck>> 
     }))
 }
 
+const NANOS_PER_DAY: i128 = 86_400_000_000_000;
+
+/// Absolute instant of a `LocalTime` as nanoseconds since the Unix epoch.
+///
+/// `LocalTime` stores a wall clock, but `timestamp()` resolves it through the
+/// application timezone. Adding the sub-second part gives the same absolute
+/// value Go subtracts with `time.Time.Sub`, including across DST transitions.
+fn absolute_nanos(time: LocalTime) -> Option<i128> {
+    if time.is_zero() {
+        return None;
+    }
+    let seconds = i128::from(time.timestamp()?);
+    let nanos = i128::from(time.to_naive().nanosecond());
+    Some(seconds * 1_000_000_000 + nanos)
+}
+
+fn absolute_now_nanos(now: DateTime<Utc>) -> i128 {
+    i128::from(now.timestamp()) * 1_000_000_000 + i128::from(now.timestamp_subsec_nanos())
+}
+
 /// Days left rounded up, matching `math.Ceil(remainingDuration.Hours()/24)`.
-fn days_left(client: &Client, now: DateTime<Utc>) -> i64 {
-    // Go subtracts two `time.Time` values (nanosecond resolution) and applies
-    // math.Ceil to Duration.Hours()/24. Use the wall-clock pair so a duration
-    // that is an exact multiple of 24h remains exact.
-    let now_naive = LocalTime::from_instant(now).to_naive();
-    let remaining = client.expired_at.to_naive() - now_naive;
-    let Some(nanos) = remaining.num_nanoseconds() else {
-        return 0;
-    };
-    if nanos <= 0 {
+pub fn days_left_between(expiry_ns: i128, now_ns: i128) -> i64 {
+    if expiry_ns <= now_ns {
         return 0;
     }
-    (nanos as f64 / 86_400_000_000_000.0).ceil() as i64
+    ((expiry_ns - now_ns + NANOS_PER_DAY - 1) / NANOS_PER_DAY) as i64
 }
 
 /// Next local 09:00 boundary used by Go's daily expiry loop.
@@ -121,6 +137,7 @@ pub fn next_run_from(now: DateTime<Utc>, today_nine: DateTime<Utc>) -> DateTime<
 #[cfg(test)]
 mod tests {
     use chrono::TimeZone;
+    use komari_db::models::Client;
 
     use super::*;
 
@@ -170,15 +187,71 @@ mod tests {
     }
 
     #[test]
+    fn absolute_nanos_round_trips_an_instant() {
+        let instant = Utc.with_ymd_and_hms(2026, 11, 6, 14, 0, 0).unwrap();
+        let local = LocalTime::from_instant(instant);
+        assert_eq!(absolute_nanos(local), Some(absolute_now_nanos(instant)));
+    }
+
+    #[test]
+    fn dst_145_hour_window_is_seven_days() {
+        // The reviewer's regression: 09:00 EDT -> 09:00 EST is 145 absolute
+        // hours even though the wall clocks differ by six days.
+        let now = Utc.with_ymd_and_hms(2026, 10, 31, 13, 0, 0).unwrap();
+        let expiry = Utc.with_ymd_and_hms(2026, 11, 6, 14, 0, 0).unwrap();
+        let now_ns = absolute_now_nanos(now);
+        let expiry_ns = absolute_nanos(LocalTime::from_instant(expiry)).unwrap();
+        assert_eq!(expiry_ns - now_ns, 145 * 3_600 * 1_000_000_000);
+        assert_eq!(days_left_between(expiry_ns, now_ns), 7);
+    }
+
+    #[test]
+    fn check_expire_uses_the_absolute_lead_window() {
+        let db = Db::open_in_memory().unwrap();
+        db.migrate().unwrap();
+        let now = Utc.with_ymd_and_hms(2026, 10, 31, 13, 0, 0).unwrap();
+        let mut client = Client::new("expiring");
+        client.expired_at =
+            LocalTime::from_instant(Utc.with_ymd_and_hms(2026, 11, 6, 14, 0, 0).unwrap());
+        db.clients().create(&client).unwrap();
+        db.config()
+            .set("expire_notification_enabled", &true)
+            .unwrap();
+        db.config()
+            .set("expire_notification_lead_days", &7)
+            .unwrap();
+
+        let check = check_expire(&db, now).unwrap().unwrap();
+        assert_eq!(check.clients[0].days_left, 7);
+        assert!(check.event.message.contains("(7d)"));
+    }
+
+    #[test]
+    fn absolute_days_left_handles_dst_length_days() {
+        // 145 hours is 6.04 days; Go's math.Ceil yields 7 even when the
+        // interval crosses a DST transition.
+        assert_eq!(days_left_between(145 * 3_600 * 1_000_000_000, 0), 7);
+        assert_eq!(days_left_between(144 * 3_600 * 1_000_000_000, 0), 6);
+        assert_eq!(days_left_between(0, 0), 0);
+    }
+
+    #[test]
     fn days_left_uses_nanosecond_precision() {
         let base = now();
+        let now_ns = absolute_now_nanos(base);
         let mut client = Client::new("expiring");
         client.expired_at = LocalTime::from_instant(base + TimeDelta::days(3));
-        assert_eq!(days_left(&client, base), 3);
+        assert_eq!(
+            days_left_between(absolute_nanos(client.expired_at).unwrap(), now_ns),
+            3
+        );
 
         client.expired_at =
             LocalTime::from_instant(base + TimeDelta::days(3) + TimeDelta::nanoseconds(1));
-        assert_eq!(days_left(&client, base), 4);
+        assert_eq!(
+            days_left_between(absolute_nanos(client.expired_at).unwrap(), now_ns),
+            4
+        );
     }
 
     #[test]
