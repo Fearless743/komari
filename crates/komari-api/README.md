@@ -93,3 +93,11 @@ Known differences:
   `<data_dir>/backup.zip`; the server assembly must call
   `komari_db::restore_pending_backup` at startup (Go exits and restores on the
   next boot).
+
+## 历史提交说明
+
+首轮 B06 提交 `217231a`（`feat(api): 增加管理 API 的设置与客户端端点`）在
+`admin/mod.rs` 中提前声明了后续提交才加入的模块，因此该提交单独检出时不可
+编译。后续历史（`b6e467f`、`29e55c2`、`a458e2c`、`2e15cd4`）同样依赖前序
+提交才能构建。仓库未重写这些历史提交；自复审修复提交 `3392fbb` 起，每笔提交
+均在提交后执行 `cargo build -p komari-api` 验证，可单独构建。
