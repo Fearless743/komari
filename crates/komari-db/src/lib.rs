@@ -14,6 +14,7 @@
 //! # }
 //! ```
 
+pub mod backup;
 pub mod db;
 pub mod error;
 pub mod json;
@@ -23,6 +24,10 @@ pub mod repositories;
 pub mod time;
 pub mod util;
 
+pub use backup::{
+    BACKUP_DB_NAME, BACKUP_MARKUP_NAME, BackupOptions, BackupReport, DEFAULT_DATA_DIR,
+    import_backup, import_backup_bytes, import_backup_file,
+};
 pub use db::{DEFAULT_DB_FILE, Db, DbOptions};
 pub use error::{DbError, Result};
 pub use json::StringArray;

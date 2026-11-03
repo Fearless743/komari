@@ -9,7 +9,7 @@ license.workspace = true
 base64 = "0.22"
 bcrypt = { workspace = true }
 chrono = { workspace = true }
-parking_lot = { workspace = true }
+parking_lot = { workspace = true, features = ["arc_lock"] }
 rand = { workspace = true }
 rusqlite = { workspace = true, features = ["backup"] }
 serde = { workspace = true }
@@ -17,6 +17,7 @@ serde_json = { workspace = true }
 sha2 = "0.10"
 thiserror = { workspace = true }
 uuid = { workspace = true }
+zip = { version = "2.4", default-features = false, features = ["deflate"] }
 
 [dev-dependencies]
 serde_json = { workspace = true }
