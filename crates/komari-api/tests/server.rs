@@ -309,6 +309,42 @@ async fn static_admin_forces_default_theme() {
 }
 
 #[tokio::test]
+async fn site_name_changes_are_visible_immediately() {
+    let dir = TempDir::new().expect("temp dir");
+    let db = memory_db();
+    let server = build(server_config(&dir), db).await;
+    let running = start(server).await;
+    let client = http_client();
+
+    let before = client
+        .get(format!("{}/dashboard", running.base))
+        .send()
+        .await
+        .expect("dashboard")
+        .text()
+        .await
+        .expect("body");
+    assert!(before.contains("<title>Komari Monitor</title>"), "{before}");
+
+    running
+        .db
+        .config()
+        .set("sitename", &"Immediate Site")
+        .expect("set sitename");
+    let after = client
+        .get(format!("{}/dashboard", running.base))
+        .send()
+        .await
+        .expect("dashboard")
+        .text()
+        .await
+        .expect("body");
+    assert!(after.contains("<title>Immediate Site</title>"), "{after}");
+
+    running.stop().await;
+}
+
+#[tokio::test]
 async fn temp_share_token_is_loaded_from_the_database() {
     let dir = TempDir::new().expect("temp dir");
     let db = memory_db();

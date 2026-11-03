@@ -305,13 +305,23 @@ impl ServerBuilder {
         let state_router = state_router.with_state(state.clone());
 
         let fallback_assets = assets.clone();
+        let fallback_db = db.clone();
         let mut router = Router::new()
             .merge(client_router_with_state(state.clone()))
             .merge(state_router)
             .merge(komari_web::routes_for::<()>(assets.clone()))
             .fallback(move |request| {
                 let assets = fallback_assets.clone();
-                async move { komari_web::serve_fallback(&assets, request).await }
+                let db = fallback_db.clone();
+                async move {
+                    // Go reads site/theme/temp-share configuration on every
+                    // request. Refresh the snapshot so B06 settings changes are
+                    // visible immediately instead of after the 60s task.
+                    if let Err(error) = refresh_web_assets(&assets, &db) {
+                        warn!(%error, "failed to refresh web assets for request");
+                    }
+                    komari_web::serve_fallback(&assets, request).await
+                }
             });
         if !public_router_provided {
             router = router
