@@ -302,6 +302,52 @@ fn legacy_row_with_null_sitename_is_converted() {
 }
 
 #[test]
+fn pure_kv_hybrid_rows_do_not_create_empty_legacy_keys() {
+    let dir = TempDir::new("pure-kv-hybrid");
+    let path = dir.join("komari.db");
+    let db = Db::open(&path).unwrap();
+
+    db.with_connection(|conn| {
+        conn.execute_batch(
+            "CREATE TABLE configs (\
+                 `id` integer PRIMARY KEY AUTOINCREMENT, \
+                 `sitename` varchar(100), \
+                 `key` text, \
+                 `value` text\
+             );\
+             INSERT INTO configs (id, sitename, key, value) \
+             VALUES (1, NULL, 'theme', '\"dark\"');\
+             INSERT INTO configs (id, sitename, key, value) \
+             VALUES (2, NULL, 'allow_cors', 'true');",
+        )?;
+        Ok(())
+    })
+    .unwrap();
+
+    db.migrate().unwrap();
+
+    let config = db.config();
+    assert!(config.get("sitename").unwrap().is_none());
+    assert_eq!(config.count().unwrap(), 2);
+    let all = config.get_all().unwrap();
+    assert_eq!(
+        all.keys()
+            .cloned()
+            .collect::<std::collections::BTreeSet<_>>(),
+        ["allow_cors", "theme"]
+            .into_iter()
+            .map(str::to_owned)
+            .collect()
+    );
+    assert_eq!(
+        config.get_as::<String>("theme").unwrap().as_deref(),
+        Some("dark")
+    );
+    assert_eq!(config.get_as::<bool>("allow_cors").unwrap(), Some(true));
+    assert!(db.table_exists("configs_legacy_backup").unwrap());
+}
+
+#[test]
 fn unsupported_configs_schema_returns_a_clear_error() {
     let dir = TempDir::new("bad-configs");
     let path = dir.join("komari.db");

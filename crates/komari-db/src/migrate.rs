@@ -586,6 +586,7 @@ fn legacy_cells(
 fn read_legacy_config(
     tx: &rusqlite::Transaction<'_>,
     table: &str,
+    allow_fallback: bool,
 ) -> crate::error::Result<Vec<(String, LegacyCell)>> {
     let columns = actual_columns(tx, table)?;
     let order = if columns
@@ -629,9 +630,10 @@ fn read_legacy_config(
             values = Some(legacy_cells(row, &columns)?);
         }
     }
-    if values.is_none() && !filter.is_empty() {
+    if values.is_none() && allow_fallback && !filter.is_empty() {
         // All rows were pure key/value rows; fall back to the latest row so the
-        // caller still sees the original table contents.
+        // caller still sees the original table contents. This is only used
+        // when there are no existing KV rows to preserve.
         let mut stmt = tx.prepare(&format!("SELECT * FROM `{table}` {order} LIMIT 1"))?;
         let mut rows = stmt.query([])?;
         if let Some(row) = rows.next()? {
@@ -771,13 +773,18 @@ fn convert_legacy_configs(tx: &rusqlite::Transaction<'_>) -> crate::error::Resul
     }
 
     let existing = existing_config_rows(tx, "configs")?;
-    let values = read_legacy_config(tx, "configs")?;
+    let values = read_legacy_config(tx, "configs", existing.is_empty())?;
     tx.execute_batch(&format!("ALTER TABLE `configs` RENAME TO `{backup}`"))?;
     tx.execute_batch("CREATE TABLE `configs` (`key` text, `value` text, PRIMARY KEY (`key`))")?;
 
     // Legacy columns are written first; any valid KV rows that already existed
     // in a hybrid table are newer and therefore win on conflict.
     for (column, cell) in values {
+        // NULL legacy cells have no value to preserve; converting them would
+        // create bogus empty keys such as `sitename: ""`.
+        if matches!(cell, LegacyCell::Null) {
+            continue;
+        }
         let Some(value) = legacy_config_value(&column, &cell) else {
             continue;
         };
