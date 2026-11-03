@@ -195,24 +195,30 @@ impl LocalTime {
         Self::from_instant(value)
     }
 
-    /// Current time and `now + seconds`, both converted from the same absolute
-    /// instant. Use this instead of [`LocalTime::add_seconds`] when starting
-    /// from the clock: `Local::now()` retains the DST fold, so a session
-    /// created during the autumn fall-back expires one hour later correctly.
-    pub fn now_and_after(seconds: i64) -> (Self, Self) {
-        let duration = chrono::TimeDelta::try_seconds(seconds).unwrap_or_default();
-        if timezone_is_utc() {
-            let now = Utc::now();
-            (Self::from_instant(now), Self::from_instant(now + duration))
+    /// Current absolute instant and `now + seconds`.
+    ///
+    /// Both values are absolute (`DateTime<Utc>`), so a pair crossing a DST
+    /// fold still differs by exactly `seconds`. Use [`LocalTime::from_instant`]
+    /// to render either side as an application-timezone wall clock.
+    pub fn now_and_after(seconds: i64) -> (DateTime<Utc>, DateTime<Utc>) {
+        let now = if timezone_is_utc() {
+            Utc::now()
         } else {
-            let now = Local::now();
-            (Self::from_instant(now), Self::from_instant(now + duration))
-        }
+            Local::now().with_timezone(&Utc)
+        };
+        Self::absolute_after(now, seconds)
     }
 
-    /// `now + seconds` in the application timezone.
+    /// Add an absolute duration to a supplied instant. This is the injectable
+    /// clock used by tests around DST transitions.
+    pub fn absolute_after(now: DateTime<Utc>, seconds: i64) -> (DateTime<Utc>, DateTime<Utc>) {
+        let duration = chrono::TimeDelta::try_seconds(seconds).unwrap_or_default();
+        (now, now + duration)
+    }
+
+    /// `now + seconds` rendered in the application timezone.
     pub fn now_plus_seconds(seconds: i64) -> Self {
-        Self::now_and_after(seconds).1
+        Self::from_instant(Self::now_and_after(seconds).1)
     }
 
     /// Add an absolute duration in seconds and convert the result back to the

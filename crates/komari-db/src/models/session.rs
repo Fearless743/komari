@@ -18,6 +18,12 @@ pub struct Session {
     pub latest_ip: String,
     pub expires: LocalTime,
     pub created_at: LocalTime,
+    /// Absolute expiry instant for sessions created in this process. It is not
+    /// a database column and is not serialized; it exists so a session created
+    /// during a DST fold can be checked without losing the fold information
+    /// that the wall-clock `expires` field cannot represent.
+    #[serde(skip)]
+    pub expires_instant: Option<chrono::DateTime<chrono::Utc>>,
 }
 
 impl Session {
@@ -30,7 +36,9 @@ impl Session {
         ip: impl Into<String>,
         login_method: impl Into<String>,
     ) -> Self {
-        let (now, expires) = LocalTime::now_and_after(expires_in_seconds);
+        let (now_instant, expires_instant) = LocalTime::now_and_after(expires_in_seconds);
+        let now = LocalTime::from_instant(now_instant);
+        let expires = LocalTime::from_instant(expires_instant);
         Self {
             uuid: user_uuid.into(),
             session: generate_random_string(32),
@@ -42,10 +50,14 @@ impl Session {
             latest_ip: String::new(),
             expires,
             created_at: now,
+            expires_instant: Some(expires_instant),
         }
     }
 
     pub fn is_expired(&self) -> bool {
+        if let Some(expires_instant) = self.expires_instant {
+            return expires_instant <= chrono::Utc::now();
+        }
         // A missing/zero expiry can only come from an old schema or corrupt
         // data; treat it as expired rather than immortal. Go sessions always
         // had a non-null `expires`, so this only tightens legacy handling.
@@ -69,6 +81,7 @@ impl FromRow for Session {
             latest_ip: row.get("latest_ip")?,
             expires: row.get("expires")?,
             created_at: row.get("created_at")?,
+            expires_instant: None,
         })
     }
 }

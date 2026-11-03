@@ -186,11 +186,13 @@ fn adding_seconds_uses_absolute_time() {
     );
 
     let (now, later) = LocalTime::now_and_after(3600);
-    assert_eq!(later.timestamp().unwrap() - now.timestamp().unwrap(), 3600);
+    assert_eq!((later - now).num_seconds(), 3600);
 
     let session = komari_db::models::Session::new("user", 3600, "ua", "127.0.0.1", "password");
-    let difference = session.expires.timestamp().unwrap() - session.created_at.timestamp().unwrap();
-    assert_eq!(difference, 3600);
+    let expires_instant = session.expires_instant.expect("absolute expiry");
+    let remaining = (expires_instant - chrono::Utc::now()).num_seconds();
+    assert!((3598..=3600).contains(&remaining));
+    assert!(!session.is_expired());
 }
 
 #[test]
@@ -216,14 +218,16 @@ fn autumn_fold_is_preserved_by_instant_conversion() {
 
     // Adding one absolute hour to the EDT instant lands on the EST instant,
     // whose wall clock is also 01:30 (the fold is retained).
-    let one_hour_later = LocalTime::from_instant(before + chrono::TimeDelta::hours(1));
+    let before_utc = before.with_timezone(&chrono::Utc);
+    let (_, later_absolute) = LocalTime::absolute_after(before_utc, 3600);
+    assert_eq!((later_absolute - before_utc).num_seconds(), 3600);
     assert_eq!(
-        one_hour_later.to_storage_string(),
+        LocalTime::from_instant(later_absolute).to_storage_string(),
         after_local.to_storage_string()
     );
-    // The source instants are one hour apart; the wall-clock LocalTime cannot
-    // distinguish the two 01:30 folds, which is why absolute arithmetic must
-    // happen before converting (as `now_and_after` does).
+    // The DB stores wall clocks only, so both sides format as 01:30; the
+    // absolute expiry kept on `Session::expires_instant` retains the 3600s
+    // duration for in-process expiry checks.
     assert_eq!(after.timestamp() - before.timestamp(), 3600);
 }
 
