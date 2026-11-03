@@ -767,6 +767,41 @@ fn audit_logs_filter_and_retention() {
 }
 
 #[test]
+fn audit_logs_order_and_paginate() {
+    let db = memory_db();
+    let logs = db.logs();
+
+    for (seconds, message) in [(300, "oldest"), (200, "middle"), (100, "newest")] {
+        let mut entry = Log::new(message, "info");
+        entry.time = recent(seconds);
+        logs.insert(&entry).unwrap();
+    }
+
+    let all = logs.list(10).unwrap();
+    assert_eq!(
+        all.iter()
+            .map(|log| log.message.as_str())
+            .collect::<Vec<_>>(),
+        vec!["newest", "middle", "oldest"]
+    );
+
+    let page = logs.list_page(1, 1).unwrap();
+    assert_eq!(page.len(), 1);
+    assert_eq!(page[0].message, "middle");
+
+    let page = logs.list_page(2, 0).unwrap();
+    assert_eq!(
+        page.iter()
+            .map(|log| log.message.as_str())
+            .collect::<Vec<_>>(),
+        vec!["newest", "middle"]
+    );
+
+    let page = logs.list_by_type_page("info", 1, 2).unwrap();
+    assert_eq!(page[0].message, "oldest");
+}
+
+#[test]
 fn json_field_names_match_the_go_models() {
     let client = Client::new("node");
     let value = serde_json::to_value(&client).unwrap();

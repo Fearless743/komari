@@ -93,7 +93,7 @@ let sitename: Option<String> = db.config().get_as("sitename")?;
 | `ddns()` | `ddns_sync_history` | save/list/cleanup history |
 | `themes()` | `theme_configurations` | JSON configuration per theme |
 | `clipboard()` | `clipboards` | CRUD and batch delete |
-| `logs()` | `logs` | audit log insert/list/retention |
+| `logs()` | `logs` | audit log insert, `time DESC` listing with limit/offset pagination and retention |
 
 Errors are defined by `DbError` (`thiserror`); lookups return
 `Option<T>` and `require*` helpers produce `DbError::NotFound`.

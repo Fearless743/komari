@@ -49,24 +49,38 @@ impl Logs<'_> {
         })
     }
 
-    /// Newest entries first.
+    /// Newest entries first (`time DESC, id DESC`).
     pub fn list(&self, limit: i64) -> Result<Vec<Log>> {
+        self.list_page(limit, 0)
+    }
+
+    /// Newest entries first with `LIMIT`/`OFFSET` pagination.
+    pub fn list_page(&self, limit: i64, offset: i64) -> Result<Vec<Log>> {
         let limit = if limit <= 0 { 100 } else { limit };
+        let offset = offset.max(0);
         let conn = self.db.conn();
         query_all(
             &conn,
-            "SELECT * FROM logs ORDER BY id DESC LIMIT ?1",
-            [limit],
+            "SELECT * FROM logs ORDER BY time DESC, id DESC LIMIT ?1 OFFSET ?2",
+            params![limit, offset],
         )
     }
 
+    /// Newest entries of one message type first.
     pub fn list_by_type(&self, msg_type: &str, limit: i64) -> Result<Vec<Log>> {
+        self.list_by_type_page(msg_type, limit, 0)
+    }
+
+    /// Paginated variant of [`Logs::list_by_type`].
+    pub fn list_by_type_page(&self, msg_type: &str, limit: i64, offset: i64) -> Result<Vec<Log>> {
         let limit = if limit <= 0 { 100 } else { limit };
+        let offset = offset.max(0);
         let conn = self.db.conn();
         query_all(
             &conn,
-            "SELECT * FROM logs WHERE msg_type = ?1 ORDER BY id DESC LIMIT ?2",
-            params![msg_type, limit],
+            "SELECT * FROM logs WHERE msg_type = ?1 \
+             ORDER BY time DESC, id DESC LIMIT ?2 OFFSET ?3",
+            params![msg_type, limit, offset],
         )
     }
 
