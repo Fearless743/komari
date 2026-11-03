@@ -913,8 +913,10 @@ async fn account_linker_creates_and_binds_without_overwriting_a_password() {
     let local = db.accounts().create("admin", "local-password").unwrap();
     let local_identity = SsoIdentity::new("github", "999");
     let bound = linker.bind(&local.uuid, &local_identity).unwrap();
-    assert!(bound.check_password("local-password"));
-    assert_eq!(bound.passwd, local.passwd);
+    assert_eq!(bound.sso_id, "github_999");
+    let stored = db.accounts().require_by_uuid(&local.uuid).unwrap();
+    assert!(stored.check_password("local-password"));
+    assert_eq!(stored.passwd, local.passwd);
 
     let other = db.accounts().create("other", "other-password").unwrap();
     assert!(matches!(
@@ -1398,6 +1400,52 @@ async fn error_bodies_without_safe_fields_are_not_echoed() {
 }
 
 #[tokio::test]
+async fn non_object_json_error_bodies_are_not_echoed() {
+    for body in [json!(["leaky-value"]), json!("leaky-value")] {
+        let app = Router::new().route(
+            "/token",
+            post(move || {
+                let body = body.clone();
+                async move { (axum::http::StatusCode::BAD_REQUEST, Json(body)) }
+            }),
+        );
+        let base = spawn(app).await;
+        let provider = factory::builtin_registry()
+            .create_and_init(
+                "generic",
+                json!({
+                    "client_id": "client-id",
+                    "client_secret": "client-secret",
+                    "auth_url": "https://idp.example/authorize",
+                    "token_url": format!("{base}/token"),
+                    "user_info_url": "https://idp.example/userinfo",
+                    "scope": "openid",
+                    "user_id_field": "sub",
+                }),
+            )
+            .await
+            .unwrap();
+        let query = CallbackQuery::new();
+        let error = provider
+            .exchange_code(ExchangeRequest {
+                code: "code",
+                redirect_uri: "https://monitor.example/api/oauth_callback",
+                pkce_verifier: None,
+                nonce: None,
+                query: &query,
+            })
+            .await
+            .unwrap_err();
+        assert!(!error.to_string().contains("leaky-value"));
+        assert!(
+            error
+                .to_string()
+                .contains("error body is not a JSON object")
+        );
+    }
+}
+
+#[tokio::test]
 async fn generic_oidc_uses_sub_even_when_user_id_field_is_email() {
     let (base, _key) = oidc_server("client-id").await;
     let provider = factory::builtin_registry()
@@ -1470,9 +1518,17 @@ async fn generic_oidc_without_userinfo_uses_verified_id_token_claims() {
 }
 
 #[tokio::test]
-async fn redirect_base_rejects_a_foreign_callback_host() {
-    let provider = factory::builtin_registry()
-        .create_and_init(
+async fn redirect_base_is_enforced_by_every_provider() {
+    let qq_app = Router::new().route(
+        "/connect.php",
+        get(|| async {
+            Json(json!({"code": 0, "msg": "ok", "url": "https://login.example/auth"}))
+        }),
+    );
+    let qq_base = spawn(qq_app).await;
+    let redirect_base = "https://monitor.example/api/oauth_callback";
+    let providers = vec![
+        (
             "generic",
             json!({
                 "client_id": "client-id",
@@ -1482,23 +1538,56 @@ async fn redirect_base_rejects_a_foreign_callback_host() {
                 "user_info_url": "https://idp.example/userinfo",
                 "scope": "openid",
                 "user_id_field": "sub",
-                "redirect_base": "https://monitor.example/api/oauth_callback",
+                "redirect_base": redirect_base,
             }),
-        )
-        .await
-        .unwrap();
-    assert!(matches!(
-        provider
-            .authorization_url("https://evil.example/api/oauth_callback")
-            .await,
-        Err(OAuthError::InvalidRedirectUri(_))
-    ));
-    assert!(
-        provider
-            .authorization_url("https://monitor.example/api/oauth_callback")
+        ),
+        (
+            "github",
+            json!({
+                "client_id": "gh-client",
+                "client_secret": "gh-secret",
+                "redirect_base": redirect_base,
+            }),
+        ),
+        (
+            "qq",
+            json!({
+                "aggregation_url": qq_base,
+                "app_id": "app-id",
+                "app_key": "app-key",
+                "login_type": "qq",
+                "redirect_base": redirect_base,
+            }),
+        ),
+        (
+            "CloudflareAccess",
+            json!({
+                "team_domain": "https://team.example",
+                "policy_aud": "aud",
+                "redirect_base": redirect_base,
+            }),
+        ),
+    ];
+
+    for (name, config) in providers {
+        let provider = factory::builtin_registry()
+            .create_and_init(name, config)
             .await
-            .is_ok()
-    );
+            .unwrap();
+        assert!(
+            matches!(
+                provider
+                    .authorization_url("https://evil.example/api/oauth_callback")
+                    .await,
+                Err(OAuthError::InvalidRedirectUri(_))
+            ),
+            "{name} accepted a foreign redirect host"
+        );
+        assert!(
+            provider.authorization_url(redirect_base).await.is_ok(),
+            "{name} rejected the configured redirect base"
+        );
+    }
 }
 
 #[tokio::test]
