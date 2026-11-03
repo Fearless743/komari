@@ -396,32 +396,36 @@ impl Server {
     }
 
     /// Serve with a caller-supplied shutdown future.
-    pub async fn serve_with_shutdown<F>(self, listener: TcpListener, shutdown: F) -> Result<()>
+    pub async fn serve_with_shutdown<F>(mut self, listener: TcpListener, shutdown: F) -> Result<()>
     where
         F: Future<Output = ()> + Send + 'static,
     {
-        let Self {
-            router,
-            background,
-            state,
-            config,
-            ..
-        } = self;
         let address = listener
             .local_addr()
             .context("failed to read listen address")?;
-        info!("Starting server on {} ...", config.listen);
+        info!("Starting server on {} ...", self.config.listen);
+        // `Server` implements `Drop`, so the router is moved out instead of
+        // destructuring `self`.
+        let router = std::mem::replace(&mut self.router, Router::new());
         let result = axum::serve(listener, router)
             .with_graceful_shutdown(shutdown)
             .await;
-        let _ = state
+        let _ = self
+            .state
             .db
             .logs()
             .log("", "", "server is shutting down", "info");
-        state.shutdown_background();
-        background.shutdown().await;
+        self.state.shutdown_background();
+        self.background.shutdown().await;
         info!(%address, "server stopped");
         result.context("HTTP server failed")
+    }
+}
+
+impl Drop for Server {
+    fn drop(&mut self) {
+        self.state.shutdown_background();
+        self.background.cancel();
     }
 }
 
