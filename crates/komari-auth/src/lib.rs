@@ -18,9 +18,11 @@ pub mod totp;
 
 pub use error::{AuthError, Result};
 pub use middleware::{
-    API_KEY_UUID, AuthContext, AuthState, RequireAdmin, RequireAuthenticated, RequireClient,
-    RequireRole, RequireRoleService, SESSION_COOKIE_NAME, Unauthorized, authenticate_request,
-    authenticate_request_with, extract_client_token, unauthorized_response,
+    API_KEY_UUID, AuthContext, AuthState, PUBLIC_PATH_PREFIXES, PrivateSite, PrivateSiteService,
+    RequireAdmin, RequireAuthenticated, RequireClient, RequireRole, RequireRoleService,
+    SESSION_COOKIE_NAME, Unauthorized, authenticate_request, authenticate_request_with,
+    extract_client_token, internal_error_response, is_public_path,
+    private_site_unauthorized_response, unauthorized_response,
 };
 pub use password::{
     DEFAULT_BCRYPT_COST, authenticate, change_password, change_password_by_uuid,

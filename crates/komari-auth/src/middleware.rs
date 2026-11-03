@@ -21,6 +21,7 @@ use std::future::Future;
 use std::pin::Pin;
 use std::sync::Arc;
 use std::task::{Context, Poll};
+use std::time::{SystemTime, UNIX_EPOCH};
 
 use axum::body::Body;
 use axum::extract::{FromRef, FromRequestParts};
@@ -42,6 +43,29 @@ pub const API_KEY_UUID: &str = "00000000-0000-0000-0000-000000000000";
 const API_KEY_CONFIG_KEY: &str = "api_key";
 /// The Go middleware requires API keys to be at least this long.
 const MIN_API_KEY_LENGTH: usize = 12;
+/// Config key enabling private-site mode.
+const PRIVATE_SITE_CONFIG_KEY: &str = "private_site";
+/// Config key holding the temporary share token.
+const TEMP_SHARE_TOKEN_KEY: &str = "tempory_share_token";
+/// Config key holding the temporary share expiry (Unix seconds).
+const TEMP_SHARE_EXPIRE_KEY: &str = "tempory_share_token_expire_at";
+/// Cookie carrying the temporary share token.
+const TEMP_ACCESS_COOKIE: &str = "temp_key";
+
+/// Path prefixes that bypass private-site checks, matching Go `publicPaths`.
+/// `/api/admin` and `/api/clients/` are still protected by `RequireRole`.
+pub const PUBLIC_PATH_PREFIXES: &[&str] = &[
+    "/ping",
+    "/api/public",
+    "/api/login",
+    "/api/me",
+    "/api/oauth",
+    "/api/oauth_callback",
+    "/api/version",
+    "/api/recent",
+    "/api/admin",
+    "/api/clients/",
+];
 
 /// Shared state needed to authenticate a request.
 #[derive(Clone, Debug)]
@@ -368,6 +392,134 @@ where
             }
         })
     }
+}
+
+/// Private-site middleware, porting Go `api.PrivateSiteMiddleware`.
+///
+/// It must run after identity resolution (or will resolve identity itself).
+/// Guests are rejected for `/api/*` paths while private-site mode is enabled,
+/// except for the public prefixes and a valid temporary-share cookie.
+#[derive(Clone, Debug)]
+pub struct PrivateSite {
+    state: AuthState,
+}
+
+impl PrivateSite {
+    pub fn new(state: AuthState) -> Self {
+        Self { state }
+    }
+}
+
+impl<S> Layer<S> for PrivateSite {
+    type Service = PrivateSiteService<S>;
+
+    fn layer(&self, inner: S) -> Self::Service {
+        PrivateSiteService {
+            inner,
+            state: self.state.clone(),
+        }
+    }
+}
+
+/// Service produced by [`PrivateSite`].
+#[derive(Clone, Debug)]
+pub struct PrivateSiteService<S> {
+    inner: S,
+    state: AuthState,
+}
+
+impl<S> Service<axum::extract::Request> for PrivateSiteService<S>
+where
+    S: Service<axum::extract::Request, Response = Response> + Clone + Send + 'static,
+    S::Future: Send + 'static,
+    S::Error: Send + 'static,
+{
+    type Response = Response;
+    type Error = S::Error;
+    type Future = Pin<Box<dyn Future<Output = Result<Self::Response, Self::Error>> + Send>>;
+
+    fn poll_ready(&mut self, cx: &mut Context<'_>) -> Poll<Result<(), Self::Error>> {
+        self.inner.poll_ready(cx)
+    }
+
+    fn call(&mut self, request: axum::extract::Request) -> Self::Future {
+        let state = self.state.clone();
+        let mut inner = self.inner.clone();
+
+        Box::pin(async move {
+            let (context, request) = resolve_request_context(&state, request).await;
+            if !context.is_guest() {
+                return inner.call(request).await;
+            }
+
+            let path = request.uri().path().to_owned();
+            if is_public_path(&path) || !path.starts_with("/api") {
+                return inner.call(request).await;
+            }
+
+            let private_site = match state.db.config().get_as::<bool>(PRIVATE_SITE_CONFIG_KEY) {
+                Ok(value) => value.unwrap_or(false),
+                Err(_) => return Ok(internal_error_response()),
+            };
+            if !private_site || has_temp_access(&state, request.headers()) {
+                return inner.call(request).await;
+            }
+
+            Ok(private_site_unauthorized_response())
+        })
+    }
+}
+
+/// Whether a path is in Go's public-prefix list.
+pub fn is_public_path(path: &str) -> bool {
+    PUBLIC_PATH_PREFIXES
+        .iter()
+        .any(|prefix| path.starts_with(prefix))
+}
+
+fn has_temp_access(state: &AuthState, headers: &HeaderMap) -> bool {
+    let Some(cookie) = cookie_value(headers, TEMP_ACCESS_COOKIE) else {
+        return false;
+    };
+    if cookie.is_empty() {
+        return false;
+    }
+    let Ok(Some(allow_key)) = state.db.config().get_as::<String>(TEMP_SHARE_TOKEN_KEY) else {
+        return false;
+    };
+    let Ok(Some(expire_at)) = state.db.config().get_as::<i64>(TEMP_SHARE_EXPIRE_KEY) else {
+        return false;
+    };
+    !allow_key.is_empty() && cookie == allow_key && expire_at >= now_unix()
+}
+
+fn now_unix() -> i64 {
+    SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map(|duration| duration.as_secs() as i64)
+        .unwrap_or_default()
+}
+
+/// Go `RespondError(401, "Private site is enabled, please login first.")`.
+pub fn private_site_unauthorized_response() -> Response {
+    Response::builder()
+        .status(StatusCode::UNAUTHORIZED)
+        .header("content-type", "application/json")
+        .body(Body::from(
+            r#"{"status":"error","message":"Private site is enabled, please login first."}"#,
+        ))
+        .expect("static 401 response is valid")
+}
+
+/// Go `RespondError(500, "Failed to get configuration.")`.
+pub fn internal_error_response() -> Response {
+    Response::builder()
+        .status(StatusCode::INTERNAL_SERVER_ERROR)
+        .header("content-type", "application/json")
+        .body(Body::from(
+            r#"{"status":"error","message":"Failed to get configuration."}"#,
+        ))
+        .expect("static 500 response is valid")
 }
 
 /// Rejection returned by the role guard extractors.
@@ -741,5 +893,116 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(&body[..], b"admin:admin");
+    }
+
+    fn private_router(state: AuthState) -> Router {
+        Router::new()
+            .route("/api/secret", get(|| async { "ok" }))
+            .route("/api/admin/x", get(|| async { "ok" }))
+            .route("/ping", get(|| async { "pong" }))
+            .route("/api/login", get(|| async { "login" }))
+            .route("/api/public/x", get(|| async { "public" }))
+            .route("/assets/app.js", get(|| async { "asset" }))
+            .layer(PrivateSite::new(state.clone()))
+            .with_state(state)
+    }
+
+    fn private_fixture() -> Fixture {
+        let fixture = fixture();
+        fixture
+            .state
+            .db()
+            .config()
+            .set(PRIVATE_SITE_CONFIG_KEY, &true)
+            .unwrap();
+        fixture
+    }
+
+    #[tokio::test]
+    async fn private_site_rejects_guest_api_paths_but_allows_public_paths() {
+        let fixture = private_fixture();
+        let secret = axum::http::Request::builder()
+            .uri("/api/secret")
+            .body(Body::empty())
+            .unwrap();
+        let response = private_router(fixture.state.clone())
+            .oneshot(secret)
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::UNAUTHORIZED);
+        let body = axum::body::to_bytes(response.into_body(), usize::MAX)
+            .await
+            .unwrap();
+        let json: serde_json::Value = serde_json::from_slice(&body).unwrap();
+        assert_eq!(
+            json["message"],
+            "Private site is enabled, please login first."
+        );
+
+        for path in ["/ping", "/assets/app.js", "/api/login", "/api/public/x"] {
+            let request = axum::http::Request::builder()
+                .uri(path)
+                .body(Body::empty())
+                .unwrap();
+            assert_eq!(
+                status(private_router(fixture.state.clone()), request).await,
+                StatusCode::OK,
+                "{path}"
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn private_site_allows_sessions_and_temporary_cookies() {
+        let fixture = private_fixture();
+
+        let session_request = axum::http::Request::builder()
+            .uri("/api/secret")
+            .header(COOKIE, format!("{SESSION_COOKIE_NAME}={}", fixture.session))
+            .body(Body::empty())
+            .unwrap();
+        assert_eq!(
+            status(private_router(fixture.state.clone()), session_request).await,
+            StatusCode::OK
+        );
+
+        fixture
+            .state
+            .db()
+            .config()
+            .set(TEMP_SHARE_TOKEN_KEY, &"share-token")
+            .unwrap();
+        fixture
+            .state
+            .db()
+            .config()
+            .set(TEMP_SHARE_EXPIRE_KEY, &(now_unix() + 60))
+            .unwrap();
+
+        let temp_request = axum::http::Request::builder()
+            .uri("/api/secret")
+            .header(COOKIE, format!("{TEMP_ACCESS_COOKIE}=share-token"))
+            .body(Body::empty())
+            .unwrap();
+        assert_eq!(
+            status(private_router(fixture.state.clone()), temp_request).await,
+            StatusCode::OK
+        );
+
+        fixture
+            .state
+            .db()
+            .config()
+            .set(TEMP_SHARE_EXPIRE_KEY, &(now_unix() - 1))
+            .unwrap();
+        let expired_request = axum::http::Request::builder()
+            .uri("/api/secret")
+            .header(COOKIE, format!("{TEMP_ACCESS_COOKIE}=share-token"))
+            .body(Body::empty())
+            .unwrap();
+        assert_eq!(
+            status(private_router(fixture.state), expired_request).await,
+            StatusCode::UNAUTHORIZED
+        );
     }
 }
