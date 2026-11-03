@@ -173,7 +173,10 @@ impl BackgroundTasks {
 
     fn spawn_record_maintenance(&self, db: Arc<Db>, config: &BackgroundConfig) {
         let cancel = self.cancel.clone();
-        let interval = config.record_maintenance_interval;
+        let interval = nonzero(
+            config.record_maintenance_interval,
+            Duration::from_secs(30 * 60),
+        );
         self.spawn("record-maintenance", async move {
             let mut ticker = tokio::time::interval(interval);
             ticker.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
@@ -235,7 +238,7 @@ impl BackgroundTasks {
 
     fn spawn_asset_refresh(&self, assets: Arc<WebAssets>, db: Arc<Db>, config: &BackgroundConfig) {
         let cancel = self.cancel.clone();
-        let interval = config.asset_refresh_interval;
+        let interval = nonzero(config.asset_refresh_interval, Duration::from_secs(60));
         self.spawn("asset-refresh", async move {
             let mut ticker = tokio::time::interval(interval);
             ticker.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
@@ -257,7 +260,7 @@ impl BackgroundTasks {
 
     fn spawn_ddns_sync(&self, ddns: Arc<DdnsService>, db: Arc<Db>, config: &BackgroundConfig) {
         let cancel = self.cancel.clone();
-        let fallback = config.ddns_interval;
+        let fallback = nonzero(config.ddns_interval, Duration::from_secs(10 * 60));
         self.spawn("ddns-sync", async move {
             loop {
                 let interval = db
@@ -283,7 +286,7 @@ impl BackgroundTasks {
 
     fn spawn_notification_tick(&self, state: ApiState, config: &BackgroundConfig) {
         let cancel = self.cancel.clone();
-        let interval = config.notify_interval;
+        let interval = nonzero(config.notify_interval, Duration::from_secs(60));
         self.spawn("notification-tick", async move {
             let mut tracker = TrafficTracker::new();
             let mut ticker = tokio::time::interval(interval);
@@ -332,7 +335,7 @@ impl BackgroundTasks {
 
     fn spawn_offline_notifications(&self, state: ApiState, config: &BackgroundConfig) {
         let cancel = self.cancel.clone();
-        let interval = config.offline_check_interval;
+        let interval = nonzero(config.offline_check_interval, Duration::from_secs(5));
         self.spawn("offline-notifications", async move {
             let db = state.db.clone();
             let mut notifier = OfflineNotifier::new(&db);
@@ -448,6 +451,14 @@ impl Drop for BackgroundTasks {
         for handle in handles.iter() {
             handle.abort();
         }
+    }
+}
+
+fn nonzero(interval: Duration, fallback: Duration) -> Duration {
+    if interval.is_zero() {
+        fallback
+    } else {
+        interval
     }
 }
 
