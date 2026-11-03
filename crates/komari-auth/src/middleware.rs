@@ -75,6 +75,13 @@ pub const PUBLIC_PATH_PREFIXES: &[&str] = &[
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct BufferedBodyLimit(pub usize);
 
+/// Request extension that tells [`AuthLayer`] not to buffer the body.
+///
+/// Streaming uploads (admin backup upload) authenticate from headers/session;
+/// buffering a multi-GiB multipart body would defeat the streaming handler.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct SkipBodyBuffering;
+
 /// Shared state needed to authenticate a request.
 #[derive(Clone, Debug)]
 pub struct AuthState {
@@ -290,20 +297,22 @@ async fn resolve_request_context(
         .get::<BufferedBodyLimit>()
         .map(|limit| limit.0)
         .unwrap_or(usize::MAX);
-    let (auth_body, body): (Option<axum::body::Bytes>, Body) = if parts.method == Method::GET {
-        (None, body)
-    } else {
-        match axum::body::to_bytes(body, limit).await {
-            Ok(bytes) => {
-                let restored = Body::from(bytes.clone());
-                (Some(bytes), restored)
+    let skip_buffering = parts.extensions.get::<SkipBodyBuffering>().is_some();
+    let (auth_body, body): (Option<axum::body::Bytes>, Body) =
+        if parts.method == Method::GET || skip_buffering {
+            (None, body)
+        } else {
+            match axum::body::to_bytes(body, limit).await {
+                Ok(bytes) => {
+                    let restored = Body::from(bytes.clone());
+                    (Some(bytes), restored)
+                }
+                // `to_bytes` returns an error when the body exceeds the limit.
+                // Propagate it as 413 instead of silently treating the request as
+                // unauthenticated (which used to produce a misleading 401/403).
+                Err(_) => return Err(Box::new(payload_too_large_response())),
             }
-            // `to_bytes` returns an error when the body exceeds the limit.
-            // Propagate it as 413 instead of silently treating the request as
-            // unauthenticated (which used to produce a misleading 401/403).
-            Err(_) => return Err(Box::new(payload_too_large_response())),
-        }
-    };
+        };
 
     let context = authenticate_request_with(
         state,
@@ -972,6 +981,24 @@ mod tests {
             Some("  spaced  ".to_owned())
         );
         assert_eq!(extract_client_token(None, &method, Some(b"not-json")), None);
+    }
+
+    #[tokio::test]
+    async fn skip_body_buffering_leaves_the_request_body_intact() {
+        let fixture = fixture();
+        let mut request = axum::http::Request::builder()
+            .method(Method::POST)
+            .uri("/api/admin/upload/backup")
+            .body(Body::from("streamed-payload"))
+            .unwrap();
+        request.extensions_mut().insert(SkipBodyBuffering);
+        let (_, request) = resolve_request_context(&fixture.state, request)
+            .await
+            .expect("context");
+        let body = axum::body::to_bytes(request.into_body(), usize::MAX)
+            .await
+            .expect("body");
+        assert_eq!(&body[..], b"streamed-payload");
     }
 
     #[tokio::test]

@@ -684,6 +684,40 @@ async fn chunked_oversized_body_returns_413_with_cors() {
 }
 
 #[tokio::test]
+async fn backup_upload_streams_a_large_body_without_buffering() {
+    let dir = TempDir::new().expect("temp dir");
+    let server = build(server_config(&dir), memory_db()).await;
+    let state = server.state().clone();
+    let session = create_admin_session(&state.db);
+    let running = start(server).await;
+    let client = http_client();
+
+    let boundary = "komari-test-boundary";
+    let mut body = format!(
+        "--{boundary}\r\nContent-Disposition: form-data; name=\"backup\"; filename=\"backup.zip\"\r\nContent-Type: application/zip\r\n\r\n"
+    )
+    .into_bytes();
+    body.extend(std::iter::repeat_n(b'x', 17 * 1024 * 1024));
+    body.extend_from_slice(format!("\r\n--{boundary}--\r\n").as_bytes());
+
+    let response = client
+        .post(format!("{}/api/admin/upload/backup", running.base))
+        .header(COOKIE, format!("session_token={session}"))
+        .header(
+            "Content-Type",
+            format!("multipart/form-data; boundary={boundary}"),
+        )
+        .body(body)
+        .send()
+        .await
+        .expect("large backup upload");
+    assert_ne!(response.status(), reqwest::StatusCode::PAYLOAD_TOO_LARGE);
+    assert_ne!(response.status(), reqwest::StatusCode::UNAUTHORIZED);
+
+    running.stop().await;
+}
+
+#[tokio::test]
 async fn backup_upload_path_has_a_larger_body_limit() {
     let dir = TempDir::new().expect("temp dir");
     let config = ServerConfig {

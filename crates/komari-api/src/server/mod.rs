@@ -48,7 +48,9 @@ use axum::extract::{Request, State};
 use axum::http::{HeaderValue, Method, StatusCode, header};
 use axum::middleware::{self, Next};
 use axum::response::{IntoResponse, Response};
-use komari_auth::{AuthLayer, BufferedBodyLimit, PrivateSite, payload_too_large_response};
+use komari_auth::{
+    AuthLayer, BufferedBodyLimit, PrivateSite, SkipBodyBuffering, payload_too_large_response,
+};
 use komari_config::Config;
 use komari_db::{BackupOptions, Db, DbError, restore_pending_backup};
 use komari_ddns::DdnsService;
@@ -692,6 +694,11 @@ async fn body_limit(
         }
     }
     request.extensions_mut().insert(BufferedBodyLimit(limit));
+    if is_backup_upload(request.uri().path()) {
+        // B06 streams the multipart upload to disk; do not buffer it in the
+        // auth layer (which would allocate the whole body in memory).
+        request.extensions_mut().insert(SkipBodyBuffering);
+    }
     next.run(request).await
 }
 
