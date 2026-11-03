@@ -983,6 +983,67 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn require_role_caches_body_token_for_direct_extractors() {
+        async fn handler(context: AuthContext) -> String {
+            assert!(context.client_uuid.is_some());
+            context.role.to_string()
+        }
+
+        let fixture = fixture();
+        let token = fixture.client_token.clone();
+        let app = Router::new()
+            .route("/", post(handler))
+            .layer(RequireRole::new(
+                fixture.state.clone(),
+                [Role::Admin, Role::Client],
+            ))
+            .with_state(fixture.state);
+        let request = axum::http::Request::builder()
+            .method("POST")
+            .uri("/")
+            .body(Body::from(format!(r#"{{"token":"{token}"}}"#)))
+            .unwrap();
+        let response = app.oneshot(request).await.unwrap();
+        assert_eq!(response.status(), StatusCode::OK);
+        let body = axum::body::to_bytes(response.into_body(), usize::MAX)
+            .await
+            .unwrap();
+        assert_eq!(&body[..], b"client");
+    }
+
+    #[tokio::test]
+    async fn private_site_caches_body_token_for_direct_extractors() {
+        async fn handler(context: AuthContext) -> String {
+            assert!(context.client_uuid.is_some());
+            context.role.to_string()
+        }
+
+        let fixture = fixture();
+        fixture
+            .state
+            .db()
+            .config()
+            .set(PRIVATE_SITE_CONFIG_KEY, &true)
+            .unwrap();
+        let token = fixture.client_token.clone();
+        let app = Router::new()
+            .route("/api/secret", post(handler))
+            .layer(PrivateSite::new(fixture.state.clone()))
+            .with_state(fixture.state);
+        let request = axum::http::Request::builder()
+            .method("POST")
+            .uri("/api/secret")
+            .body(Body::from(format!(r#"{{"token":"{token}"}}"#)))
+            .unwrap();
+        let response = app.oneshot(request).await.unwrap();
+        assert_eq!(response.status(), StatusCode::OK);
+        let body = axum::body::to_bytes(response.into_body(), usize::MAX)
+            .await
+            .unwrap();
+        assert_eq!(&body[..], b"client");
+    }
+
+    #[tokio::test]
     async fn head_body_token_passes_through_auth_layer() {
         async fn handler(context: AuthContext) -> String {
             context.role.to_string()
