@@ -330,6 +330,56 @@ fn permit_login_creates_and_migrates_a_missing_database() {
 }
 
 #[test]
+fn chpasswd_migrates_an_existing_empty_database() {
+    let temp = TempDb::new("chpasswd-empty-file");
+    let path = temp.missing_path("empty.db");
+    std::fs::File::create(&path).unwrap();
+    assert_eq!(std::fs::metadata(&path).unwrap().len(), 0);
+
+    let output = run_path(&["chpasswd", "--password", "whatever"], &path);
+    assert!(
+        output.status.success(),
+        "chpasswd failed: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    assert!(stdout.contains("Changing password for user:"), "{stdout}");
+    assert!(stdout.contains("Error: 无法找到用户名"), "{stdout}");
+
+    let db = Db::open(&path).unwrap();
+    assert!(db.table_exists("users").unwrap());
+    assert!(db.table_exists("sessions").unwrap());
+}
+
+#[test]
+fn chpasswd_migrates_a_database_missing_the_sessions_table() {
+    let temp = TempDb::new("chpasswd-no-sessions");
+    let path = temp.missing_path("no-sessions.db");
+    {
+        let db = Db::open(&path).unwrap();
+        db.migrate().unwrap();
+        db.accounts().create("admin", "old-password").unwrap();
+        db.execute_batch("DROP TABLE sessions;").unwrap();
+        assert!(!db.table_exists("sessions").unwrap());
+    }
+
+    let output = run_path(&["chpasswd", "--password", "new-password"], &path);
+    assert!(
+        output.status.success(),
+        "chpasswd failed: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    assert!(!stdout.contains("Unable to force logout"), "{stdout}");
+    assert!(stdout.contains("Password changed successfully"), "{stdout}");
+
+    let db = Db::open(&path).unwrap();
+    assert!(db.table_exists("sessions").unwrap());
+    let user = db.accounts().require_by_username("admin").unwrap();
+    assert_eq!(user.passwd, "yqyhBswdm4vh/vRYv8vY9m3+t+ZQPxLQLv0FlN6FArI=");
+}
+
+#[test]
 fn chpasswd_missing_database_matches_the_go_message() {
     let temp = TempDb::new("missing");
     let missing = temp.missing_path("missing.db");

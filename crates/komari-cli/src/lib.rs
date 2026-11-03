@@ -174,6 +174,11 @@ fn open_existing_db(global: &GlobalArgs) -> Result<Option<Db>> {
 
     let db = Db::open(&config.db.file)
         .with_context(|| format!("failed to open database {}", config.db.file))?;
+    // Go `GetDBInstance` runs AutoMigrate even for chpasswd. This also makes an
+    // empty file (freshly touched SQLite db) usable instead of failing with
+    // "no such table: users".
+    db.migrate()
+        .with_context(|| format!("failed to migrate database {}", config.db.file))?;
     Ok(Some(db))
 }
 
