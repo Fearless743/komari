@@ -195,7 +195,7 @@ fn redact_json_value(value: &mut serde_json::Value) {
 ///
 /// This makes `access_token`, `accessToken`, `access-token` and
 /// `access.token` equivalent.
-pub(crate) fn is_sensitive_key(key: &str) -> bool {
+pub fn is_sensitive_key(key: &str) -> bool {
     let normalized = key
         .chars()
         .filter(|character| !matches!(character, '_' | '-' | '.' | ' '))

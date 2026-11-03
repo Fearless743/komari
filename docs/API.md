@@ -52,20 +52,20 @@ B04/B05/B06 合并并完成 B13 OAuth HTTP/B14 静态路由装配。
 
 | 路由组 | 代表端点 | Rust 状态 | 责任 |
 | --- | --- | --- | --- |
-| 健康检查 | `GET /ping`（Go 用 `Any`） | 已实现（B09；提供 public router 时由 B04 接管） | B09/B04 |
-| 公开 API | `/api/login`、`/api/public`、`/api/nodes`、`/api/version` 等 | 未实现 | B04 |
+| 健康检查 | `GET /ping`（Go 用 `Any`） | 已实现（B04 public router；B09 默认装配） | B04/B09 |
+| 公开 API | `/api/login`、`/api/public`、`/api/nodes`、`/api/version` 等 | 已实现（B04） | B04 |
 | Agent API | `/api/clients/register`、`/api/clients/report`、`/api/clients/uploadBasicInfo` | 见 PARITY | B05 |
 | 浏览器 WebSocket | `GET /api/clients` | 已实现（B05/B09） | B05/B09 |
-| 管理 API | `/api/admin/*` | 未实现 | B06 |
-| JSON-RPC | `GET/POST /api/rpc2` | 未实现 | B04 |
-| OAuth | `/api/oauth`、`/api/oauth_callback` | 已实现（B09 装配） | B09 |
+| 管理 API | `/api/admin/*` | 已实现（B06） | B06 |
+| JSON-RPC | `GET/POST /api/rpc2` | 已实现（B04/B06） | B04/B06 |
+| OAuth | `/api/oauth`、`/api/oauth_callback` | 已实现（B04，B09 装配） | B04/B09 |
 | 静态资源 | `/`、`/themes/:id/*path`、`/favicon.ico` | 已实现（komari-web + B09 装配） | B09 |
 | MJPEG | `/api/mjpeg_live` | 未实现 | B04 |
 
 ## 4. 公开路由（Go 参考，Rust 状态）
 
-> B09 已装配 `/ping`、`/api/oauth*`、浏览器 WS 与静态资源。提供 B04 的
-> `public_router` 时，`/ping` 和 OAuth 路由由 B04 接管以避免重复路由；具体状态以
+> B09 默认装配 B04 public、B06 admin/rpc、浏览器 WS 与静态资源。`/ping` 与
+> `/api/oauth*` 由 B04 public router 提供，B09 内置副本不会重复挂载。具体状态以
 > [PARITY.md](PARITY.md) 为准。
 
 以下端点来自 `komari/cmd/server.go`：

@@ -49,7 +49,7 @@ pub mod state;
 pub mod types;
 
 pub use accounts::{AccountLinker, OAuthAccount, SessionUser, SsoIdentity};
-pub use error::{OAuthError, Result, redact_secrets, redacted_error};
+pub use error::{OAuthError, Result, is_sensitive_key, redact_secrets, redacted_error};
 pub use factory::{
     BUILTIN_METADATA, ConfigField, ProviderConstructor, ProviderMeta, ProviderRegistry,
     all_provider_names, builtin_registry, default_config, default_http_client, load_provider,

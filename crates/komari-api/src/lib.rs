@@ -1,33 +1,44 @@
 //! Agent-facing HTTP and WebSocket API.
 //!
-//! This crate implements the routes the Komari agent uses:
+//! This crate implements:
 //!
 //! * `POST /api/clients/register` — auto-discovery registration.
 //! * `GET  /api/clients/report` — persistent WebSocket metric stream.
 //! * `POST /api/clients/report` — one-shot HTTP metric report.
 //! * `POST /api/clients/uploadBasicInfo` — static hardware/OS information.
 //! * `GET  /api/clients` — browser WebSocket used by the dashboard.
+//! * `/api/admin/**` — administrative API (see [`admin`]).
+//! * `/api/rpc2` — JSON-RPC 2.0 over POST and WebSocket (see [`rpc`]).
+//! * Browser-facing public routes (`/api/nodes`, login, OAuth, records, …) live
+//!   in [`public`].
 //!
-//! Public routes, the admin API and JSON-RPC intentionally live in other
-//! crates/tasks; [`client_router`] can be merged into a larger router.
+//! [`client_router`], [`public::public_router`], [`admin::admin_router`] and
+//! [`rpc::rpc_router`] can be merged into a larger router sharing the same
+//! [`ApiState`].
 
+pub mod admin;
 mod agent;
 mod cache;
 mod clock;
 mod presence;
+pub mod public;
 mod report;
 mod response;
+pub mod rpc;
 pub mod server;
 mod state;
 pub mod ws;
 
+pub use admin::{admin_router, admin_router_with_state};
 pub use cache::{FlushSummary, ReportCache};
 pub use clock::{Clock, ManualClock, SystemClock};
 pub use presence::{PresenceExpiry, PresenceTracker, PresenceUpdate};
+pub use public::{initialize_oauth, public_router, public_router_with_state};
 pub use report::{
     ConnectionsReport, CpuReport, DiskReport, GpuDetailReport, GpuDeviceInfo, LoadReport,
     NetworkReport, RamReport, Report, aggregate_reports, save_report, verify_report,
 };
+pub use rpc::{rpc_router, rpc_router_with_state};
 pub use server::{
     BackgroundConfig, BackgroundTasks, OAuthRuntime, Server, ServerBuilder, ServerConfig,
 };

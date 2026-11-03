@@ -1,5 +1,6 @@
 //! Shared application state for the API routers.
 
+use std::path::PathBuf;
 use std::sync::{Arc, RwLock};
 use std::time::Duration;
 
@@ -11,7 +12,7 @@ use komari_ddns::DdnsService;
 use komari_geoip::GeoIpService;
 use komari_jobs::CancelToken;
 use komari_oauth::OAuthProvider;
-use komari_web::WebAssets;
+use komari_web::{WebAssets, WebConfig};
 
 use crate::cache::ReportCache;
 use crate::clock::{Clock, SystemClock};
@@ -38,6 +39,8 @@ pub struct ApiConfig {
     pub report_flush_interval: Duration,
     /// Top fraction used by `AverageReport` (Go passes 0.3).
     pub report_top_percentage: f64,
+    /// Delay between MJPEG frames (Go's `refreshInterval`, 2 seconds).
+    pub mjpeg_frame_interval: Duration,
 }
 
 impl Default for ApiConfig {
@@ -51,6 +54,7 @@ impl Default for ApiConfig {
             report_retention: Duration::from_secs(60),
             report_flush_interval: Duration::from_secs(60),
             report_top_percentage: 0.3,
+            mjpeg_frame_interval: Duration::from_secs(2),
         }
     }
 }
@@ -76,12 +80,15 @@ pub struct ApiState {
     /// server assembly can call `initialize()` and install it with
     /// [`ApiState::with_geoip_service`].
     pub geoip: Option<Arc<GeoIpService>>,
-    /// Static web assets shared with the admin/settings API (B06).
-    pub web: Option<Arc<WebAssets>>,
-    /// DDNS service shared with the admin API (B06).
-    pub ddns: Option<Arc<DdnsService>>,
-    /// Currently loaded OAuth provider (B04 reads this for `/api/oauth`).
-    pub oauth_provider: Arc<RwLock<Option<Arc<dyn OAuthProvider>>>>,
+    /// Embedded/static web assets. Admin theme routes use the same handle as
+    /// the static router so a switch takes effect immediately.
+    pub web: Arc<WebAssets>,
+    /// DDNS service used by the admin sync endpoint. The server assembly can
+    /// install an initialized instance with [`ApiState::with_ddns_service`].
+    pub ddns: Arc<DdnsService>,
+    /// Active OAuth provider. It is `None` until the server assembly loads the
+    /// configured provider (see `komari_api::public::initialize_oauth`).
+    oauth_provider: Arc<RwLock<Option<Arc<dyn OAuthProvider>>>>,
     config: Arc<ApiConfig>,
     /// Cancels the presence sweeper and report flusher started by
     /// [`ApiState::with_clock`].
@@ -122,6 +129,8 @@ impl ApiState {
         ));
         let auth = AuthState::new(Arc::clone(&db));
         let geoip = Some(Arc::new(GeoIpService::new().with_database(Arc::clone(&db))));
+        let web = Arc::new(WebAssets::new(WebConfig::default()));
+        let ddns = Arc::new(DdnsService::new(Arc::clone(&db)));
         let state = Self {
             db,
             auth,
@@ -129,8 +138,8 @@ impl ApiState {
             presence,
             report_cache,
             geoip,
-            web: None,
-            ddns: None,
+            web,
+            ddns,
             oauth_provider: Arc::new(RwLock::new(None)),
             config: Arc::new(config),
             background_cancel: CancelToken::new(),
@@ -163,19 +172,24 @@ impl ApiState {
         self
     }
 
-    /// Install the shared static-asset service.
+    /// Share the static router's [`WebAssets`] with the admin theme routes.
     pub fn with_web_assets(mut self, assets: Arc<WebAssets>) -> Self {
-        self.web = Some(assets);
+        self.web = assets;
         self
     }
 
-    /// Install the shared DDNS service.
-    pub fn with_ddns_service(mut self, ddns: Arc<DdnsService>) -> Self {
-        self.ddns = Some(ddns);
+    /// Install an initialized DDNS service.
+    pub fn with_ddns_service(mut self, service: Arc<DdnsService>) -> Self {
+        self.ddns = service;
         self
     }
 
-    /// Read the currently loaded OAuth provider.
+    /// Directory that holds `komari.db`, installed themes and the favicon.
+    pub fn data_dir(&self) -> PathBuf {
+        self.web.config().data_dir.clone()
+    }
+
+    /// The active OAuth provider, if the server assembly installed one.
     pub fn oauth_provider(&self) -> Option<Arc<dyn OAuthProvider>> {
         self.oauth_provider
             .read()
@@ -183,7 +197,7 @@ impl ApiState {
             .clone()
     }
 
-    /// Replace the OAuth provider snapshot used by B04's public routes.
+    /// Install or replace the active OAuth provider.
     pub fn set_oauth_provider(&self, provider: Option<Arc<dyn OAuthProvider>>) {
         *self
             .oauth_provider
@@ -191,6 +205,11 @@ impl ApiState {
             .unwrap_or_else(|poisoned| poisoned.into_inner()) = provider;
     }
 
+    /// Builder variant of [`ApiState::set_oauth_provider`].
+    pub fn with_oauth_provider(self, provider: Arc<dyn OAuthProvider>) -> Self {
+        self.set_oauth_provider(Some(provider));
+        self
+    }
     fn spawn_presence_sweeper(&self) {
         let interval = self.config.presence_sweep_interval;
         if interval.is_zero() {

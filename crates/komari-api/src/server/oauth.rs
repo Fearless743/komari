@@ -95,6 +95,15 @@ impl OAuthRuntime {
             .unwrap_or_else(|poisoned| poisoned.into_inner()) = provider;
     }
 
+    /// Whether an explicit provider was installed with
+    /// [`OAuthRuntime::with_provider`] or [`OAuthRuntime::set_provider`].
+    pub fn has_override(&self) -> bool {
+        self.provider
+            .read()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .is_some()
+    }
+
     /// The provider used for the next request.
     pub fn current(&self) -> Option<Arc<dyn OAuthProvider>> {
         self.provider

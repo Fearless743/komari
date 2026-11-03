@@ -11,8 +11,8 @@ the B14 static web assets (`komari-web`) and the B13 OAuth/OIDC crate
 (`komari-oauth`). B09 adds the HTTP server assembly: `komari server` binds
 `KOMARI_LISTEN` (default `0.0.0.0:25774`), mounts the agent/browser WebSocket
 routes, OAuth login/callback, static assets and SPA fallback, restores a pending
-`data/backup.zip`, and starts the background jobs. The public API/RPC2 (B04) and
-admin API (B06) are merged through `ServerBuilder` hooks when their crates land.
+`data/backup.zip`, and starts the background jobs. The public API/RPC2 (B04)
+and admin API (B06) are mounted by default through the same router assembly.
 
 | Crate | Responsibility | Status |
 | --- | --- | --- |
@@ -20,7 +20,7 @@ admin API (B06) are merged through `ServerBuilder` hooks when their crates land.
 | `komari-config` | Environment/flag configuration and site defaults | merged (B01) |
 | `komari-db` | SQLite database layer | merged (B02) |
 | `komari-auth` | Authentication, sessions, TOTP, roles | merged (B03) |
-| `komari-api` | Agent/browser routes and HTTP server assembly | B05/B09 merged; public/admin hooks for B04/B06 |
+| `komari-api` | Agent/browser, public, admin, RPC and HTTP server assembly | merged (B04/B05/B06/B09) |
 | `komari-notify` | Notification delivery and auto-renewal | merged (B07) |
 | `komari-jobs` | Scheduled record maintenance | merged |
 | `komari-ddns` | DDNS integrations | merged |

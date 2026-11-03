@@ -7,13 +7,13 @@
 //!
 //! # B04/B06 integration
 //!
-//! The public API (B04) and the admin/JSON-RPC API (B06) are developed in
-//! parallel. Their routers can be attached without changing this file:
+//! B04 (`public`) and B06 (`admin`/`rpc`) are merged by default. Their
+//! state-applied routers can also be supplied explicitly:
 //!
 //! ```no_run
 //! # use axum::Router;
-//! # use komari_api::{ApiState, server::ServerBuilder};
-//! # fn wire(builder: ServerBuilder, public: Router<ApiState>, admin: Router<ApiState>, rpc: Router<ApiState>) -> ServerBuilder {
+//! # use komari_api::server::ServerBuilder;
+//! # fn wire(builder: ServerBuilder, public: Router, admin: Router, rpc: Router) -> ServerBuilder {
 //! builder
 //!     .merge_public(public)
 //!     .merge_admin(admin)
@@ -21,13 +21,13 @@
 //! # }
 //! ```
 //!
-//! The routers must use [`ApiState`]; they are merged before `with_state` is
-//! applied. A stateless router can be attached with
-//! [`ServerBuilder::merge_stateless`].
+//! The routers must already have their state applied (for example
+//! `komari_api::public_router_with_state(state)`). A router without state can
+//! be attached with [`ServerBuilder::merge_stateless`].
 
 mod assets;
 mod background;
-mod oauth;
+pub mod oauth;
 
 pub use assets::{
     TEMP_SHARE_EXPIRE_KEY, TEMP_SHARE_TOKEN_KEY, build_web_assets, data_dir_for_database,
@@ -47,7 +47,6 @@ use axum::extract::{Request, State};
 use axum::http::{HeaderValue, Method, StatusCode, header};
 use axum::middleware::{self, Next};
 use axum::response::{IntoResponse, Response};
-use axum::routing::any;
 use komari_auth::{AuthLayer, BufferedBodyLimit, PrivateSite, payload_too_large_response};
 use komari_config::Config;
 use komari_db::{BackupOptions, Db, DbError, restore_pending_backup};
@@ -142,9 +141,9 @@ pub struct ServerBuilder {
     state: Option<ApiState>,
     assets: Option<Arc<WebAssets>>,
     oauth: Option<OAuthRuntime>,
-    public_router: Option<Router<ApiState>>,
-    admin_router: Option<Router<ApiState>>,
-    rpc_router: Option<Router<ApiState>>,
+    public_router: Option<Router>,
+    admin_router: Option<Router>,
+    rpc_router: Option<Router>,
     stateless_router: Option<Router>,
     state_hook: Option<Box<dyn FnOnce(ApiState) -> ApiState + Send>>,
     initialize_services: bool,
@@ -196,25 +195,28 @@ impl ServerBuilder {
         self
     }
 
-    /// Attach the B04 public API router (`Router<ApiState>`).
+    /// Attach the B04 public API router.
     ///
-    /// When a public router is supplied it owns `/ping`, `/api/oauth` and
-    /// `/api/oauth_callback`; the built-in copies are skipped so merging the
-    /// same paths cannot panic. The loaded OAuth provider is available through
-    /// [`ApiState::oauth_provider`].
-    pub fn merge_public(mut self, router: Router<ApiState>) -> Self {
+    /// Use [`crate::public_router_with_state`] (or any router with its state
+    /// already applied). The public router owns `/ping`, `/api/oauth` and
+    /// `/api/oauth_callback`; B09's built-in copies are not mounted.
+    pub fn merge_public(mut self, router: Router) -> Self {
         self.public_router = Some(router);
         self
     }
 
-    /// Attach the B06 admin API router (`Router<ApiState>`).
-    pub fn merge_admin(mut self, router: Router<ApiState>) -> Self {
+    /// Attach the B06 admin API router.
+    ///
+    /// Use [`crate::admin_router_with_state`] or another state-applied router.
+    pub fn merge_admin(mut self, router: Router) -> Self {
         self.admin_router = Some(router);
         self
     }
 
-    /// Attach the B04 JSON-RPC router (`Router<ApiState>`).
-    pub fn merge_rpc(mut self, router: Router<ApiState>) -> Self {
+    /// Attach the B04/B06 JSON-RPC router.
+    ///
+    /// Use [`crate::rpc_router_with_state`] or another state-applied router.
+    pub fn merge_rpc(mut self, router: Router) -> Self {
         self.rpc_router = Some(router);
         self
     }
@@ -263,12 +265,16 @@ impl ServerBuilder {
         let db = state.db.clone();
         let oauth = self.oauth.unwrap_or_default();
         if self.initialize_services {
-            if let Err(error) = oauth.initialize_from_db(&db).await {
+            if oauth.has_override() {
+                state.set_oauth_provider(oauth.current());
+            } else if let Err(error) = crate::initialize_oauth(&state).await {
                 warn!(%error, "failed to initialize the OAuth provider");
             }
             if let Err(error) = komari_notify::initialize_defaults(&db) {
                 warn!(%error, "failed to initialize notification providers");
             }
+        } else {
+            state.set_oauth_provider(oauth.current());
         }
 
         let ddns = Arc::new(DdnsService::new(db.clone()));
@@ -286,29 +292,27 @@ impl ServerBuilder {
         state = state
             .with_web_assets(assets.clone())
             .with_ddns_service(ddns.clone());
-        state.set_oauth_provider(oauth.current());
         if let Some(hook) = self.state_hook {
             state = hook(state);
         }
 
-        let public_router_provided = self.public_router.is_some();
-        let mut state_router = Router::<ApiState>::new();
-        if let Some(router) = self.public_router {
-            state_router = state_router.merge(router);
-        }
-        if let Some(router) = self.admin_router {
-            state_router = state_router.merge(router);
-        }
-        if let Some(router) = self.rpc_router {
-            state_router = state_router.merge(router);
-        }
-        let state_router = state_router.with_state(state.clone());
+        let public_router = self
+            .public_router
+            .unwrap_or_else(|| crate::public_router_with_state(state.clone()));
+        let admin_router = self
+            .admin_router
+            .unwrap_or_else(|| crate::admin_router_with_state(state.clone()));
+        let rpc_router = self
+            .rpc_router
+            .unwrap_or_else(|| crate::rpc_router_with_state(state.clone()));
 
         let fallback_assets = assets.clone();
         let fallback_db = db.clone();
         let mut router = Router::new()
             .merge(client_router_with_state(state.clone()))
-            .merge(state_router)
+            .merge(public_router)
+            .merge(admin_router)
+            .merge(rpc_router)
             .merge(komari_web::routes_for::<()>(assets.clone()))
             .fallback(move |request| {
                 let assets = fallback_assets.clone();
@@ -323,11 +327,6 @@ impl ServerBuilder {
                     komari_web::serve_fallback(&assets, request).await
                 }
             });
-        if !public_router_provided {
-            router = router
-                .merge(oauth::router(db.clone(), oauth.clone()))
-                .route("/ping", any(ping));
-        }
         if let Some(stateless) = self.stateless_router {
             router = router.merge(stateless);
         }
@@ -463,10 +462,11 @@ impl Server {
         if let Err(error) = self.ddns.initialize().await {
             warn!(%error, "failed to reload DDNS");
         }
-        if let Err(error) = self.oauth.initialize_from_db(&self.state.db).await {
+        if self.oauth.has_override() {
+            self.state.set_oauth_provider(self.oauth.current());
+        } else if let Err(error) = crate::initialize_oauth(&self.state).await {
             warn!(%error, "failed to reload the OAuth provider");
         }
-        self.state.set_oauth_provider(self.oauth.current());
         if let Err(error) = self.refresh_assets() {
             warn!(%error, "failed to reload web assets");
         }
@@ -640,10 +640,6 @@ pub async fn run(config: ServerConfig) -> Result<()> {
         .await
         .with_context(|| format!("failed to bind {listen}"))?;
     server.serve(listener).await
-}
-
-async fn ping() -> &'static str {
-    "pong"
 }
 
 #[derive(Clone, Copy, Debug)]

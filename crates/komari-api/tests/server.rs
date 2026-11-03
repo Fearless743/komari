@@ -9,11 +9,11 @@ use async_trait::async_trait;
 use axum::Router;
 use axum::routing::get;
 use futures_util::{SinkExt, StreamExt};
+use komari_api::Report;
 use komari_api::server::{
     BackgroundConfig, OAuthRuntime, Server, ServerBuilder, ServerConfig, TEMP_SHARE_EXPIRE_KEY,
     TEMP_SHARE_TOKEN_KEY, refresh_web_assets,
 };
-use komari_api::{ApiState, Report};
 use komari_db::{BackupOptions, ClientPatch, Db};
 use komari_oauth::{
     AuthorizationRequest, CallbackRequest, ExchangeRequest, OAuthError, OAuthProvider, OAuthUser,
@@ -199,18 +199,64 @@ async fn server_installs_web_and_ddns_services_in_state() {
         .await
         .expect("build");
     assert!(hook_ran.load(Ordering::SeqCst));
-    assert_eq!(
-        server
-            .state()
-            .web
-            .as_ref()
-            .expect("web assets")
-            .config()
-            .data_dir
-            .as_path(),
-        dir.path()
-    );
-    assert!(server.state().ddns.is_some());
+    assert_eq!(server.state().web.config().data_dir.as_path(), dir.path());
+    assert!(Arc::strong_count(&server.state().ddns) >= 1);
+}
+
+#[tokio::test]
+async fn default_server_mounts_public_admin_rpc_client_and_static() {
+    let dir = TempDir::new().expect("temp dir");
+    let db = memory_db();
+    db.config()
+        .set("api_key", &"0123456789abcdef")
+        .expect("api key");
+    let server = build(server_config(&dir), db).await;
+    let state = server.state().clone();
+    let session = create_admin_session(&state.db);
+    let running = start(server).await;
+    let client = http_client();
+
+    let (status, nodes) = get_json(&client, &format!("{}/api/nodes", running.base)).await;
+    assert_eq!(status, reqwest::StatusCode::OK);
+    assert_eq!(nodes["status"], "success");
+
+    let response = client
+        .get(format!("{}/api/admin/settings", running.base))
+        .header(COOKIE, format!("session_token={session}"))
+        .send()
+        .await
+        .expect("admin settings");
+    assert_eq!(response.status(), reqwest::StatusCode::OK);
+    let settings: Value = response.json().await.expect("settings json");
+    assert_eq!(settings["status"], "success");
+
+    let response = client
+        .post(format!("{}/api/rpc2", running.base))
+        .header("Authorization", "Bearer 0123456789abcdef")
+        .json(&serde_json::json!({
+            "jsonrpc": "2.0",
+            "id": 1,
+            "method": "rpc.ping",
+            "params": {},
+        }))
+        .send()
+        .await
+        .expect("rpc ping");
+    assert_eq!(response.status(), reqwest::StatusCode::OK);
+    let rpc: Value = response.json().await.expect("rpc json");
+    assert_eq!(rpc["result"], "pong", "{rpc}");
+
+    let (status, _) = get_json(&client, &format!("{}/api/clients", running.base)).await;
+    assert_eq!(status, reqwest::StatusCode::BAD_REQUEST);
+
+    let response = client
+        .get(format!("{}/dashboard", running.base))
+        .send()
+        .await
+        .expect("static fallback");
+    assert_eq!(response.status(), reqwest::StatusCode::OK);
+
+    running.stop().await;
 }
 
 #[tokio::test]
@@ -714,9 +760,9 @@ async fn cors_headers_and_options_are_dynamic() {
 #[tokio::test]
 async fn b04_b06_routers_can_be_merged() {
     let dir = TempDir::new().expect("temp dir");
-    let public = Router::<ApiState>::new().route("/api/public/test", get(|| async { "public" }));
-    let admin = Router::<ApiState>::new().route("/api/admin/test", get(|| async { "admin" }));
-    let rpc = Router::<ApiState>::new().route("/api/rpc2", get(|| async { "rpc" }));
+    let public = Router::new().route("/api/public/test", get(|| async { "public" }));
+    let admin = Router::new().route("/api/admin/test", get(|| async { "admin" }));
+    let rpc = Router::new().route("/api/rpc2", get(|| async { "rpc" }));
     let stateless = Router::new().route("/stateless", get(|| async { "stateless" }));
 
     let server = ServerBuilder::new(server_config(&dir))
@@ -753,7 +799,7 @@ async fn b04_b06_routers_can_be_merged() {
 #[tokio::test]
 async fn public_router_can_own_ping_and_oauth_without_duplicate_routes() {
     let dir = TempDir::new().expect("temp dir");
-    let public = Router::<ApiState>::new()
+    let public = Router::new()
         .route("/ping", get(|| async { "public-ping" }))
         .route("/api/oauth", get(|| async { "public-oauth" }))
         .route("/api/oauth_callback", get(|| async { "public-callback" }));
