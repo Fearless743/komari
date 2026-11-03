@@ -4,10 +4,10 @@ use serde::{Deserialize, Serialize};
 
 /// Geographic information for one IP address.
 ///
-/// `ISOCode` and `Name` mirror Go's `geoip.GeoInfo` exactly. The remaining
-/// fields are populated by providers whose response contains them; they are
-/// omitted from JSON when absent so the core payload stays compatible with the
-/// Go backend.
+/// `ISOCode` and `Name` mirror Go's `geoip.GeoInfo` exactly and are the only
+/// fields serialized. The remaining fields retain extra provider details in
+/// memory and are skipped by serde so API responses stay byte-compatible with
+/// the Go backend (which has no such fields).
 #[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
 #[serde(default)]
 pub struct GeoInfo {
@@ -15,17 +15,17 @@ pub struct GeoInfo {
     pub iso_code: String,
     #[serde(rename = "Name", alias = "name")]
     pub name: String,
-    #[serde(skip_serializing_if = "Option::is_none")]
+    #[serde(skip_serializing)]
     pub country: Option<String>,
-    #[serde(skip_serializing_if = "Option::is_none")]
+    #[serde(skip_serializing)]
     pub province: Option<String>,
-    #[serde(skip_serializing_if = "Option::is_none")]
+    #[serde(skip_serializing)]
     pub city: Option<String>,
-    #[serde(skip_serializing_if = "Option::is_none")]
+    #[serde(skip_serializing)]
     pub isp: Option<String>,
-    #[serde(skip_serializing_if = "Option::is_none")]
+    #[serde(skip_serializing)]
     pub latitude: Option<f64>,
-    #[serde(skip_serializing_if = "Option::is_none")]
+    #[serde(skip_serializing)]
     pub longitude: Option<f64>,
 }
 

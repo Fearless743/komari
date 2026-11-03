@@ -71,18 +71,24 @@ async fn mmdb_missing_database_is_a_graceful_error() {
 }
 
 #[test]
-fn region_emoji_matches_go() {
+fn region_emoji_and_json_match_go() {
     assert_eq!(region_unicode_emoji("CN"), "🇨🇳");
     assert_eq!(region_unicode_emoji("us"), "🇺🇸");
     assert_eq!(region_unicode_emoji("USA"), "");
     assert_eq!(region_unicode_emoji("C1"), "");
     assert_eq!(region_unicode_emoji(""), "");
 
-    let info = GeoInfo::country("CN", "China");
-    let value = serde_json::to_value(info).expect("serialize");
-    assert_eq!(value["ISOCode"], "CN");
-    assert_eq!(value["Name"], "China");
-    assert!(value.get("city").is_none());
+    let mut info = GeoInfo::country("US", "United States");
+    info.country = Some("United States".to_owned());
+    info.province = Some("California".to_owned());
+    info.city = Some("Mountain View".to_owned());
+    info.isp = Some("Google LLC".to_owned());
+    info.latitude = Some(37.4);
+    info.longitude = Some(-122.1);
+    assert_eq!(
+        serde_json::to_string(&info).expect("serialize"),
+        r#"{"ISOCode":"US","Name":"United States"}"#
+    );
 }
 
 #[tokio::test]
