@@ -1,8 +1,35 @@
-# komari-api — agent API parity notes
+# komari-api — API parity notes
 
-This crate implements the agent-facing routes and the WebSocket hub used by
-`komari-api`. The following intentional differences from the Go backend are
-tracked here so later tasks can adapt them.
+This crate implements the public/browser routes, the agent-facing routes and
+the WebSocket hub used by `komari-api`. The following intentional differences
+from the Go backend are tracked here so later tasks can adapt them.
+
+## Public API (`public_router`)
+
+Ports of Go `api/public/*.go` plus the route table in `cmd/server.go`:
+
+| Route | Notes |
+| --- | --- |
+| `ANY /ping` | Plain-text `pong`, matching Go's `r.Any("/ping", ...)`. |
+| `GET /api/nodes` | Hidden clients are filtered for guests; `ipv4`, `ipv6`, `remark`, `version` and `token` are always cleared. |
+| `GET /api/public` | Defaults match `database.GetPublicInfo`; a valid `temp_key` cookie reports `private_site=false`. |
+| `GET /api/version` | `{"version": ..., "hash": ...}` from `KOMARI_VERSION` / `KOMARI_VERSION_HASH` (same as `komari-cli`). |
+| `POST /api/login` | Password + optional `2fa_code`; `disable_password_login` returns 403. |
+| `GET /api/me` | Raw `{username, logged_in, uuid?, sso_type?, sso_id?, 2fa_enabled?}` (no envelope). |
+| `GET /api/logout` | Deletes the session, clears the cookie and redirects to `/`. |
+| `GET /api/recent/{uuid}` | Reads the B05 in-memory report buffer (`api.Records`); omits `data` when nothing is buffered. |
+| `GET /api/records/load` | `uuid`/`hours`/`load_type` validation, per-metric projection and GPU device grouping. |
+| `GET /api/oauth`, `GET /api/oauth_callback` | Uses the B13 provider installed with `ApiState::set_oauth_provider`; error bodies use Go's `error` key. |
+| `GET /api/mjpeg_live` | Explicit `501` (see below). |
+
+`public_router_with_state` additionally installs `komari_auth::PrivateSite`,
+matching the global private-site middleware in `cmd/server.go`. Server
+assemblies that already apply `PrivateSite` globally can use
+`public_router()` directly.
+
+OAuth is not loaded automatically. Call
+`komari_api::public::initialize_oauth(&state).await` (which seeds default
+provider rows and loads `o_auth_provider`) before serving requests.
 
 ## Implemented Go semantics
 
@@ -33,6 +60,16 @@ tracked here so later tasks can adapt them.
 
 ## Known differences / follow-up work
 
+- `/api/mjpeg_live` returns `501 {"status":"error","message":...}` instead of a
+  `multipart/x-mixed-replace` stream. Go's handler depends on JSON-RPC node data
+  and an externally downloaded MiSans font (`./data/font.ttf`); both are outside
+  B04. Clients should fall back to the HTML dashboard until the image pipeline
+  is ported.
+- `/api/rpc2` and the admin API are separate tasks (B06/B07) and are not part of
+  this router.
+- `/api/oauth_callback` binding uses `komari_oauth::AccountLinker::bind`, which
+  also records `users.sso_type` and rejects an identity already owned by
+  another account. Go only writes `sso_id`.
 - `uploadBasicInfo` accepts a POST body `token` and an administrator body
   `uuid`. Go only reads the query token and returns 400 without it. This is an
   intentional extension for the B05 checklist; strict Go parity would reject
