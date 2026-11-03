@@ -404,28 +404,8 @@ pub(crate) fn redact_oauth_addition(addition: &str) -> Value {
     let Ok(Value::Object(mut object)) = serde_json::from_str::<Value>(addition) else {
         return Value::Object(Map::new());
     };
-    object.retain(|key, _| {
-        !matches!(
-            normalize_key(key).as_str(),
-            "clientsecret"
-                | "secret"
-                | "appkey"
-                | "clientkey"
-                | "password"
-                | "passwd"
-                | "token"
-                | "accesstoken"
-                | "refreshtoken"
-        )
-    });
+    object.retain(|key, _| !komari_oauth::is_sensitive_key(key));
     Value::Object(object)
-}
-
-fn normalize_key(key: &str) -> String {
-    key.chars()
-        .filter(|character| character.is_ascii_alphanumeric())
-        .flat_map(char::to_lowercase)
-        .collect()
 }
 
 // ---------------------------------------------------------------------------
@@ -488,11 +468,11 @@ pub(crate) async fn cloudflare_zones(_admin: RequireAdmin, body: Bytes) -> Respo
 #[derive(Default, serde::Deserialize)]
 pub(crate) struct HistoryQuery {
     #[serde(default)]
-    limit: Option<i64>,
+    limit: Option<String>,
     #[serde(default)]
     client_uuid: String,
     #[serde(default)]
-    before_days: Option<i64>,
+    before_days: Option<String>,
 }
 
 /// `GET /api/admin/settings/ddns/history`.
@@ -501,7 +481,11 @@ pub(crate) async fn get_ddns_history(
     _admin: RequireAdmin,
     Query(query): Query<HistoryQuery>,
 ) -> Response {
-    let limit = query.limit.unwrap_or(50);
+    let limit = query
+        .limit
+        .as_deref()
+        .and_then(|value| value.parse::<i64>().ok())
+        .unwrap_or(0);
     let limit = if limit <= 0 || limit > 200 { 50 } else { limit };
     match state.db.ddns().history(&query.client_uuid, limit) {
         Ok(histories) => response::success(json!(histories)).into_response(),
@@ -515,7 +499,11 @@ pub(crate) async fn delete_ddns_history(
     admin: RequireAdmin,
     Query(query): Query<HistoryQuery>,
 ) -> Response {
-    let days = query.before_days.unwrap_or(30);
+    let days = query
+        .before_days
+        .as_deref()
+        .and_then(|value| value.parse::<i64>().ok())
+        .unwrap_or(0);
     let days = if days <= 0 { 30 } else { days };
     let before = LocalTime::now().add_seconds(-days.saturating_mul(86_400));
     match state.db.ddns().delete_history_before(before) {
