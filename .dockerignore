@@ -1,0 +1,30 @@
+# Build output
+target/
+
+# Version control and CI metadata
+.git/
+.gitignore
+.github/
+.ow-meta
+
+# Local runtime data and secrets
+data/
+*.db
+*.db-*
+*.db-shm
+*.db-wal
+*.mmdb
+.env
+.env.*
+*.log
+
+# Frontend dependencies and intermediate checkouts (built theme output is kept)
+.komari-web-src/
+**/node_modules/
+
+# Documentation and local editor files
+docs/
+README.md
+.idea/
+.vscode/
+.DS_Store

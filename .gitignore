@@ -6,3 +6,20 @@ target/
 /data/
 *.log
 .DS_Store
+
+# Build/release output
+/dist/
+*.rs.bk
+
+# Local frontend checkout used for theme builds
+/.komari-theme/
+/.komari-web-src/
+/public/defaultTheme/
+**/node_modules/
+
+# Downloaded GeoIP databases (stored under data/ at runtime)
+*.mmdb
+
+# Editor directories
+.idea/
+.vscode/

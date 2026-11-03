@@ -1,0 +1,102 @@
+name: Prepare default theme
+description: Clone and build komari-web, then normalize the output into a B14 theme directory
+
+inputs:
+  repository:
+    description: Frontend git repository
+    required: false
+    default: https://github.com/Fearless743/komari-web
+  ref:
+    description: Frontend branch or tag (empty uses the repository default branch)
+    required: false
+    default: ""
+  source-directory:
+    description: Temporary checkout directory, relative to the workspace
+    required: false
+    default: .komari-web-src
+  directory:
+    description: Normalized theme output directory, relative to the workspace
+    required: false
+    default: .komari-theme
+
+outputs:
+  theme-dir:
+    description: Absolute directory containing dist/, komari-theme.json and preview
+    value: ${{ steps.normalize.outputs.theme-dir }}
+
+runs:
+  using: composite
+  steps:
+    - name: Set up Node.js
+      uses: actions/setup-node@v4
+      with:
+        node-version: "22"
+
+    - name: Clone komari-web
+      shell: bash
+      run: |
+        rm -rf "${{ inputs.source-directory }}"
+        if [[ -n "${{ inputs.ref }}" ]]; then
+          git clone --depth 1 --branch "${{ inputs.ref }}" \
+            "${{ inputs.repository }}" "${{ inputs.source-directory }}"
+        else
+          git clone --depth 1 "${{ inputs.repository }}" "${{ inputs.source-directory }}"
+        fi
+
+    - name: Build frontend
+      shell: bash
+      working-directory: ${{ inputs.source-directory }}
+      run: |
+        npm install
+        npm run build
+
+    - name: Normalize theme directory
+      id: normalize
+      shell: bash
+      run: |
+        src="${{ inputs.source-directory }}"
+        dst="${{ inputs.directory }}"
+
+        # The current komari-web Vite config writes to
+        # ../public/defaultTheme/dist. Also accept a future layout that writes
+        # dist/ directly inside the checkout (the layout described by B14).
+        dist=""
+        for candidate in \
+          "$src/dist" \
+          "$src/../public/defaultTheme/dist" \
+          "$src/public/defaultTheme/dist"; do
+          if [[ -f "$candidate/index.html" ]]; then
+            dist="$candidate"
+            break
+          fi
+        done
+        if [[ -z "$dist" ]]; then
+          echo "::error::could not find a Vite build output (dist/index.html)"
+          echo "checked: $src/dist, $src/../public/defaultTheme/dist, $src/public/defaultTheme/dist"
+          exit 1
+        fi
+
+        rm -rf "$dst"
+        mkdir -p "$dst/dist"
+        cp -a "$dist/." "$dst/dist/"
+
+        if [[ ! -f "$src/komari-theme.json" ]]; then
+          echo "::error::komari-theme.json missing from the frontend checkout"
+          exit 1
+        fi
+        cp -f "$src/komari-theme.json" "$dst/"
+
+        if [[ -f "$src/preview.png" ]]; then
+          cp -f "$src/preview.png" "$dst/"
+        elif [[ -f "$src/perview.png" ]]; then
+          cp -f "$src/perview.png" "$dst/"
+        else
+          echo "::error::preview.png (or perview.png) missing from the frontend checkout"
+          exit 1
+        fi
+
+        # The artifact only needs the built theme, not the npm dependency tree
+        # or git metadata.
+        rm -rf "$src/node_modules" "$src/.git"
+
+        echo "theme-dir=$(cd "$dst" && pwd)" >> "$GITHUB_OUTPUT"

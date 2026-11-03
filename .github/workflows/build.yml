@@ -1,0 +1,333 @@
+name: Build
+
+on:
+  push:
+    branches:
+      - main
+  pull_request:
+    branches:
+      - main
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: build-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  CARGO_TERM_COLOR: always
+  RUST_BACKTRACE: 1
+  CARGO_PROFILE_RELEASE_STRIP: symbols
+
+jobs:
+  lint:
+    name: Format and Clippy
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Rust
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt, clippy
+
+      - name: Cache Cargo
+        uses: Swatinem/rust-cache@v2
+
+      - name: Check formatting
+        run: cargo fmt --all -- --check
+
+      - name: Run Clippy
+        run: cargo clippy --workspace --all-targets --locked -- -D warnings
+
+  test:
+    name: Test
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Rust
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Cache Cargo
+        uses: Swatinem/rust-cache@v2
+
+      - name: Run tests
+        run: cargo test --workspace --locked
+
+  theme:
+    name: Build default theme
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Prepare komari-web
+        id: theme
+        uses: ./.github/actions/prepare-theme
+
+      - name: Set up Rust
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Cache Cargo
+        uses: Swatinem/rust-cache@v2
+        with:
+          key: theme
+
+      - name: Verify komari-web embeds the real theme
+        env:
+          KOMARI_DEFAULT_THEME_DIR: ${{ steps.theme.outputs.theme-dir }}
+        run: cargo test -p komari-web --locked
+
+      - name: Verify theme bytes are embedded
+        env:
+          KOMARI_DEFAULT_THEME_DIR: ${{ steps.theme.outputs.theme-dir }}
+        shell: bash
+        run: |
+          if [[ ! -f crates/komari-web/build.rs ]]; then
+            echo "::warning::komari-web build.rs not present (B14 not merged); skipping theme byte check"
+            exit 0
+          fi
+          rlib="$(
+            cargo build -p komari-web --release --locked --message-format=json |
+              python3 -c '
+          import json, sys
+          found = ""
+          for line in sys.stdin:
+              try:
+                  message = json.loads(line)
+              except json.JSONDecodeError:
+                  continue
+              if message.get("reason") != "compiler-artifact":
+                  continue
+              if message.get("target", {}).get("name") not in ("komari_web", "komari-web"):
+                  continue
+              for name in message.get("filenames", []):
+                  if name.endswith(".rlib"):
+                      found = name
+          if found:
+              print(found)
+          '
+          )"
+          marker="$(grep -oE 'assets/[A-Za-z0-9._-]+\.(js|css)' \
+            "$KOMARI_DEFAULT_THEME_DIR/dist/index.html" | head -n1 || true)"
+          if [[ -z "$marker" ]]; then
+            echo "::error::no asset reference found in dist/index.html"
+            exit 1
+          fi
+          if [[ -z "$rlib" ]]; then
+            echo "::error::komari-web rlib not found"
+            exit 1
+          fi
+          if ! grep -a -q "$marker" "$rlib"; then
+            echo "::error::theme asset $marker is not embedded in $rlib"
+            exit 1
+          fi
+
+      - name: Upload theme for the build matrix
+        uses: actions/upload-artifact@v4
+        with:
+          name: komari-theme
+          path: .komari-theme
+          if-no-files-found: error
+
+  build:
+    name: Build ${{ matrix.name }}
+    needs:
+      - lint
+      - test
+      - theme
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        # Go also shipped linux/386, linux/riscv64, windows/386 and
+        # windows/arm64; see docs/BUILDING.md for the intentional deviation.
+        include:
+          - name: linux-amd64
+            os: ubuntu-latest
+            target: x86_64-unknown-linux-musl
+            use_cross: true
+            extension: ""
+          - name: linux-arm64
+            os: ubuntu-latest
+            target: aarch64-unknown-linux-musl
+            use_cross: true
+            extension: ""
+          # macos-14 is Apple Silicon; both macOS targets can be built there
+          # because the Xcode SDK ships the x86_64 slice as well.
+          - name: darwin-amd64
+            os: macos-14
+            target: x86_64-apple-darwin
+            use_cross: false
+            extension: ""
+          - name: darwin-arm64
+            os: macos-14
+            target: aarch64-apple-darwin
+            use_cross: false
+            extension: ""
+          - name: windows-amd64
+            os: windows-latest
+            target: x86_64-pc-windows-msvc
+            use_cross: false
+            extension: ".exe"
+    env:
+      # Match the Go build workflow, which used the commit SHA for both values.
+      KOMARI_VERSION: ${{ github.sha }}
+      KOMARI_VERSION_HASH: ${{ github.sha }}
+      # Relative to crates/komari-web (B14 resolves relative paths there).
+      # This also works inside the cross container, where the repo is mounted
+      # at /project and a host-absolute path would not exist.
+      KOMARI_DEFAULT_THEME_DIR: ../../.komari-theme
+      TARGET: ${{ matrix.target }}
+      NAME: ${{ matrix.name }}
+      EXTENSION: ${{ matrix.extension }}
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Download default theme
+        uses: actions/download-artifact@v4
+        with:
+          name: komari-theme
+          path: .komari-theme
+
+      - name: Set up Rust
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: ${{ matrix.target }}
+
+      - name: Cache Cargo
+        uses: Swatinem/rust-cache@v2
+        with:
+          key: ${{ matrix.name }}
+
+      - name: Install cross
+        if: matrix.use_cross
+        uses: taiki-e/install-action@cross
+
+      - name: Build binary
+        shell: bash
+        run: |
+          # option_env! values are not part of Cargo's fingerprint.
+          touch crates/komari-cli/src/version.rs
+          if [[ "${{ matrix.use_cross }}" == "true" ]]; then
+            cross build --locked --release --workspace --target "${TARGET}"
+          else
+            cargo build --locked --release --workspace --target "${TARGET}"
+          fi
+          if [[ "${{ matrix.use_cross }}" != "true" && "${EXTENSION}" != ".exe" ]] \
+            && command -v strip >/dev/null 2>&1; then
+            strip "target/${TARGET}/release/komari"
+          fi
+
+      - name: Verify binary includes the embedded theme
+        if: matrix.name == 'linux-amd64'
+        shell: bash
+        run: |
+          if ! cargo tree -p komari-cli --locked | grep -q 'komari-web'; then
+            echo "::warning::komari-cli does not depend on komari-web yet (B09); skipping binary theme check"
+            exit 0
+          fi
+          marker="$(grep -oE 'assets/[A-Za-z0-9._-]+\.(js|css)' \
+            "$GITHUB_WORKSPACE/.komari-theme/dist/index.html" | head -n1 || true)"
+          if [[ -z "$marker" ]]; then
+            echo "::error::no asset reference found in dist/index.html"
+            exit 1
+          fi
+          if ! grep -a -q "$marker" "target/${TARGET}/release/komari"; then
+            echo "::error::komari binary does not contain theme asset $marker"
+            exit 1
+          fi
+
+      - name: Package artifact
+        shell: bash
+        run: |
+          mkdir -p dist
+          cp "target/${TARGET}/release/komari${EXTENSION}" "dist/komari-${NAME}${EXTENSION}"
+          # Portable checksum: coreutils/shasum availability differs on the
+          # Windows and macOS runners, but Python is present on all of them.
+          if command -v python3 >/dev/null 2>&1; then
+            PYTHON=python3
+          elif command -v python >/dev/null 2>&1; then
+            PYTHON=python
+          else
+            PYTHON=""
+          fi
+          if [[ -n "${PYTHON}" ]]; then
+            "${PYTHON}" - "dist/komari-${NAME}${EXTENSION}" "dist/komari-${NAME}.sha256" <<'PY'
+          import hashlib
+          import sys
+
+          src, dst = sys.argv[1], sys.argv[2]
+          with open(src, "rb") as handle:
+              digest = hashlib.sha256(handle.read()).hexdigest()
+          with open(dst, "w", encoding="utf-8") as handle:
+              handle.write(f"{digest}  {src.rsplit('/', 1)[-1]}\n")
+          PY
+          else
+            echo "::warning::python not found; skipping checksum for ${NAME}"
+          fi
+
+      - name: Upload artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: komari-${{ matrix.name }}
+          path: dist/*
+          if-no-files-found: error
+
+  docker:
+    name: Docker image (build only)
+    needs:
+      - lint
+      - test
+      - theme
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Download default theme
+        uses: actions/download-artifact@v4
+        with:
+          name: komari-theme
+          path: .komari-theme
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+
+      - name: Build image
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          load: true
+          platforms: linux/amd64
+          push: false
+          tags: komari:ci
+          build-args: |
+            KOMARI_VERSION=${{ github.sha }}
+            KOMARI_VERSION_HASH=${{ github.sha }}
+            KOMARI_THEME_SRC=.komari-theme
+            KOMARI_DEFAULT_THEME_DIR=/src/theme
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+
+      - name: Check image theme marker
+        shell: bash
+        run: |
+          marker="$(grep -oE 'assets/[A-Za-z0-9._-]+\.(js|css)' \
+            .komari-theme/dist/index.html | head -n1 || true)"
+          if [[ -z "$marker" ]]; then
+            echo "::warning::no theme asset marker found in .komari-theme/dist/index.html"
+            exit 0
+          fi
+          cid="$(docker create komari:ci)"
+          trap 'docker rm -f "$cid" >/dev/null 2>&1 || true' EXIT
+          docker cp "$cid:/usr/local/bin/komari" "$RUNNER_TEMP/komari-image"
+          if ! grep -a -q "$marker" "$RUNNER_TEMP/komari-image"; then
+            echo "::warning::komari-cli does not link komari-web yet (B09); the image has no UI"
+          fi
