@@ -33,14 +33,14 @@ RUN cargo chef prepare --recipe-path recipe.json
 FROM chef AS builder
 
 COPY --from=planner /src/recipe.json recipe.json
-RUN cargo chef cook --release --locked --recipe-path recipe.json --package komari-cli
 
 # Frontend theme source, relative to the build context. The default is B14's
 # committed placeholder; CI and release builds pass a real komari-web checkout.
+# Both copies are created before `cargo chef cook` so the dependency cook also
+# works if komari-cli gains a komari-web dependency later (B09).
 ARG KOMARI_THEME_SRC=crates/komari-web/defaultTheme
 COPY ${KOMARI_THEME_SRC}/ /src/theme/
-
-COPY . .
+COPY ${KOMARI_THEME_SRC}/ /src/crates/komari-web/defaultTheme/
 
 # B14's komari-web/build.rs reads KOMARI_DEFAULT_THEME_DIR at compile time and
 # embeds that directory with rust-embed. The default path exists after
@@ -49,6 +49,10 @@ COPY . .
 ARG KOMARI_DEFAULT_THEME_DIR=/src/crates/komari-web/defaultTheme
 ENV KOMARI_DEFAULT_THEME_DIR=${KOMARI_DEFAULT_THEME_DIR} \
     CARGO_PROFILE_RELEASE_STRIP=symbols
+
+RUN cargo chef cook --release --locked --recipe-path recipe.json --package komari-cli
+
+COPY . .
 
 # Version injection mirrors the Go release workflow's ldflags:
 #   -X .../utils.CurrentVersion  -> KOMARI_VERSION
