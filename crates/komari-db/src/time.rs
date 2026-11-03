@@ -195,12 +195,31 @@ impl LocalTime {
         Self::from_instant(value)
     }
 
+    /// Current time and `now + seconds`, both converted from the same absolute
+    /// instant. Use this instead of [`LocalTime::add_seconds`] when starting
+    /// from the clock: `Local::now()` retains the DST fold, so a session
+    /// created during the autumn fall-back expires one hour later correctly.
+    pub fn now_and_after(seconds: i64) -> (Self, Self) {
+        let duration = chrono::TimeDelta::try_seconds(seconds).unwrap_or_default();
+        if timezone_is_utc() {
+            let now = Utc::now();
+            (Self::from_instant(now), Self::from_instant(now + duration))
+        } else {
+            let now = Local::now();
+            (Self::from_instant(now), Self::from_instant(now + duration))
+        }
+    }
+
+    /// `now + seconds` in the application timezone.
+    pub fn now_plus_seconds(seconds: i64) -> Self {
+        Self::now_and_after(seconds).1
+    }
+
     /// Add an absolute duration in seconds and convert the result back to the
     /// application timezone's wall clock.
     ///
-    /// Adding to the absolute instant (instead of the naive wall clock) keeps
-    /// session expiry correct across DST transitions, matching Go's
-    /// `time.Now().Add(duration)`.
+    /// Note that a wall-clock value alone cannot represent both sides of a DST
+    /// fold. When starting from "now", prefer [`LocalTime::now_and_after`].
     pub fn add_seconds(self, seconds: i64) -> Self {
         if self.is_zero() {
             return self;

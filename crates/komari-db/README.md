@@ -114,9 +114,9 @@ Errors are defined by `DbError` (`thiserror`); lookups return
   otherwise;
 - `TZ` selects the application timezone (unset/empty means UTC, matching Go).
 - `LocalTime::from_instant` converts absolute date-times into the application
-  timezone (the equivalent of Go `FromTime` + `.In(GetAppLocation())`), and
-  `LocalTime::add_seconds` adds an absolute duration, so session expiry stays
-  correct across DST transitions.
+  timezone (the equivalent of Go `FromTime` + `.In(GetAppLocation())`);
+  `LocalTime::now_and_after` starts from the fold-aware `Local::now()` and adds
+  an absolute duration, so session expiry stays correct across DST transitions.
 
 `StringArray` stores a JSON array of strings, matching `models.StringArray`.
 Its zero value serializes as `null` (Go's nil slice) and both `null` and SQL

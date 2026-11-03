@@ -185,9 +185,46 @@ fn adding_seconds_uses_absolute_time() {
         3600
     );
 
+    let (now, later) = LocalTime::now_and_after(3600);
+    assert_eq!(later.timestamp().unwrap() - now.timestamp().unwrap(), 3600);
+
     let session = komari_db::models::Session::new("user", 3600, "ua", "127.0.0.1", "password");
     let difference = session.expires.timestamp().unwrap() - session.created_at.timestamp().unwrap();
-    assert!((3599..=3601).contains(&difference));
+    assert_eq!(difference, 3600);
+}
+
+#[test]
+fn autumn_fold_is_preserved_by_instant_conversion() {
+    if std::env::var("TZ").ok().as_deref() != Some("America/New_York") {
+        eprintln!("TZ is not America/New_York; skipping fall-back assertion");
+        return;
+    }
+
+    // 2026-11-01: 05:30 UTC = 01:30 EDT, 06:30 UTC = 01:30 EST.
+    let before = chrono::DateTime::parse_from_rfc3339("2026-11-01T05:30:00Z").unwrap();
+    let after = chrono::DateTime::parse_from_rfc3339("2026-11-01T06:30:00Z").unwrap();
+    let before_local = LocalTime::from_instant(before);
+    let after_local = LocalTime::from_instant(after);
+    assert_eq!(
+        before_local.to_storage_string(),
+        "2026-11-01 01:30:00.0000000"
+    );
+    assert_eq!(
+        after_local.to_storage_string(),
+        "2026-11-01 01:30:00.0000000"
+    );
+
+    // Adding one absolute hour to the EDT instant lands on the EST instant,
+    // whose wall clock is also 01:30 (the fold is retained).
+    let one_hour_later = LocalTime::from_instant(before + chrono::TimeDelta::hours(1));
+    assert_eq!(
+        one_hour_later.to_storage_string(),
+        after_local.to_storage_string()
+    );
+    // The source instants are one hour apart; the wall-clock LocalTime cannot
+    // distinguish the two 01:30 folds, which is why absolute arithmetic must
+    // happen before converting (as `now_and_after` does).
+    assert_eq!(after.timestamp() - before.timestamp(), 3600);
 }
 
 #[test]

@@ -30,8 +30,7 @@ impl Session {
         ip: impl Into<String>,
         login_method: impl Into<String>,
     ) -> Self {
-        let now = LocalTime::now();
-        let expires = now.add_seconds(expires_in_seconds);
+        let (now, expires) = LocalTime::now_and_after(expires_in_seconds);
         Self {
             uuid: user_uuid.into(),
             session: generate_random_string(32),
