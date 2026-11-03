@@ -68,6 +68,15 @@ provider rows and loads `o_auth_provider`) before serving requests.
 - `/api/records/load` rejects `hours` outside `±2_562_047` (the largest whole
   hour offset that fits in Go's `time.Duration`) with 400. Go silently wraps the
   duration for larger values.
+- `/api/public` persists missing defaults with `get_as_or`, matching Go's
+  `GetManyAs[config.Legacy]` write-back. One value differs: Rust stores the
+  `GetPublicInfo` description default (`Komari Monitor, a simple server
+  monitoring tool.`), while Go first writes the `Legacy` struct-tag default
+  (`A simple server monitor tool.`) and then reads it back. Subsequent calls in
+  both implementations return the stored value.
+- `client_ip` falls back to `ConnectInfo<SocketAddr>` after `X-Forwarded-For`
+  and `X-Real-IP`. The server assembly must use
+  `into_make_service_with_connect_info` to match Go's `RemoteAddr` fallback.
 - `/api/rpc2` and the admin API are separate tasks (B06/B07) and are not part of
   this router.
 - `/api/oauth_callback` binding uses `komari_oauth::AccountLinker::bind`, which
