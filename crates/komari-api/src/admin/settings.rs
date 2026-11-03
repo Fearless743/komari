@@ -8,9 +8,11 @@ use axum::extract::State;
 use axum::response::{IntoResponse, Response};
 use axum::routing::get;
 use komari_auth::RequireAdmin;
+use komari_config::keys;
+use komari_web::SiteMeta;
 use serde_json::Value;
 
-use super::{audit, bad_request, internal, parse_value};
+use super::{audit, bad_request, internal, ok, parse_value};
 use crate::response;
 use crate::state::ApiState;
 
@@ -51,6 +53,7 @@ pub(crate) async fn edit_settings(
     if let Err(error) = state.db.config().set_many(&values) {
         return internal(format!("Failed to update settings: {error}"));
     }
+    apply_side_effects(&state, &values).await;
 
     let mut message = String::from("update settings: ");
     for key in values.keys() {
@@ -61,5 +64,78 @@ pub(crate) async fn edit_settings(
         message.truncate(message.len() - 2);
     }
     audit(&state, &admin, &message, "info");
-    response::success(Value::Null).into_response()
+    ok()
+}
+
+/// Apply the runtime effects of the Go `config.Subscribe` callbacks.
+///
+/// The database write already succeeded; failures here are logged so the
+/// caller still gets a success response, matching Go's asynchronous reloads.
+async fn apply_side_effects(state: &ApiState, values: &HashMap<String, Value>) {
+    if values.contains_key(keys::DDNS_PROVIDER_KEY) || values.contains_key(keys::DDNS_ENABLED_KEY) {
+        if let Err(error) = state.ddns.initialize().await {
+            tracing::warn!(%error, "failed to reload DDNS provider after settings update");
+        }
+    }
+
+    if let Some(provider) = values.get(keys::OAUTH_PROVIDER_KEY).and_then(Value::as_str) {
+        let name = if provider.is_empty() || provider == "none" {
+            "github"
+        } else {
+            provider
+        };
+        match state.db.oauth().get(name) {
+            Ok(Some(row)) => {
+                if let Err(error) = komari_oauth::load_provider_global(name, &row.addition).await {
+                    tracing::warn!(%error, "failed to reload OAuth provider after settings update");
+                }
+            }
+            Ok(None) => {
+                tracing::warn!(provider = name, "OAuth provider row not found");
+            }
+            Err(error) => {
+                tracing::warn!(%error, "failed to read OAuth provider after settings update");
+            }
+        }
+    }
+
+    if values.contains_key(keys::GEO_IP_PROVIDER_KEY) {
+        if let Some(service) = state.geoip.as_ref() {
+            if let Err(error) = service.initialize().await {
+                tracing::warn!(%error, "failed to reload GeoIP provider after settings update");
+            }
+        }
+    }
+
+    if let Some(theme) = values.get(keys::THEME_KEY).and_then(Value::as_str) {
+        if let Err(error) = state.web.try_set_theme(theme) {
+            tracing::warn!(%error, theme, "failed to switch theme after settings update");
+        }
+    }
+
+    if values.contains_key(keys::SITENAME_KEY)
+        || values.contains_key(keys::DESCRIPTION_KEY)
+        || values.contains_key(keys::CUSTOM_HEAD_KEY)
+        || values.contains_key(keys::CUSTOM_BODY_KEY)
+    {
+        let mut meta = state.web.site_meta();
+        if let Some(value) = values.get(keys::SITENAME_KEY).and_then(Value::as_str) {
+            meta.sitename = value.to_owned();
+        }
+        if let Some(value) = values.get(keys::DESCRIPTION_KEY).and_then(Value::as_str) {
+            meta.description = value.to_owned();
+        }
+        if let Some(value) = values.get(keys::CUSTOM_HEAD_KEY).and_then(Value::as_str) {
+            meta.custom_head = value.to_owned();
+        }
+        if let Some(value) = values.get(keys::CUSTOM_BODY_KEY).and_then(Value::as_str) {
+            meta.custom_body = value.to_owned();
+        }
+        state.web.set_site_meta(SiteMeta {
+            sitename: meta.sitename,
+            description: meta.description,
+            custom_head: meta.custom_head,
+            custom_body: meta.custom_body,
+        });
+    }
 }
