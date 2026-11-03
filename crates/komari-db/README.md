@@ -133,6 +133,9 @@ real configuration values.
 - Legacy pre-1.1.4 single-row `configs` tables and the legacy `client_infos`
   merge are not converted automatically. The current key/value `configs`
   schema is supported; the legacy `Config` model is provided for reference.
+- The pre-1.0.2 migrations that moved OAuth/notification settings out of the
+  old `configs` columns are not re-run; databases from that era should be
+  opened once with the Go backend first.
 - `ConfigRepo::get_as<T>` uses serde's conversion rules. Values that need
   Go-style lossy numeric coercion (for example an integer stored as a JSON
   float) should be decoded as `f64` or converted by the caller.

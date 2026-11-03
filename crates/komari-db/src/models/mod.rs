@@ -32,6 +32,10 @@ pub use user::User;
 
 pub use client::Client;
 
+// The Go `models` package also exposes these two custom SQL types.
+pub use crate::json::StringArray;
+pub use crate::time::LocalTime;
+
 /// Implemented by models that can be built from a SQLite row using column names.
 pub trait FromRow: Sized {
     fn from_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<Self>;
