@@ -6,3 +6,18 @@ target/
 /data/
 *.log
 .DS_Store
+
+# Build/release output
+/dist/
+*.rs.bk
+
+# Frontend dependencies (web/dist is tracked via .gitkeep)
+web/node_modules/
+**/node_modules/
+
+# Downloaded GeoIP databases (stored under data/ at runtime)
+*.mmdb
+
+# Editor directories
+.idea/
+.vscode/
