@@ -12,10 +12,10 @@ itself.
 
 | Name | Go source | Behaviour |
 | --- | --- | --- |
-| `generic` | `utils/oauth/generic` | Generic OAuth2 user-info flow, plus optional OIDC discovery, JWKS and `id_token` validation |
+| `generic` | `utils/oauth/generic` | Generic OAuth2 user-info flow; optional OIDC discovery/JWKS/`id_token` validation when configured, otherwise `id_token` is ignored like Go |
 | `github` | `utils/oauth/github` | GitHub authorize/token/user endpoints; falls back to `/user/emails` when the profile has no public email |
-| `qq` | `utils/oauth/qq` | QQ aggregation login (`login.qjqq.cn` by default), `social_uid`/`openid`/`unionid` mapping and aggregation error codes |
-| `CloudflareAccess` | `utils/oauth/cloudflare` | Cloudflare Access JWT verification against the team's JWKS with `policy_aud` as audience |
+| `qq` | `utils/oauth/qq` | QQ aggregation login, strict `social_uid` subject, `openid`/`unionid` retained as metadata, aggregation error codes |
+| `CloudflareAccess` | `utils/oauth/cloudflare` | Cloudflare Access JWT from `Cf-Access-Jwt-Assertion`, verified against the team's JWKS with `policy_aud` as audience |
 
 The default endpoints, scopes and request parameters match the Go
 implementations:
@@ -25,13 +25,22 @@ implementations:
 * `github` uses `scope=user:email` and deliberately omits `redirect_uri`.
 * `qq` calls `{aggregation_url}/connect.php?act=login...` while building the
   URL and `act=callback` during the callback.
-* `CloudflareAccess` appends an 8-character `state` to the callback URI.
+* `CloudflareAccess` appends an 8-character `state` to the callback URI and
+  reads the access JWT from `Cf-Access-Jwt-Assertion` by default.
+* QQ stores `aggregation_url: ""` by default, matching Go's zero value. The
+  factory metadata still suggests `https://login.qjqq.cn` from the Go struct
+  tag.
 
 Optional fields that are not part of the Go structs are available for GitHub
 Enterprise and tests (for example `authorize_url`, `token_url`,
-`user_api_url`, `email_api_url` on GitHub, and `issuer`, `jwks_url`,
-`id_token_required`, `use_pkce`, `use_nonce` on `generic`). They are not
-listed in the factory metadata shown to the admin UI.
+`user_api_url`, `email_api_url` on GitHub; `issuer`, `jwks_url`,
+`id_token_required`, `use_pkce`, `use_nonce` on `generic`; and
+`allow_query_token` on `CloudflareAccess`). They are not listed in the factory
+metadata shown to the admin UI.
+
+`generic` requires a non-empty `user_id_field` (Go does too). For pure OIDC
+providers use `"sub"`. When `issuer`, `auth_url`, `token_url`,
+`user_info_url` and `jwks_url` are all configured, discovery is skipped.
 
 ## Quick start
 
@@ -95,7 +104,12 @@ use komari_oauth::{AccountLinker, SsoIdentity};
 let linker = AccountLinker::new(db);
 let identity = SsoIdentity::new("github", "12345");
 
-// Find or create a local account. New accounts get a random password.
+// Go-compatible login: fail with AccountNotBound (map to HTTP 401) when the
+// external identity has not been bound by an administrator.
+let user = linker.login(&identity)?;
+println!("{}", user.uuid);
+
+// Explicit opt-in self-service registration (not used by the Go login flow).
 let account = linker.find_or_create(&identity, Some("octocat"))?;
 println!("{}", account.session_user().uuid);
 
@@ -107,6 +121,10 @@ linker.bind(&account.user.uuid, &identity)?;
 
 Rules:
 
+* `login` is the Go-compatible path: an unknown identity returns
+  `OAuthError::AccountNotBound` and must not create a user.
+* `find_or_create` / `find_or_create_from_user` are explicit opt-in
+  registration helpers. New accounts get a random local password.
 * `bind` refuses an identity that already belongs to another account
   (`AlreadyBound`) and refuses to replace a different binding
   (`UserAlreadyBound`). `rebind` replaces only the target account's own
@@ -115,7 +133,8 @@ Rules:
 * `find_or_create_from_user` uses the provider username or email local part as
   the preferred local username and adds a numeric suffix on collision.
 * `OAuthAccount::session_user()` returns the fields needed to create a session
-  (`uuid`, `username`, `sso_type`, `sso_id`).
+  (`uuid`, `username`, `sso_type`, `sso_id`). Its `Debug` output omits the
+  password hash.
 
 ## Manager and database configuration
 
@@ -132,15 +151,30 @@ Rules:
 
 * `client_secret`, `app_key`, `access_token`, `refresh_token` and `id_token`
   values are replaced with `********` before any transport or response error is
-  returned. Provider configuration `Debug` implementations also mask secrets.
-* `TokenSet` has a custom `Debug` implementation that never prints tokens.
-* Redirect URIs must be absolute `http`/`https` URLs with a host, without a
-  fragment or embedded credentials.
+  returned. Redaction understands query/form values, JSON object keys and
+  nested JSON. Non-2xx JSON bodies retain only `error`/`error_description`/
+  `error_uri`/`message`/`msg`.
+* Provider raw payloads (`UserInfo::raw`, `OAuthUser::raw`, `TokenSet::raw`)
+  are not serialized, are omitted from `Debug`, and are recursively stripped
+  of token/secret keys before storage.
+* `TokenSet` never serializes or `Debug`-prints access/refresh/id tokens.
+  `AuthorizationRequest`, `Pkce`, `StateEntry` and `StateStore` hide state and
+  PKCE verifier values.
+* Redirect URIs must be absolute `https` URLs, or loopback `http`, with a host,
+  without a fragment or embedded credentials. API layers must additionally
+  bind the callback to the configured public URL with `RedirectPolicy` /
+  `validate_redirect_uri_for_base`; shape validation alone cannot reject
+  `evil.example`.
 * OIDC `id_token` signatures are verified with RS256/RS384/RS512 using `ring`.
-  `iss`, `aud`, `exp` and `nbf` are checked; a JWKS refresh is attempted once.
+  `iss`, `aud`, `exp` and `nbf` are checked. JWKS is refreshed only for an
+  unknown `kid`, at most once per 30 seconds; invalid signatures or claim
+  mismatches never trigger a refresh.
+* Cloudflare Access accepts only the `Cf-Access-Jwt-Assertion` header by
+  default. Set `allow_query_token: true` explicitly for non-browser clients.
 * QQ intentionally skips the cookie-vs-query state comparison because the
   aggregation platform does not preserve it, matching Go's
-  `providersSkipStateCheck`.
+  `providersSkipStateCheck`. Only `social_uid` is accepted as the subject;
+  `openid`/`unionid` alone are an error.
 
 ## Tests
 
@@ -149,20 +183,26 @@ cargo test -p komari-oauth
 cargo clippy -p komari-oauth --all-targets -- -D warnings
 ```
 
-The test suite covers factory metadata, authorization URL parameters for all
-four providers, mocked token/user-info exchanges, GitHub email fallback, QQ
-error codes, state mismatch and redirect mismatch, provider error callbacks,
-OIDC discovery/JWKS/id-token validation (including a wrong audience), Cloudflare
-JWT verification, PKCE, token refresh/expiry, secret redaction, and
-account creation/binding/duplicate-binding behaviour.
+The test suite covers factory metadata and defaults, authorization URL
+parameters for all four providers, mocked token/user-info exchanges, GitHub
+email fallback, QQ error codes and empty `social_uid`, state mismatch and
+redirect mismatch, provider error callbacks, OIDC discovery/JWKS/id-token
+validation (wrong audience, missing `id_token`, nonce mismatch, discovery
+skip), Cloudflare JWT verification and missing-header rejection, PKCE, token
+refresh/expiry, JSON-body and raw-payload secret redaction, JWKS refresh
+amplification, and account creation/binding/duplicate-binding/legacy-row/
+`rebind`/`AccountNotBound` behaviour.
 
 ## Known limitations
 
 * Only RS* JWTs are verified. ES256/EdDSA providers are not supported yet.
+* `generic` still requires `user_id_field`; pure OIDC users must set `"sub"`.
 * The generic provider does not implement the full OpenID Connect RP library
   surface (no userinfo-only OIDC session management, no token introspection or
   revocation).
 * QQ and Cloudflare Access do not expose a refresh-token flow; calling
   `refresh_token` returns `OAuthError::Unsupported`.
+* Cloudflare Access query-token support is an explicit extension
+  (`allow_query_token`), not Go behaviour.
 * `cargo test` uses local `axum` mock servers; no external network access is
   required.
