@@ -429,6 +429,8 @@ fn factory_exposes_builtin_providers() {
 #[tokio::test]
 async fn service_without_provider_degrades_to_empty() {
     let service = GeoIpService::new();
+    assert_eq!(service.provider_key(), "empty");
+    assert_eq!(service.provider_name().as_deref(), Some("EmptyProvider"));
     assert_eq!(service.lookup(ip("8.8.8.8")).await, GeoInfo::default());
     assert_eq!(service.lookup_str("not-an-ip").await, GeoInfo::default());
     assert!(matches!(
@@ -453,7 +455,7 @@ async fn disabled_geoip_uses_empty_provider() {
     service.initialize().await.expect("initialize");
 
     assert_eq!(service.provider_key(), "empty");
-    assert_eq!(service.provider_name(), None);
+    assert_eq!(service.provider_name().as_deref(), Some("EmptyProvider"));
     assert_eq!(service.lookup(ip("8.8.8.8")).await, GeoInfo::default());
 }
 
@@ -663,7 +665,7 @@ async fn service_initialize_falls_back_when_mmdb_download_fails() {
         .expect("initialize must not fail");
 
     assert_eq!(service.provider_key(), "empty");
-    assert_eq!(service.provider_name(), None);
+    assert_eq!(service.provider_name().as_deref(), Some("EmptyProvider"));
     assert_eq!(service.lookup(ip("8.8.8.8")).await, GeoInfo::default());
     assert!(!path.exists());
 }

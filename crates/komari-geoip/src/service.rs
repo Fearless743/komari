@@ -18,6 +18,7 @@ use crate::error::GeoIpError;
 use crate::factory::GeoIpFactory;
 use crate::model::GeoInfo;
 use crate::provider::GeoIpProvider;
+use crate::providers::empty::EmptyProvider;
 
 /// Default cache lifetime, matching Go's `48 * time.Hour`.
 pub const DEFAULT_CACHE_TTL: Duration = Duration::from_secs(48 * 60 * 60);
@@ -54,7 +55,7 @@ impl GeoIpService {
         Self {
             db: None,
             factory: Arc::new(GeoIpFactory::with_builtins()),
-            provider: RwLock::new(None),
+            provider: RwLock::new(Some(Arc::new(EmptyProvider))),
             provider_key: RwLock::new("empty".to_owned()),
             cache: Mutex::new(HashMap::new()),
             cache_ttl: DEFAULT_CACHE_TTL,
@@ -271,7 +272,9 @@ impl GeoIpService {
     }
 
     fn clear_provider(&self) {
-        *self.provider.write() = None;
+        // Go keeps `CurrentProvider` on EmptyProvider rather than leaving it
+        // unset, so `Name()` is always available.
+        *self.provider.write() = Some(Arc::new(EmptyProvider));
         *self.provider_key.write() = "empty".to_owned();
         self.cache.lock().clear();
     }
