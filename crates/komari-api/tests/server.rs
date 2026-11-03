@@ -427,6 +427,28 @@ async fn browser_websocket_rejects_guests_in_private_site_mode() {
 }
 
 #[tokio::test]
+async fn request_body_limit_is_enforced_before_auth() {
+    let dir = TempDir::new().expect("temp dir");
+    let config = ServerConfig {
+        body_limit_bytes: 16,
+        ..server_config(&dir)
+    };
+    let server = build(config, memory_db()).await;
+    let running = start(server).await;
+    let client = http_client();
+
+    let response = client
+        .post(format!("{}/api/clients/register", running.base))
+        .body("x".repeat(1024))
+        .send()
+        .await
+        .expect("oversized request");
+    assert_eq!(response.status(), reqwest::StatusCode::PAYLOAD_TOO_LARGE);
+
+    running.stop().await;
+}
+
+#[tokio::test]
 async fn cors_headers_and_options_are_dynamic() {
     let dir = TempDir::new().expect("temp dir");
     let db = memory_db();

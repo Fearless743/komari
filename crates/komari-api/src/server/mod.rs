@@ -42,7 +42,7 @@ use std::sync::Arc;
 
 use anyhow::{Context, Result};
 use axum::Router;
-use axum::extract::{DefaultBodyLimit, Request, State};
+use axum::extract::{Request, State};
 use axum::http::{HeaderValue, Method, StatusCode, header};
 use axum::middleware::{self, Next};
 use axum::response::{IntoResponse, Response};
@@ -54,6 +54,7 @@ use komari_ddns::DdnsService;
 use komari_geoip::GeoIpService;
 use komari_web::WebAssets;
 use tokio::net::TcpListener;
+use tower_http::limit::RequestBodyLimitLayer;
 use tower_http::trace::{DefaultMakeSpan, DefaultOnResponse, TraceLayer};
 use tracing::{Level, error, info, warn};
 
@@ -294,7 +295,10 @@ impl ServerBuilder {
                     .on_response(DefaultOnResponse::new().level(Level::INFO)),
             );
         }
-        router = router.layer(DefaultBodyLimit::max(config.body_limit_bytes));
+        // A real body-stream limit must wrap `AuthLayer`, which buffers
+        // non-GET bodies before extractors run. `DefaultBodyLimit` alone would
+        // be bypassed by that buffering.
+        router = router.layer(RequestBodyLimitLayer::new(config.body_limit_bytes));
 
         let background =
             BackgroundTasks::start(&state, assets.clone(), ddns.clone(), &config.background);
