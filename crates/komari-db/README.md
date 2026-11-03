@@ -104,6 +104,12 @@ let sitename: Option<String> = db.config().get_as("sitename")?;
 Errors are defined by `DbError` (`thiserror`); lookups return
 `Option<T>` and `require*` helpers produce `DbError::NotFound`.
 
+`notifications().load_set_last_notified(id, at)` is a narrow cross-crate helper
+added for `komari-notify` (B07) to mirror Go's `updateLastNotified`, which runs
+`UPDATE load_notifications SET last_notified = ?`. It updates only that column,
+does not change the schema, and leaves the existing B02 `load_update`/`load_save`
+interfaces untouched.
+
 ## Time and JSON compatibility
 
 `LocalTime` mirrors `models/UTCTime.go` exactly:
