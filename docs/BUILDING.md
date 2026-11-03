@@ -56,16 +56,16 @@ directory must contain:
 A real frontend build can be produced with:
 
 ```sh
-git clone https://github.com/Fearless743/komari-web
-(cd komari-web && npm install && npm run build)
+git clone https://github.com/Fearless743/komari-web .komari-web-src
+(cd .komari-web-src && npm install && npm run build)
 
 # The current Vite config writes to public/defaultTheme/dist; collect the
 # dist output and the metadata into one directory.
-mkdir -p defaultTheme
-cp -a public/defaultTheme/dist defaultTheme/
-cp komari-web/komari-theme.json komari-web/preview.png defaultTheme/
+mkdir -p .komari-theme
+cp -a public/defaultTheme/dist .komari-theme/
+cp .komari-web-src/komari-theme.json .komari-web-src/preview.png .komari-theme/
 
-KOMARI_DEFAULT_THEME_DIR="$PWD/defaultTheme" cargo build --release --workspace
+KOMARI_DEFAULT_THEME_DIR="$PWD/.komari-theme" cargo build --release --workspace
 ```
 
 If a checkout already has `dist/` at its root (the layout described by the B14
@@ -78,10 +78,12 @@ KOMARI_DEFAULT_THEME_DIR=/path/to/defaultTheme ./scripts/build.sh
 make release DEFAULT_THEME_DIR=/path/to/defaultTheme
 ```
 
-Relative paths passed to `scripts/build.sh`/`make` are resolved to absolute
-paths because B14 resolves relative paths against `crates/komari-web`, not the
-repository root. The embedded theme is fixed for the lifetime of the binary;
-changing it requires a rebuild.
+Relative paths passed to `scripts/build.sh`/`make` are resolved against the
+repository root for native builds. For Linux musl cross builds the script
+passes a path relative to `crates/komari-web` (for example
+`../../.komari-theme`) so the file is visible inside the `cross` container;
+an absolute host path is not. The embedded theme is fixed for the lifetime of
+the binary; changing it requires a rebuild.
 
 The placeholder is **not** a usable UI. Release builds and the CI matrix must
 set `KOMARI_DEFAULT_THEME_DIR`; CI clones and builds
@@ -147,14 +149,15 @@ that file first.
 | `CARGO` | `cargo` | Cargo executable |
 
 Release builds set `CARGO_PROFILE_RELEASE_STRIP=symbols`, equivalent to the Go
-release workflow's `-ldflags "-s -w"`. The build script, Dockerfile and CI also
-run `strip` explicitly on non-Windows binaries so `cross`/musl and custom
-linkers are covered. Set `CARGO_PROFILE_RELEASE_STRIP=none` to keep symbols
-(the explicit `strip` step still applies).
+release workflow's `-ldflags "-s -w"`. The Dockerfile and native CI builds also
+run the host `strip` explicitly. Cross builds do **not** run the host `strip`
+(the host binutils cannot strip a foreign-architecture binary) and rely on
+`CARGO_PROFILE_RELEASE_STRIP`. Set it to `none` to keep symbols.
 
-When `TARGET` is not the host triple, the script requires `cross` (or a custom
-`CROSS` executable) and fails with installation instructions otherwise. Native
-runners are recommended for macOS and Windows targets.
+Only Linux musl targets (`*-unknown-linux-musl`) use `cross` when `TARGET`
+differs from the host. Same-OS cross builds (for example macOS x86_64 on Apple
+Silicon) use the native cargo/linker, matching the CI matrix. A `CROSS`
+override can force `cargo` or another runner.
 
 ## Cross-compilation
 
@@ -168,9 +171,12 @@ Release artifacts use these targets:
 | `komari-darwin-arm64` | `aarch64-apple-darwin` | macOS 14 |
 | `komari-windows-amd64.exe` | `x86_64-pc-windows-msvc` | Windows Server |
 
-Linux binaries are statically linked against musl, mirroring the Go release
-builds. `cross` (https://github.com/cross-rs/cross) supplies the musl
-toolchain and runs the build in a container:
+The Rust Linux release artifacts target musl so they are self-contained. This
+is not identical to the Go release workflow: Go's `release.yml` built
+linux/amd64 with CGO/glibc, other Linux architectures with CGO disabled, and
+used Zig/musl only for the Docker image. `cross`
+(https://github.com/cross-rs/cross) supplies the musl toolchain and runs the
+build in a container:
 
 ```sh
 cargo install cross --locked
@@ -203,9 +209,11 @@ The `Dockerfile` is a multi-stage build:
 
 1. `chef` installs `cargo-chef` (pinned to `0.1.78`).
 2. `planner` records the dependency recipe from `Cargo.toml` / `Cargo.lock`.
-3. `builder` caches third-party crates, copies the theme source to
-   `/src/theme`, compiles the **workspace** in release mode with
-   `KOMARI_DEFAULT_THEME_DIR`, and strips symbols.
+3. `builder` cooks dependencies against the stable committed placeholder, then
+   copies the requested theme source to `/src/theme`, compiles the
+   **workspace** in release mode with `KOMARI_DEFAULT_THEME_DIR=/src/theme`,
+   and strips symbols. Theme changes therefore do not invalidate the dependency
+   cook layer.
 4. `runtime` is `debian:bookworm-slim` with `ca-certificates`, `tzdata`, a
    non-root user (uid/gid `10001`) and the `/app/data` volume.
 
@@ -214,7 +222,6 @@ docker build -t komari:local .
 
 docker build \
   --build-arg KOMARI_THEME_SRC=.komari-theme \
-  --build-arg KOMARI_DEFAULT_THEME_DIR=/src/theme \
   --build-arg KOMARI_VERSION=1.2.3 \
   --build-arg KOMARI_VERSION_HASH="$(git rev-parse HEAD)" \
   -t komari:local .
@@ -233,12 +240,12 @@ docker run -d --name komari \
 | `KOMARI_VERSION` | `dev` | Version baked into the binary and OCI labels |
 | `KOMARI_VERSION_HASH` | `unknown` | Commit hash baked into the binary and labels |
 | `KOMARI_THEME_SRC` | `crates/komari-web/defaultTheme` | Theme source directory, relative to the build context |
-| `KOMARI_DEFAULT_THEME_DIR` | `/src/crates/komari-web/defaultTheme` | Absolute path passed to B14's `build.rs`; use `/src/theme` for a custom source |
+| `KOMARI_DEFAULT_THEME_DIR` | `/src/theme` | Absolute path passed to B14's `build.rs` |
 
-`KOMARI_THEME_SRC` is copied to `/src/theme` inside the builder. The default
-`KOMARI_DEFAULT_THEME_DIR` points at B14's committed placeholder after
-`COPY . .`; when supplying a real frontend through `KOMARI_THEME_SRC`, also set
-`KOMARI_DEFAULT_THEME_DIR=/src/theme`.
+`KOMARI_THEME_SRC` is copied to `/src/theme` inside the builder and
+`KOMARI_DEFAULT_THEME_DIR` defaults to that single copy, so supplying a real
+frontend only requires `KOMARI_THEME_SRC`. The dependency cook uses the stable
+committed placeholder before the real theme is copied.
 
 ### Runtime configuration
 
@@ -269,9 +276,7 @@ docker compose logs -f komari
 To build the image with a real frontend through Compose:
 
 ```sh
-KOMARI_THEME_SRC=.komari-theme \
-KOMARI_DEFAULT_THEME_DIR=/src/theme \
-docker compose build
+KOMARI_THEME_SRC=.komari-theme docker compose build
 ```
 
 The container runs as uid/gid `10001`. A named volume inherits that ownership
@@ -313,13 +318,18 @@ manually with a tag):
 - `version` checks out the tag and records `git rev-parse HEAD`; both the
   binaries and the Docker image use that commit hash, not the branch
   `github.sha`.
-- `theme` builds and validates the real frontend once.
+- `theme` builds and validates the real frontend once and **fails** if B14's
+  `crates/komari-web/build.rs` or the embedded theme bytes are missing.
 - `build` builds the matrix with `KOMARI_VERSION=<tag>` and
   `KOMARI_VERSION_HASH=<checked-out commit>`, then uploads every asset to the
-  release with `gh release upload --clobber`.
-- `docker` publishes a multi-arch (`linux/amd64`, `linux/arm64`) image to
-  `ghcr.io/<repository>` tagged with the release tag and `latest`, using the
-  same theme artifact and build arguments.
+  release with `gh release upload --clobber`. The `linux-amd64` job **fails**
+  if `komari-cli` does not depend on `komari-web`, because the release would
+  otherwise ship without a UI; this is a hard prerequisite on the B09 HTTP
+  integration.
+- `docker` builds an amd64 image for verification and **fails** if the binary
+  inside the image does not contain the theme asset marker, then publishes a
+  multi-arch (`linux/amd64`, `linux/arm64`) image to `ghcr.io/<repository>`
+  tagged with the release tag and `latest`.
 
 ### Release checklist
 
@@ -341,10 +351,15 @@ manually with a tag):
   `cargo clean -p komari-cli` before `cargo build`.
 - **`cross` fails to start.** It needs a working Docker daemon. For a local
   Linux arm64 build without Docker, install the musl toolchain or build on an
-  arm64 host; macOS/Windows targets should use native runners.
+  arm64 host; macOS/Windows targets use native cargo on native runners, not
+  `cross`.
+- **Cross build cannot read the theme.** Pass a theme directory inside the
+  repository (for example `.komari-theme`) so the script can hand B14 a
+  path relative to `crates/komari-web`; absolute host paths do not exist
+  inside the `cross` container.
 - **Docker build cannot find the theme source.** The default
-  `crates/komari-web/defaultTheme` requires B14 to be merged; otherwise pass
-  `--build-arg KOMARI_THEME_SRC=<existing-dir>` and
-  `--build-arg KOMARI_DEFAULT_THEME_DIR=/src/theme`.
+  `crates/komari-web/defaultTheme` is committed by B14. To use another theme,
+  pass only `--build-arg KOMARI_THEME_SRC=<existing-dir>`;
+  `KOMARI_DEFAULT_THEME_DIR` already defaults to the single `/src/theme` copy.
 - **SQLite permission denied with a bind mount.** The image runs as uid 10001;
   `chown -R 10001:10001 ./data` or use the named volume.
