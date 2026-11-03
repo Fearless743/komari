@@ -171,37 +171,26 @@ fn migrating_a_copy_of_the_reference_database_preserves_data() {
 
     let dir = TempDir::new("reference-copy");
     let copy = dir.join("komari.db");
-    // VACUUM INTO produces a transactionally consistent snapshot including
-    // any WAL content, unlike copying the main file alone.
-    let copied_with_vacuum = {
+    // Use SQLite's online backup API: it produces a transactionally consistent
+    // snapshot (including WAL content) and must succeed for the test to run.
+    {
         let source = Db::open_read_only(&path).unwrap();
-        let destination = copy.to_string_lossy().into_owned();
+        let mut destination = rusqlite::Connection::open(&copy).expect("create snapshot file");
         source
             .with_connection(|conn| {
-                conn.execute("VACUUM INTO ?1", [destination.as_str()])?;
+                let backup = rusqlite::backup::Backup::new(conn, &mut destination)?;
+                backup.run_to_completion(64, std::time::Duration::from_millis(0), None)?;
                 Ok(())
             })
-            .is_ok()
-    };
-    if !copied_with_vacuum {
-        // Fallback for SQLite builds without VACUUM INTO: copy the database
-        // and its WAL sidecars.
-        std::fs::copy(&path, &copy).expect("copy reference database");
-        for suffix in ["-wal", "-shm"] {
-            let source = format!("{path}{suffix}");
-            if Path::new(&source).exists() {
-                std::fs::copy(&source, format!("{}{suffix}", copy.display()))
-                    .expect("copy sqlite sidecar");
-            }
-        }
+            .expect("sqlite backup API must succeed");
     }
 
     // The snapshot must already match the source before migration runs.
     let source = Db::open_read_only(&path).unwrap();
     let snapshot = Db::open_read_only(&copy).unwrap();
     assert_eq!(
-        source.config().count().unwrap(),
-        snapshot.config().count().unwrap()
+        source.config().get_all().unwrap(),
+        snapshot.config().get_all().unwrap()
     );
     assert_eq!(
         source.accounts().count().unwrap(),
@@ -213,6 +202,7 @@ fn migrating_a_copy_of_the_reference_database_preserves_data() {
     );
 
     let db = Db::open(&copy).expect("open copied database");
+    let config_before = db.config().get_all().unwrap();
     let before = db.config().count().unwrap();
     let users_before = db.accounts().count().unwrap();
     let sessions_before = db.sessions().count().unwrap();
@@ -225,10 +215,7 @@ fn migrating_a_copy_of_the_reference_database_preserves_data() {
     assert_eq!(db.accounts().count().unwrap(), users_before);
     assert_eq!(db.sessions().count().unwrap(), sessions_before);
     assert!(db.schema_is_current().unwrap());
-    if before > 0 {
-        // Every configuration row is still present and readable.
-        assert_eq!(db.config().get_all().unwrap().len(), before as usize);
-    }
+    assert_eq!(db.config().get_all().unwrap(), config_before);
 
     // New writes still work on the upgraded copy.
     let client = db.clients().create_named("compat-node").unwrap();
