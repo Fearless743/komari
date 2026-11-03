@@ -250,6 +250,7 @@ impl GlobalArgs {
             allow_cors: self.allow_cors,
             enable_cloudflared: self.enable_cloudflared,
             ws_disable_origin: self.ws_disable_origin,
+            body_limit: self.body_limit,
         })
     }
 }
