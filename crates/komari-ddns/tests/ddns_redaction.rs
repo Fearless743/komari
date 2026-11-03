@@ -97,6 +97,13 @@ fn explicit_sensitive_field_list_is_honoured() {
         &["secret"],
     );
     assert_eq!(redacted, json!({"keep": "visible"}));
+
+    let redacted = redact_addition_with_fields(
+        "webhook",
+        r#"{"url":"https://hooks.example.com/path-secret","headers":"header-secret","method":"POST"}"#,
+        &["headers"],
+    );
+    assert_eq!(redacted, json!({"method": "POST"}));
 }
 
 #[test]

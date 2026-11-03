@@ -31,18 +31,22 @@ pub fn redact_addition(provider_name: &str, addition: &str) -> Value {
 
 /// Redact a configuration using an explicit sensitive-field list.
 ///
-/// This is useful for custom registries and tests.
+/// This is useful for custom registries and tests. Webhook URLs are always
+/// removed because their path/query string may contain provider tokens even
+/// when the caller's field list omits `url`.
 pub fn redact_addition_with_fields(
     provider_name: &str,
     addition: &str,
     sensitive_fields: &[&str],
 ) -> Value {
-    let _ = provider_name;
     let Ok(Value::Object(mut configuration)) = serde_json::from_str::<Value>(addition) else {
         return Value::Object(Map::new());
     };
     for field in sensitive_fields {
         configuration.remove(*field);
+    }
+    if provider_name == "webhook" {
+        configuration.remove("url");
     }
     Value::Object(configuration)
 }
