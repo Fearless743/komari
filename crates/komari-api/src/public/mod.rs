@@ -10,6 +10,7 @@
 
 mod login;
 mod nodes;
+mod records;
 mod settings;
 mod version;
 
@@ -59,6 +60,8 @@ pub fn public_router() -> Router<ApiState> {
         .route("/api/me", get(login::get_me))
         .route("/api/login", post(login::login))
         .route("/api/logout", get(login::logout))
+        .route("/api/recent/{uuid}", get(records::get_recent))
+        .route("/api/records/load", get(records::get_records))
 }
 
 /// Public routes with state, including the private-site guard.
