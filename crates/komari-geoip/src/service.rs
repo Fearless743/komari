@@ -22,6 +22,9 @@ use crate::provider::GeoIpProvider;
 /// Default cache lifetime, matching Go's `48 * time.Hour`.
 pub const DEFAULT_CACHE_TTL: Duration = Duration::from_secs(48 * 60 * 60);
 
+/// Upper bound on cached lookups so long-running instances stay bounded.
+pub const DEFAULT_CACHE_CAPACITY: usize = 10_000;
+
 #[derive(Clone)]
 struct CacheEntry {
     stored_at: Instant,
@@ -36,6 +39,7 @@ pub struct GeoIpService {
     provider_key: RwLock<String>,
     cache: Mutex<HashMap<String, CacheEntry>>,
     cache_ttl: Duration,
+    cache_capacity: usize,
 }
 
 impl Default for GeoIpService {
@@ -54,6 +58,7 @@ impl GeoIpService {
             provider_key: RwLock::new("empty".to_owned()),
             cache: Mutex::new(HashMap::new()),
             cache_ttl: DEFAULT_CACHE_TTL,
+            cache_capacity: DEFAULT_CACHE_CAPACITY,
         }
     }
 
@@ -73,6 +78,12 @@ impl GeoIpService {
     /// Override the cache lifetime.
     pub fn with_cache_ttl(mut self, ttl: Duration) -> Self {
         self.cache_ttl = ttl;
+        self
+    }
+
+    /// Override the maximum number of cached lookups. Zero disables caching.
+    pub fn with_cache_capacity(mut self, capacity: usize) -> Self {
+        self.cache_capacity = capacity;
         self
     }
 
@@ -170,13 +181,7 @@ impl GeoIpService {
         }
 
         let info = provider.get_geo_info(ip).await?;
-        self.cache.lock().insert(
-            cache_key,
-            CacheEntry {
-                stored_at: Instant::now(),
-                info: info.clone(),
-            },
-        );
+        self.store(cache_key, info.clone());
         Ok(info)
     }
 
@@ -212,18 +217,50 @@ impl GeoIpService {
         Ok(())
     }
 
-    /// Number of cached lookups (including expired entries not yet evicted).
+    /// Number of live cached lookups. Expired entries are evicted while
+    /// counting.
     pub fn cache_len(&self) -> usize {
-        self.cache.lock().len()
+        let mut cache = self.cache.lock();
+        cache.retain(|_, entry| entry.stored_at.elapsed() <= self.cache_ttl);
+        cache.len()
     }
 
     fn cached(&self, key: &str) -> Option<GeoInfo> {
-        let cache = self.cache.lock();
-        let entry = cache.get(key)?;
-        if entry.stored_at.elapsed() > self.cache_ttl {
-            return None;
+        let mut cache = self.cache.lock();
+        if let Some(entry) = cache.get(key) {
+            if entry.stored_at.elapsed() <= self.cache_ttl {
+                return Some(entry.info.clone());
+            }
         }
-        Some(entry.info.clone())
+        cache.remove(key);
+        None
+    }
+
+    fn store(&self, key: String, info: GeoInfo) {
+        if self.cache_capacity == 0 {
+            return;
+        }
+        let mut cache = self.cache.lock();
+        if cache.len() >= self.cache_capacity {
+            cache.retain(|_, entry| entry.stored_at.elapsed() <= self.cache_ttl);
+        }
+        while cache.len() >= self.cache_capacity {
+            let oldest = cache
+                .iter()
+                .min_by_key(|(_, entry)| entry.stored_at)
+                .map(|(key, _)| key.clone());
+            let Some(oldest) = oldest else {
+                break;
+            };
+            cache.remove(&oldest);
+        }
+        cache.insert(
+            key,
+            CacheEntry {
+                stored_at: Instant::now(),
+                info,
+            },
+        );
     }
 
     fn clear_provider(&self) {

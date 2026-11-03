@@ -3,7 +3,7 @@ mod support;
 use std::net::IpAddr;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicUsize, Ordering};
-use std::time::{SystemTime, UNIX_EPOCH};
+use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use async_trait::async_trait;
 use komari_config::keys::{GEO_IP_ENABLED_KEY, GEO_IP_PROVIDER_KEY};
@@ -473,6 +473,77 @@ async fn service_caches_lookups_and_flushes_on_database_update() {
     assert_eq!(service.cache_len(), 0);
     let _ = service.lookup(ip("8.8.8.8")).await;
     assert_eq!(calls.load(Ordering::SeqCst), 2);
+}
+
+#[tokio::test]
+async fn cache_expires_and_reinvokes_provider() {
+    let db = database();
+    db.config().set(GEO_IP_ENABLED_KEY, &true).expect("enable");
+    db.config()
+        .set(GEO_IP_PROVIDER_KEY, "counting")
+        .expect("provider");
+
+    let calls = Arc::new(AtomicUsize::new(0));
+    let factory = GeoIpFactory::new();
+    let constructor_calls = Arc::clone(&calls);
+    factory.register_provider(
+        "counting",
+        Arc::new(move || {
+            Ok(Box::new(CountingProvider {
+                calls: Arc::clone(&constructor_calls),
+            }) as Box<_>)
+        }),
+    );
+
+    let service = GeoIpService::new()
+        .with_factory(factory)
+        .with_database(Arc::clone(&db))
+        .with_cache_ttl(Duration::from_millis(10));
+    service.initialize().await.expect("initialize");
+
+    let _ = service.lookup(ip("8.8.8.8")).await;
+    assert_eq!(service.cache_len(), 1);
+    tokio::time::sleep(Duration::from_millis(30)).await;
+    assert_eq!(service.cache_len(), 0);
+
+    let _ = service.lookup(ip("8.8.8.8")).await;
+    assert_eq!(calls.load(Ordering::SeqCst), 2);
+}
+
+#[tokio::test]
+async fn cache_capacity_evicts_old_entries() {
+    let db = database();
+    db.config().set(GEO_IP_ENABLED_KEY, &true).expect("enable");
+    db.config()
+        .set(GEO_IP_PROVIDER_KEY, "counting")
+        .expect("provider");
+
+    let calls = Arc::new(AtomicUsize::new(0));
+    let factory = GeoIpFactory::new();
+    let constructor_calls = Arc::clone(&calls);
+    factory.register_provider(
+        "counting",
+        Arc::new(move || {
+            Ok(Box::new(CountingProvider {
+                calls: Arc::clone(&constructor_calls),
+            }) as Box<_>)
+        }),
+    );
+
+    let service = GeoIpService::new()
+        .with_factory(factory)
+        .with_database(Arc::clone(&db))
+        .with_cache_capacity(2);
+    service.initialize().await.expect("initialize");
+
+    for address in ["8.8.8.8", "1.1.1.1", "9.9.9.9"] {
+        let _ = service.lookup(ip(address)).await;
+    }
+    assert_eq!(service.cache_len(), 2);
+    assert_eq!(calls.load(Ordering::SeqCst), 3);
+
+    let _ = service.lookup(ip("8.8.8.8")).await;
+    assert_eq!(calls.load(Ordering::SeqCst), 4);
 }
 
 #[tokio::test]
