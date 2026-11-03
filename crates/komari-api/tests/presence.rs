@@ -1,6 +1,7 @@
 mod common;
 
 use std::sync::Arc;
+use std::thread;
 use std::time::Duration;
 
 use komari_api::{ClientEventKind, ManualClock, PresenceSource, PresenceTracker, WsHub};
@@ -84,4 +85,36 @@ fn hub_presence_merge_and_clear() {
 
     clock.advance(60_000);
     assert!(!hub.is_online("post-only"));
+}
+
+#[test]
+fn concurrent_refreshes_keep_one_session_and_one_expiry() {
+    let (clock, hub, presence) = tracker();
+    let presence = Arc::new(presence);
+    let mut events = hub.subscribe();
+
+    let handles: Vec<_> = (0..8)
+        .map(|_| {
+            let presence = Arc::clone(&presence);
+            thread::spawn(move || {
+                for _ in 0..100 {
+                    presence.refresh("client-1");
+                }
+            })
+        })
+        .collect();
+    for handle in handles {
+        handle.join().expect("refresh thread");
+    }
+
+    assert_eq!(presence.active_count(), 1);
+    assert!(hub.is_online("client-1"));
+    let online_events = std::iter::from_fn(|| events.try_recv().ok()).count();
+    assert_eq!(online_events, 1);
+
+    clock.advance(11_000);
+    let expired = presence.expire_due();
+    assert_eq!(expired.len(), 1);
+    let offline_events = std::iter::from_fn(|| events.try_recv().ok()).count();
+    assert_eq!(offline_events, 1);
 }
