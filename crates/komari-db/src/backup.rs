@@ -1084,7 +1084,7 @@ fn markup_content() -> String {
         "此文件为 Komari 备份标记文件，请勿删除。\n\
          This is a Komari backup markup file, please do not delete.\n\n\
          备份时间 / Backup Time: {}",
-        chrono::Local::now().to_rfc3339_opts(chrono::SecondsFormat::Secs, false)
+        chrono::Local::now().to_rfc3339_opts(chrono::SecondsFormat::Secs, true)
     )
 }
 
