@@ -544,9 +544,17 @@ pub async fn clients_ws(State(state): State<ApiState>, request: Request) -> Resp
             .expect("static 403 response is valid");
     }
 
-    // Go only treats a valid session cookie as a login. API keys and agent
-    // tokens do not unlock hidden clients.
-    let is_login = context.role == Role::Admin && context.session_token.is_some();
+    // Go independently reads the `session_token` cookie. An API key in the
+    // Authorization header must not change hidden-client visibility, even when
+    // it is sent together with a valid session cookie.
+    let is_login = cookie_value(&parts.headers, komari_auth::SESSION_COOKIE_NAME)
+        .filter(|token| !token.is_empty())
+        .is_some_and(|token| {
+            komari_auth::validate_session(&state.db, &token)
+                .ok()
+                .flatten()
+                .is_some()
+        });
     let hidden = if is_login {
         HashSet::new()
     } else {

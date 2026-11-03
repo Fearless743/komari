@@ -465,6 +465,62 @@ async fn browser_websocket_filters_hidden_clients_for_guests() {
 }
 
 #[tokio::test]
+async fn browser_websocket_reads_the_session_cookie_independently_of_bearer() {
+    let dir = TempDir::new().expect("temp dir");
+    let db = memory_db();
+    db.config()
+        .set("api_key", &"0123456789abcdef")
+        .expect("api key");
+    let hidden = db.clients().create_named("hidden").expect("hidden");
+    db.clients()
+        .patch(
+            &hidden.uuid,
+            &ClientPatch {
+                hidden: Some(true),
+                ..ClientPatch::default()
+            },
+        )
+        .expect("hide client");
+    let server = build(server_config(&dir), db).await;
+    let state = server.state().clone();
+    state.presence.refresh(&hidden.uuid);
+    state.hub.set_latest_report(&hidden.uuid, Report::default());
+    let session = create_admin_session(&state.db);
+    let running = start(server).await;
+
+    let mut request = format!("ws://{}/api/clients", running.address)
+        .into_client_request()
+        .expect("request");
+    request.headers_mut().insert(
+        ORIGIN,
+        HeaderValue::from_str(&format!("http://{}", running.address)).expect("origin"),
+    );
+    request.headers_mut().insert(
+        COOKIE,
+        HeaderValue::from_str(&format!("session_token={session}")).expect("cookie"),
+    );
+    request.headers_mut().insert(
+        "authorization",
+        HeaderValue::from_static("Bearer 0123456789abcdef"),
+    );
+    let (mut socket, _) = tokio_tungstenite::connect_async(request)
+        .await
+        .expect("handshake");
+    socket
+        .send(Message::Text("get".into()))
+        .await
+        .expect("send get");
+    let snapshot = next_json(&mut socket).await;
+    assert!(
+        snapshot["data"]["data"][hidden.uuid.as_str()].is_object(),
+        "{snapshot}"
+    );
+    socket.close(None).await.expect("close");
+
+    running.stop().await;
+}
+
+#[tokio::test]
 async fn browser_websocket_rejects_guests_in_private_site_mode() {
     let dir = TempDir::new().expect("temp dir");
     let db = memory_db();
