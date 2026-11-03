@@ -1,4 +1,24 @@
-//! `komari-oauth` crate.
+//! Core OAuth2/OIDC building blocks for Komari.
 //!
-//! Business logic is added by follow-up tasks; this crate is intentionally a
-//! minimal placeholder so the workspace layout is stable.
+//! This commit introduces the provider trait, typed errors, state/PKCE
+//! handling, redirect URI validation and JWT/JWKS verification. The built-in
+//! providers, factory and account linker are added in the next commit.
+
+pub mod accounts;
+pub mod error;
+pub mod http;
+pub mod jwt;
+pub mod provider;
+pub mod redirect;
+pub mod state;
+pub mod types;
+
+pub use accounts::{AccountLinker, OAuthAccount, SessionUser, SsoIdentity};
+pub use error::{OAuthError, Result, redact_secrets, redacted_error};
+pub use provider::OAuthProvider;
+pub use redirect::{checked_redirect_uri, validate_redirect_uri};
+pub use state::{Pkce, StateEntry, StateStore, random_string};
+pub use types::{
+    AuthorizationRequest, CallbackQuery, CallbackRequest, ExchangeRequest, OAuthUser, TokenSet,
+    UserInfo,
+};
