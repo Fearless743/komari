@@ -1362,6 +1362,39 @@ async fn error_bodies_without_safe_fields_are_not_echoed() {
         .unwrap_err();
     assert!(!error.to_string().contains("leaky-value"));
     assert!(error.to_string().contains("non-JSON error body"));
+
+    let app = Router::new().route(
+        "/token",
+        post(|| async { (axum::http::StatusCode::OK, "leaky-value") }),
+    );
+    let base = spawn(app).await;
+    let provider = factory::builtin_registry()
+        .create_and_init(
+            "generic",
+            json!({
+                "client_id": "client-id",
+                "client_secret": "client-secret",
+                "auth_url": "https://idp.example/authorize",
+                "token_url": format!("{base}/token"),
+                "user_info_url": "https://idp.example/userinfo",
+                "scope": "openid",
+                "user_id_field": "sub",
+            }),
+        )
+        .await
+        .unwrap();
+    let error = provider
+        .exchange_code(ExchangeRequest {
+            code: "code",
+            redirect_uri: "https://monitor.example/api/oauth_callback",
+            pkce_verifier: None,
+            nonce: None,
+            query: &query,
+        })
+        .await
+        .unwrap_err();
+    assert!(!error.to_string().contains("leaky-value"));
+    assert!(error.to_string().contains("invalid JSON response"));
 }
 
 #[tokio::test]

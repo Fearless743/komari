@@ -21,7 +21,9 @@ pub async fn json_response(response: Response, secrets: &[&str]) -> Result<Value
         )));
     }
     serde_json::from_str(&body).map_err(|error| {
-        OAuthError::InvalidResponse(format!("{error}: {}", redact_secrets(&body, secrets)))
+        // Do not echo an invalid success body: it may contain an unkeyed
+        // token that redaction cannot recognise.
+        OAuthError::InvalidResponse(format!("invalid JSON response: {error}"))
     })
 }
 
