@@ -829,24 +829,34 @@ fn walk_data_dir(
         }
 
         let name = child.file_name().to_string_lossy().into_owned();
-        if is_ignored_name(&name) {
-            continue;
-        }
-
         let relative = path.strip_prefix(root).map_err(|_| {
             DbError::InvalidData(format!("{} escaped the data dir", path.display()))
         })?;
-        let zip_name = path_to_zip_name(relative)?;
+        let Some(zip_name) = path_to_zip_name(relative)? else {
+            eprintln!(
+                "komari-db backup: skipping non-UTF-8 path {}",
+                path.display()
+            );
+            continue;
+        };
 
         if file_type.is_dir() {
-            entries.push(DataEntry {
-                path: path.clone(),
-                name: zip_name,
-                is_dir: true,
-                size: 0,
-            });
+            // Go's Walk skips a directory entry whose name looks like a
+            // database file but still descends into it. Do the same so data
+            // below e.g. `archive.db/` is not lost.
+            if !is_database_name(&name) {
+                entries.push(DataEntry {
+                    path: path.clone(),
+                    name: zip_name,
+                    is_dir: true,
+                    size: 0,
+                });
+            }
             walk_data_dir(root, &path, excludes, entries)?;
         } else if file_type.is_file() {
+            if is_skipped_file_name(&name) {
+                continue;
+            }
             entries.push(DataEntry {
                 path: path.clone(),
                 name: zip_name,
@@ -859,14 +869,24 @@ fn walk_data_dir(
     Ok(())
 }
 
-fn is_ignored_name(name: &str) -> bool {
+fn is_database_name(name: &str) -> bool {
     let lower = name.to_ascii_lowercase();
-    lower.ends_with(".db")
-        || lower.ends_with(".db-wal")
-        || lower.ends_with(".db-shm")
+    lower.ends_with(".db") || lower.ends_with(".db-wal") || lower.ends_with(".db-shm")
+}
+
+fn is_skipped_file_name(name: &str) -> bool {
+    if is_database_name(name)
         || name == BACKUP_MARKUP_NAME
-        || lower == "backup.zip"
-        || lower.ends_with(".tmp")
+        || name.eq_ignore_ascii_case("backup.zip")
+    {
+        return true;
+    }
+
+    // Deliberately broader than Go (the task asks for temporary files to be
+    // excluded). These rules only apply to files: directories with such names
+    // are still walked so their contents are never silently dropped.
+    let lower = name.to_ascii_lowercase();
+    lower.ends_with(".tmp")
         || lower.ends_with(".temp")
         || lower.ends_with(".part")
         || lower.ends_with(".swp")
@@ -908,20 +928,16 @@ fn sanitize_zip_name(name: &str) -> Result<PathBuf> {
     Ok(clean)
 }
 
-fn path_to_zip_name(path: &Path) -> Result<String> {
+fn path_to_zip_name(path: &Path) -> Result<Option<String>> {
     let mut parts = Vec::new();
     for component in path.components() {
         match component {
-            Component::Normal(part) => parts.push(
-                part.to_str()
-                    .ok_or_else(|| {
-                        DbError::InvalidData(format!(
-                            "non-UTF-8 path cannot be stored in a backup: {}",
-                            path.display()
-                        ))
-                    })?
-                    .to_owned(),
-            ),
+            Component::Normal(part) => match part.to_str() {
+                Some(part) => parts.push(part.to_owned()),
+                // The ZIP writer API is UTF-8 only. Skip the entry instead of
+                // failing the whole backup; the caller logs the path.
+                None => return Ok(None),
+            },
             _ => {
                 return Err(DbError::InvalidData(format!(
                     "unexpected path component in {}",
