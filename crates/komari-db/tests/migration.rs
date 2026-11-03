@@ -2,7 +2,7 @@
 
 mod support;
 
-use komari_db::Db;
+use komari_db::{Db, LocalTime};
 use support::{TempDir, memory_db};
 
 #[test]
@@ -36,6 +36,52 @@ fn migration_can_run_twice_in_memory() {
             "missing {expected}"
         );
     }
+}
+
+#[test]
+fn migration_adds_columns_before_building_indexes() {
+    let dir = TempDir::new("old-indexed");
+    let path = dir.join("komari.db");
+    let db = Db::open(&path).unwrap();
+
+    // Old tables missing indexed columns: records.client, gpu_records.client
+    // and gpu_records.device_index.
+    db.with_connection(|conn| {
+        conn.execute_batch(
+            "CREATE TABLE records (\
+                 `time` datetime, `cpu` decimal(5,2), `ram` bigint\
+             );\
+             INSERT INTO records (time, cpu, ram) VALUES ('2026-01-01 00:00:00.0000000', 1.5, 42);\
+             CREATE TABLE gpu_records (\
+                 `time` datetime, `device_name` varchar(100)\
+             );\
+             INSERT INTO gpu_records (time, device_name) VALUES ('2026-01-01 00:00:00.0000000', 'GPU');",
+        )?;
+        Ok(())
+    })
+    .unwrap();
+
+    db.migrate()
+        .expect("indexes must be created after missing columns");
+
+    let records = db.records().all_in(komari_db::RecordTable::Live).unwrap();
+    assert_eq!(records.len(), 1);
+    assert_eq!(records[0].client, "");
+    assert_eq!(records[0].cpu, 1.5);
+
+    let gpu = db
+        .records()
+        .gpu_by_client_and_time_in(
+            komari_db::RecordTable::Live,
+            "",
+            LocalTime::parse("2025-01-01").unwrap(),
+            LocalTime::parse("2027-01-01").unwrap(),
+        )
+        .unwrap();
+    assert_eq!(gpu.len(), 1);
+    assert_eq!(gpu[0].device_index, 0);
+
+    assert!(db.schema_is_current().unwrap());
 }
 
 #[test]

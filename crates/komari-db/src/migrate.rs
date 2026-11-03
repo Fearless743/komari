@@ -254,6 +254,9 @@ CREATE TABLE IF NOT EXISTS `gpu_records_long_term` (
     `temperature` integer
 );
 
+"#;
+
+const INDEX_SQL: &str = r#"
 CREATE UNIQUE INDEX IF NOT EXISTS `idx_sessions_session` ON `sessions`(`session`);
 CREATE INDEX IF NOT EXISTS `idx_offline_notifications_client` ON `offline_notifications`(`client`);
 CREATE INDEX IF NOT EXISTS `idx_ddns_sync_history_client_uuid` ON `ddns_sync_history`(`client_uuid`);
@@ -371,8 +374,13 @@ fn add_missing_columns(tx: &rusqlite::Transaction<'_>) -> crate::error::Result<(
 }
 
 impl Db {
-    /// Create every missing table and index, and add missing columns to old    /// tables. Safe to call on every startup and safe to call repeatedly on an
+    /// Create every missing table and index, and add missing columns to old
+    /// tables. Safe to call on every startup and safe to call repeatedly on an
     /// existing database.
+    ///
+    /// The order is table DDL -> `ALTER TABLE ADD COLUMN` -> index DDL, so an
+    /// old table that lacks an indexed column (for example `records.client`)
+    /// is repaired before SQLite tries to build the index.
     ///
     /// `CREATE TABLE IF NOT EXISTS` leaves older tables untouched, which means
     /// a database created by an older Komari release may lack newer columns.
@@ -389,8 +397,13 @@ impl Db {
 
         let mut conn = self.conn();
         let tx = conn.transaction()?;
+        // Tables first: older tables keep their existing definition.
         tx.execute_batch(SCHEMA_SQL)?;
+        // Then add any columns the old table is missing, so the index DDL and
+        // repository queries below never reference a non-existent column.
         add_missing_columns(&tx)?;
+        // Indexes last: they can reference columns added in the step above.
+        tx.execute_batch(INDEX_SQL)?;
         tx.commit()?;
         Ok(())
     }
