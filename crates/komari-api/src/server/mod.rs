@@ -766,3 +766,68 @@ async fn shutdown_signal() {
         () = terminate => {}
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use std::io::Write;
+    use std::sync::{Arc, Mutex};
+
+    use super::*;
+    use tracing_subscriber::fmt::MakeWriter;
+    use tracing_subscriber::fmt::format::FmtSpan;
+
+    #[derive(Clone, Default)]
+    struct Buffer(Arc<Mutex<Vec<u8>>>);
+
+    impl Write for Buffer {
+        fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
+            self.0
+                .lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner())
+                .extend_from_slice(buf);
+            Ok(buf.len())
+        }
+
+        fn flush(&mut self) -> std::io::Result<()> {
+            Ok(())
+        }
+    }
+
+    impl<'a> MakeWriter<'a> for Buffer {
+        type Writer = Self;
+
+        fn make_writer(&'a self) -> Self::Writer {
+            self.clone()
+        }
+    }
+
+    #[test]
+    fn request_span_logs_the_path_but_not_query_tokens() {
+        let buffer = Buffer::default();
+        let subscriber = tracing_subscriber::fmt()
+            .with_writer(buffer.clone())
+            .with_ansi(false)
+            .with_span_events(FmtSpan::NEW)
+            .with_max_level(Level::INFO)
+            .finish();
+        tracing::subscriber::with_default(subscriber, || {
+            let request = http::Request::builder()
+                .uri("/api/clients?token=super-secret")
+                .body(())
+                .expect("request");
+            let span = RequestSpan.make_span(&request);
+            let _guard = span.enter();
+            tracing::info!("inside request");
+        });
+        let output = String::from_utf8(
+            buffer
+                .0
+                .lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner())
+                .clone(),
+        )
+        .expect("utf8");
+        assert!(output.contains("path=/api/clients"), "{output}");
+        assert!(!output.contains("super-secret"), "{output}");
+    }
+}

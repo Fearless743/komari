@@ -843,6 +843,36 @@ async fn background_tasks_start_and_cancel() {
 }
 
 #[tokio::test]
+async fn zero_background_intervals_fall_back_without_panic() {
+    let dir = TempDir::new().expect("temp dir");
+    let config = ServerConfig {
+        background: BackgroundConfig {
+            enabled: true,
+            record_maintenance_interval: Duration::ZERO,
+            notify_interval: Duration::ZERO,
+            asset_refresh_interval: Duration::ZERO,
+            ddns_interval: Duration::ZERO,
+            offline_check_interval: Duration::ZERO,
+        },
+        ..server_config(&dir)
+    };
+    let server = build(config, memory_db()).await;
+    assert!(server.background().task_count() >= 7);
+    server.background().shutdown().await;
+    assert_eq!(server.background().task_count(), 0);
+}
+
+#[tokio::test]
+async fn dropping_server_cancels_api_background_loops() {
+    let dir = TempDir::new().expect("temp dir");
+    let server = build(server_config(&dir), memory_db()).await;
+    let state = server.state().clone();
+    assert!(!state.background_cancelled());
+    drop(server);
+    assert!(state.background_cancelled());
+}
+
+#[tokio::test]
 async fn pending_backup_is_restored_before_the_database_opens() {
     let dir = TempDir::new().expect("temp dir");
     let db_path = dir.path().join("komari.db");
@@ -1046,6 +1076,7 @@ struct FakeProvider {
     states: StateStore,
     subject: String,
     provider_name: &'static str,
+    skip_query_state: bool,
 }
 
 impl FakeProvider {
@@ -1058,7 +1089,13 @@ impl FakeProvider {
             states: StateStore::default(),
             subject: subject.to_owned(),
             provider_name: name,
+            skip_query_state: false,
         }
+    }
+
+    fn skip_query_state(mut self) -> Self {
+        self.skip_query_state = true;
+        self
     }
 }
 
@@ -1074,6 +1111,10 @@ impl OAuthProvider for FakeProvider {
 
     fn state_store(&self) -> &StateStore {
         &self.states
+    }
+
+    fn skip_query_state_check(&self) -> bool {
+        self.skip_query_state
     }
 
     async fn init(&self) -> komari_oauth::Result<()> {
@@ -1102,6 +1143,9 @@ impl OAuthProvider for FakeProvider {
 
     async fn callback(&self, request: CallbackRequest<'_>) -> komari_oauth::Result<OAuthUser> {
         self.states.consume(request.state, request.redirect_uri)?;
+        if !self.skip_query_state && request.query_state != Some(request.state) {
+            return Err(OAuthError::InvalidState);
+        }
         Ok(OAuthUser {
             provider: self.provider_name.to_owned(),
             subject: self.subject.clone(),
@@ -1296,6 +1340,59 @@ async fn oauth_callback_binds_an_external_account_to_the_session_user() {
         .expect("stored user");
     assert_eq!(stored.sso_id, "fake_binding-subject");
     assert_eq!(stored.sso_type, "fake");
+
+    running.stop().await;
+}
+
+#[tokio::test]
+async fn qq_style_provider_skips_query_state_but_requires_the_cookie() {
+    let dir = TempDir::new().expect("temp dir");
+    let db = memory_db();
+    let user = db.accounts().create("qq", "password").expect("user");
+    komari_oauth::AccountLinker::new(&db)
+        .bind(
+            &user.uuid,
+            &komari_oauth::SsoIdentity::new("fake", "qq-subject"),
+        )
+        .expect("bind");
+    db.config()
+        .set("o_auth_enabled", &true)
+        .expect("enable oauth");
+    let oauth = OAuthRuntime::with_provider(Arc::new(
+        FakeProvider::named("fake", "qq-subject").skip_query_state(),
+    ));
+    let server = ServerBuilder::new(server_config(&dir))
+        .with_db(db)
+        .skip_services()
+        .with_oauth(oauth)
+        .build()
+        .await
+        .expect("build");
+    let running = start(server).await;
+    let client = http_client();
+
+    let (location, cookie) = oauth_start(&running, &client).await;
+    let state = oauth_state(&location, &cookie);
+    let response = client
+        .get(format!(
+            "{}/api/oauth_callback?state=wrong&code=the-code",
+            running.base
+        ))
+        .header(COOKIE, format!("oauth_state={state}"))
+        .send()
+        .await
+        .expect("callback");
+    assert_eq!(response.status(), reqwest::StatusCode::FOUND);
+
+    let response = client
+        .get(format!(
+            "{}/api/oauth_callback?state=wrong&code=the-code",
+            running.base
+        ))
+        .send()
+        .await
+        .expect("missing cookie");
+    assert_eq!(response.status(), reqwest::StatusCode::BAD_REQUEST);
 
     running.stop().await;
 }

@@ -1,4 +1,6 @@
+use std::io::{BufRead, BufReader};
 use std::process::{Command, Stdio};
+use std::sync::mpsc;
 use std::time::Duration;
 
 use komari_cli::version;
@@ -81,17 +83,44 @@ fn server_prints_the_resolved_startup_configuration() {
         .args(["--db-type", "sqlite", "--database", "test.db"])
         .args(["--log-level", "debug", "--theme", "test-theme"])
         .arg("--allow-cors")
-        .stdout(Stdio::piped())
+        .stdout(Stdio::null())
         .stderr(Stdio::piped())
         .spawn()
         .expect("run server");
 
-    // `komari server` now blocks in axum::serve. Wait for the startup log,
-    // then stop the process; the test only asserts the resolved config.
-    std::thread::sleep(Duration::from_millis(1500));
-    let _ = child.kill();
-    let output = child.wait_with_output().expect("wait for server");
-    let stderr = String::from_utf8_lossy(&output.stderr);
+    // Wait for the real bind log instead of sleeping, then exercise graceful
+    // SIGTERM shutdown.
+    let stderr = child.stderr.take().expect("stderr pipe");
+    let (started_tx, started_rx) = mpsc::channel();
+    let reader = std::thread::spawn(move || {
+        let reader = BufReader::new(stderr);
+        let mut all = String::new();
+        for line in reader.lines() {
+            let Ok(line) = line else { break };
+            all.push_str(&line);
+            all.push('\n');
+            if line.contains("Starting server on") {
+                let _ = started_tx.send(());
+            }
+        }
+        all
+    });
+    started_rx
+        .recv_timeout(Duration::from_secs(10))
+        .expect("server did not log its listen address");
+    let kill = Command::new("kill")
+        .arg("-TERM")
+        .arg(child.id().to_string())
+        .status()
+        .expect("send SIGTERM");
+    assert!(kill.success());
+    let status = child.wait().expect("wait for server");
+    let stderr = reader.join().expect("stderr reader");
+    assert!(
+        status.success(),
+        "server exited with {:?}\nstderr:\n{stderr}",
+        status.code()
+    );
 
     for expected in [
         "127.0.0.1:0",
