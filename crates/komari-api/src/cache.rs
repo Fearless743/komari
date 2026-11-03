@@ -83,6 +83,16 @@ impl ReportCache {
             .len()
     }
 
+    /// Recent in-memory reports for one client, mirroring Go
+    /// `api.Records.Get(uuid)` used by `/api/recent/:uuid`.
+    pub fn recent_for(&self, uuid: &str) -> Option<Vec<Report>> {
+        self.reports
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .get(uuid)
+            .map(|cached| cached.iter().map(|cached| cached.report.clone()).collect())
+    }
+
     /// Snapshot of the recent in-memory reports, mirroring the data source
     /// Go's JSON-RPC `getRecords` reads from `api.Records`.
     pub fn recent_reports(&self) -> HashMap<String, Vec<Report>> {

@@ -8,12 +8,14 @@ license.workspace = true
 [dependencies]
 axum = { workspace = true }
 chrono = { workspace = true }
+form_urlencoded = "1"
 futures-util = { workspace = true }
 http = { workspace = true }
 komari-auth = { workspace = true }
 komari-config = { workspace = true }
 komari-db = { workspace = true }
 komari-geoip = { workspace = true }
+komari-oauth = { workspace = true }
 serde = { workspace = true }
 serde_json = { workspace = true }
 thiserror = { workspace = true }

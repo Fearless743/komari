@@ -1,6 +1,6 @@
 //! Shared application state for the API routers.
 
-use std::sync::Arc;
+use std::sync::{Arc, RwLock};
 use std::time::Duration;
 
 use axum::extract::FromRef;
@@ -8,6 +8,7 @@ use komari_auth::AuthState;
 use komari_config::keys;
 use komari_db::{Db, DbError};
 use komari_geoip::GeoIpService;
+use komari_oauth::OAuthProvider;
 
 use crate::cache::ReportCache;
 use crate::clock::{Clock, SystemClock};
@@ -72,6 +73,9 @@ pub struct ApiState {
     /// server assembly can call `initialize()` and install it with
     /// [`ApiState::with_geoip_service`].
     pub geoip: Option<Arc<GeoIpService>>,
+    /// Active OAuth provider. It is `None` until the server assembly loads the
+    /// configured provider (see `komari_api::public::initialize_oauth`).
+    oauth_provider: Arc<RwLock<Option<Arc<dyn OAuthProvider>>>>,
     config: Arc<ApiConfig>,
 }
 
@@ -116,6 +120,7 @@ impl ApiState {
             presence,
             report_cache,
             geoip,
+            oauth_provider: Arc::new(RwLock::new(None)),
             config: Arc::new(config),
         };
         state.spawn_presence_sweeper();
@@ -130,6 +135,28 @@ impl ApiState {
     /// Install a GeoIP service (already initialized by the server assembly).
     pub fn with_geoip_service(mut self, service: Arc<GeoIpService>) -> Self {
         self.geoip = Some(service);
+        self
+    }
+
+    /// The active OAuth provider, if the server assembly installed one.
+    pub fn oauth_provider(&self) -> Option<Arc<dyn OAuthProvider>> {
+        self.oauth_provider
+            .read()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .clone()
+    }
+
+    /// Install or replace the active OAuth provider.
+    pub fn set_oauth_provider(&self, provider: Option<Arc<dyn OAuthProvider>>) {
+        *self
+            .oauth_provider
+            .write()
+            .unwrap_or_else(|poisoned| poisoned.into_inner()) = provider;
+    }
+
+    /// Builder variant of [`ApiState::set_oauth_provider`].
+    pub fn with_oauth_provider(self, provider: Arc<dyn OAuthProvider>) -> Self {
+        self.set_oauth_provider(Some(provider));
         self
     }
 

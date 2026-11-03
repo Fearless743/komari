@@ -8,13 +8,15 @@
 //! * `POST /api/clients/uploadBasicInfo` — static hardware/OS information.
 //! * `GET  /api/clients` — browser WebSocket used by the dashboard.
 //!
-//! Public routes, the admin API and JSON-RPC intentionally live in other
-//! crates/tasks; [`client_router`] can be merged into a larger router.
+//! Browser-facing public routes (`/api/nodes`, login, OAuth, records, …) live
+//! in [`public`]. The admin API and JSON-RPC are separate tasks; both routers
+//! can be merged into a larger router sharing the same [`ApiState`].
 
 mod agent;
 mod cache;
 mod clock;
 mod presence;
+pub mod public;
 mod report;
 mod response;
 mod state;
@@ -23,6 +25,7 @@ pub mod ws;
 pub use cache::{FlushSummary, ReportCache};
 pub use clock::{Clock, ManualClock, SystemClock};
 pub use presence::{PresenceExpiry, PresenceTracker, PresenceUpdate};
+pub use public::{initialize_oauth, public_router, public_router_with_state};
 pub use report::{
     ConnectionsReport, CpuReport, DiskReport, GpuDetailReport, GpuDeviceInfo, LoadReport,
     NetworkReport, RamReport, Report, aggregate_reports, save_report, verify_report,
