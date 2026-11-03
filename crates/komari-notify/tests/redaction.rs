@@ -308,12 +308,30 @@ fn all_url_fields_are_checked_for_credentials() {
     assert!(telegram.get("endpoint").is_none());
     assert!(telegram.get("bot_token").is_none());
 
+    let telegram_slash = redact_addition(
+        "telegram",
+        r#"{"endpoint":"https://api.telegram.org/bot/TELEGRAM_SECRET","bot_token":"x"}"#,
+    );
+    assert!(telegram_slash.get("endpoint").is_none());
+
     let bark = redact_addition(
         "bark",
         r#"{"server_url":"https://user:pass@bark.example/path","device_key":"x"}"#,
     );
     assert!(bark.get("server_url").is_none());
     assert!(bark.get("device_key").is_none());
+
+    let bark_path = redact_addition(
+        "bark",
+        r#"{"server_url":"https://bark.example/token/BARK_SECRET","device_key":"x"}"#,
+    );
+    assert!(bark_path.get("server_url").is_none());
+
+    let custom_webhook = redact_addition(
+        "webhook",
+        r#"{"url":"https://hook.example/webhook/CUSTOM_SECRET"}"#,
+    );
+    assert!(custom_webhook.get("url").is_none());
 
     let plain = redact_addition(
         "bark",
@@ -335,11 +353,19 @@ fn http_debug_hides_path_tokens_and_signature_headers() {
     let slack = HttpRequest::post("https://hooks.slack.com/services/T/B/SLACK_SECRET")
         .header("X-Auth", "X_AUTH_SECRET")
         .header("X-Hub-Signature-256", "HUB_SIGNATURE_SECRET")
+        .header("X-Amz-Signature", "AMZ_SIGNATURE_SECRET")
+        .header("X-Api-Key", "API_KEY_SECRET")
+        .header("hmac", "HMAC_SECRET")
+        .header("sig", "SIG_SECRET")
         .header("X-Test", "visible");
     let debug = format!("{slack:?}");
     assert!(!debug.contains("SLACK_SECRET"));
     assert!(!debug.contains("X_AUTH_SECRET"));
     assert!(!debug.contains("HUB_SIGNATURE_SECRET"));
+    assert!(!debug.contains("AMZ_SIGNATURE_SECRET"));
+    assert!(!debug.contains("API_KEY_SECRET"));
+    assert!(!debug.contains("HMAC_SECRET"));
+    assert!(!debug.contains("SIG_SECRET"));
     assert!(debug.contains("visible"));
 
     let response = HttpResponse::new(200, b"RESPONSE_BODY_SECRET".to_vec());
@@ -400,6 +426,48 @@ async fn registry_type_errors_do_not_echo_values() {
     assert!(text.contains("email"), "{text}");
     assert!(text.contains("port"), "{text}");
     assert!(!text.contains("PORT_SECRET"), "{text}");
+
+    let error = match komari_notify::load_provider(
+        "email",
+        r#"{"host":"smtp.example","port":"PORT\"SECRET"}"#,
+    )
+    .await
+    {
+        Ok(_) => panic!("escaped quote type mismatch must fail"),
+        Err(error) => error,
+    };
+    let text = error.to_string();
+    assert!(text.contains("port"), "{text}");
+    assert!(!text.contains("SECRET"), "{text}");
+}
+
+#[tokio::test]
+async fn reqwest_timeout_errors_do_not_include_the_url() {
+    use std::io::Read;
+    use std::net::TcpListener;
+
+    let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+    let port = listener.local_addr().unwrap().port();
+    let server = std::thread::spawn(move || {
+        let (mut stream, _) = listener.accept().unwrap();
+        // Read the request, then deliberately never respond.
+        let mut buffer = [0u8; 1024];
+        let _ = stream.read(&mut buffer);
+        std::thread::sleep(Duration::from_millis(500));
+    });
+
+    let transport = ReqwestTransport::new(Duration::from_millis(100));
+    let error = transport
+        .execute(HttpRequest::get(format!(
+            "http://127.0.0.1:{port}/TIMEOUT_SECRET?token=QUERY_SECRET"
+        )))
+        .await
+        .unwrap_err();
+    let text = error.to_string();
+    assert!(text.contains("timeout failed"), "{text}");
+    assert!(!text.contains("TIMEOUT_SECRET"), "{text}");
+    assert!(!text.contains("QUERY_SECRET"), "{text}");
+    server.join().unwrap();
 }
 
 #[tokio::test]
