@@ -12,8 +12,10 @@ path = "src/main.rs"
 [dependencies]
 anyhow = { workspace = true }
 clap = { workspace = true }
+komari-api = { workspace = true }
 komari-auth = { workspace = true }
 komari-config = { workspace = true }
 komari-db = { workspace = true }
+tokio = { workspace = true }
 tracing = { workspace = true }
 tracing-subscriber = { workspace = true }

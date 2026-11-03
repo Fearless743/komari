@@ -62,12 +62,21 @@ fn run_server(global: &GlobalArgs, args: ServerArgs) -> Result<()> {
         ws_disable_origin = config.ws_disable_origin,
         "startup configuration"
     );
-    info!(
-        "Starting server on {} ... (HTTP runtime is provided by a follow-up task)",
-        config.listen
-    );
+    if !config.db.is_sqlite() {
+        anyhow::bail!(
+            "database type {:?} is not supported yet; only sqlite is implemented",
+            config.db.db_type
+        );
+    }
 
-    Ok(())
+    let server_config = komari_api::server::ServerConfig::from_app_config(&config);
+    let runtime = tokio::runtime::Builder::new_multi_thread()
+        .enable_all()
+        .build()
+        .context("failed to create the Tokio runtime")?;
+    runtime
+        .block_on(komari_api::server::run(server_config))
+        .context("HTTP server failed")
 }
 
 fn run_chpasswd(global: &GlobalArgs, args: ChpasswdArgs) -> Result<()> {
