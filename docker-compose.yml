@@ -1,0 +1,39 @@
+name: komari
+
+services:
+  komari:
+    image: ${KOMARI_IMAGE:-ghcr.io/komari-monitor/komari:latest}
+    build:
+      context: .
+      args:
+        # Same values the Go release pipeline injected through ldflags.
+        KOMARI_VERSION: ${KOMARI_VERSION:-dev}
+        KOMARI_VERSION_HASH: ${KOMARI_VERSION_HASH:-unknown}
+        # Frontend output owned by B14 (relative to the repository root).
+        KOMARI_WEB_DIST: ${KOMARI_WEB_DIST:-web/dist}
+    container_name: komari
+    restart: unless-stopped
+    ports:
+      - "${KOMARI_PORT:-25774}:25774"
+    environment:
+      KOMARI_LISTEN: "0.0.0.0:25774"
+      KOMARI_DB_TYPE: "sqlite"
+      KOMARI_DB_FILE: "/app/data/komari.db"
+      KOMARI_LOG_LEVEL: "${KOMARI_LOG_LEVEL:-info}"
+      TZ: "${TZ:-UTC}"
+      # Initial admin account (used only on first start):
+      # ADMIN_USERNAME: "admin"
+      # ADMIN_PASSWORD: "change-me"
+    volumes:
+      # Named volume: Docker copies /app/data ownership (uid 10001) from the
+      # image, so the non-root user can write to it.
+      - komari-data:/app/data
+      # Bind mount alternative. Create it first and fix ownership:
+      #   mkdir -p ./data && sudo chown -R 10001:10001 ./data
+      # - ./data:/app/data
+    # The image already runs as uid/gid 10001. Uncomment to match a host user
+    # when using a bind mount:
+    # user: "10001:10001"
+
+volumes:
+  komari-data:

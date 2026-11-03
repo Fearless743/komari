@@ -1,0 +1,31 @@
+# Build output
+target/
+dist/
+
+# Version control and CI metadata
+.git/
+.gitignore
+.github/
+.ow-meta
+
+# Local runtime data and secrets
+data/
+*.db
+*.db-*
+*.db-shm
+*.db-wal
+*.mmdb
+.env
+.env.*
+*.log
+
+# Frontend dependencies (the built output in web/dist is kept)
+web/node_modules/
+**/node_modules/
+
+# Documentation and local editor files
+docs/
+README.md
+.idea/
+.vscode/
+.DS_Store
