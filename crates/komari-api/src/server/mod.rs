@@ -197,6 +197,11 @@ impl ServerBuilder {
     }
 
     /// Attach the B04 public API router (`Router<ApiState>`).
+    ///
+    /// When a public router is supplied it owns `/ping`, `/api/oauth` and
+    /// `/api/oauth_callback`; the built-in copies are skipped so merging the
+    /// same paths cannot panic. The loaded OAuth provider is available through
+    /// [`ApiState::oauth_provider`].
     pub fn merge_public(mut self, router: Router<ApiState>) -> Self {
         self.public_router = Some(router);
         self
@@ -286,6 +291,7 @@ impl ServerBuilder {
             state = hook(state);
         }
 
+        let public_router_provided = self.public_router.is_some();
         let mut state_router = Router::<ApiState>::new();
         if let Some(router) = self.public_router {
             state_router = state_router.merge(router);
@@ -302,13 +308,16 @@ impl ServerBuilder {
         let mut router = Router::new()
             .merge(client_router_with_state(state.clone()))
             .merge(state_router)
-            .merge(oauth::router(db.clone(), oauth.clone()))
             .merge(komari_web::routes_for::<()>(assets.clone()))
-            .route("/ping", any(ping))
             .fallback(move |request| {
                 let assets = fallback_assets.clone();
                 async move { komari_web::serve_fallback(&assets, request).await }
             });
+        if !public_router_provided {
+            router = router
+                .merge(oauth::router(db.clone(), oauth.clone()))
+                .route("/ping", any(ping));
+        }
         if let Some(stateless) = self.stateless_router {
             router = router.merge(stateless);
         }

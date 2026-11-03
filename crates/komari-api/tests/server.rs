@@ -659,6 +659,50 @@ async fn b04_b06_routers_can_be_merged() {
 }
 
 #[tokio::test]
+async fn public_router_can_own_ping_and_oauth_without_duplicate_routes() {
+    let dir = TempDir::new().expect("temp dir");
+    let public = Router::<ApiState>::new()
+        .route("/ping", get(|| async { "public-ping" }))
+        .route("/api/oauth", get(|| async { "public-oauth" }))
+        .route("/api/oauth_callback", get(|| async { "public-callback" }));
+    let oauth = OAuthRuntime::with_provider(Arc::new(FakeProvider::new("public")));
+    let server = ServerBuilder::new(server_config(&dir))
+        .with_db(memory_db())
+        .skip_services()
+        .with_oauth(oauth)
+        .merge_public(public)
+        .build()
+        .await
+        .expect("build");
+    assert_eq!(
+        server
+            .state()
+            .oauth_provider()
+            .expect("oauth provider")
+            .name(),
+        "fake"
+    );
+    let running = start(server).await;
+    let client = http_client();
+
+    for (path, expected) in [
+        ("/ping", "public-ping"),
+        ("/api/oauth", "public-oauth"),
+        ("/api/oauth_callback", "public-callback"),
+    ] {
+        let response = client
+            .get(format!("{}{path}", running.base))
+            .send()
+            .await
+            .expect("public route");
+        assert_eq!(response.status(), reqwest::StatusCode::OK, "{path}");
+        assert_eq!(response.text().await.expect("body"), expected, "{path}");
+    }
+
+    running.stop().await;
+}
+
+#[tokio::test]
 async fn background_tasks_start_and_cancel() {
     let dir = TempDir::new().expect("temp dir");
     let config = ServerConfig {
