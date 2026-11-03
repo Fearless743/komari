@@ -393,6 +393,51 @@ fn repeated_import_replaces_existing_data() {
 }
 
 #[test]
+fn optional_pre_restore_archive_captures_the_previous_data() {
+    let source = TempDir::new("backup-pre-source");
+    let data = make_data_dir(&source);
+    fs::write(data.join("version.txt"), b"v1").unwrap();
+    let db = make_db(&data);
+    db.config().set("sitename", "before").unwrap();
+    let archive = db.export_backup(&options(&data)).unwrap();
+    drop(db);
+
+    let destination = TempDir::new("backup-pre-destination");
+    let target = destination.join("data");
+    import_backup_bytes(&options(&target), &archive).expect("initial import");
+
+    fs::write(target.join("new.txt"), b"added later").unwrap();
+    let live = Db::open(target.join(BACKUP_DB_NAME)).unwrap();
+    live.config().set("sitename", "after").unwrap();
+    drop(live);
+
+    let backup_dir = destination.join("backup");
+    let mut restore_options = options(&target);
+    restore_options.pre_restore_backup_dir = Some(backup_dir.clone());
+    let report = import_backup_bytes(&restore_options, &archive).expect("restore");
+
+    let pre_restore = report.pre_restore_archive.expect("pre-restore archive");
+    assert!(pre_restore.starts_with(&backup_dir));
+    let pre_bytes = fs::read(&pre_restore).unwrap();
+    let names = zip_names(&pre_bytes);
+    assert!(names.iter().any(|name| name == "new.txt"));
+    assert!(names.iter().any(|name| name == BACKUP_DB_NAME));
+
+    let extracted = TempDir::new("backup-pre-extracted");
+    let database = read_entry(&pre_bytes, BACKUP_DB_NAME).unwrap();
+    let database_path = extracted.join("komari.db");
+    fs::write(&database_path, database).unwrap();
+    let old = Db::open_read_only(&database_path).unwrap();
+    let sitename: Option<String> = old.config().get_as("sitename").unwrap();
+    assert_eq!(sitename.as_deref(), Some("after"));
+
+    let restored = Db::open(target.join(BACKUP_DB_NAME)).unwrap();
+    let sitename: Option<String> = restored.config().get_as("sitename").unwrap();
+    assert_eq!(sitename.as_deref(), Some("before"));
+    assert!(!target.join("new.txt").exists());
+}
+
+#[test]
 fn concurrent_imports_do_not_corrupt_the_target() {
     let source = TempDir::new("backup-concurrent-source");
     let data = make_data_dir(&source);
