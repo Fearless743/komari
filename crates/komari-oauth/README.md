@@ -136,6 +136,9 @@ Rules:
   identity returns `OAuthError::AccountNotBound` and must not create a user.
 * `find_or_create` / `find_or_create_from_user` are explicit opt-in
   registration helpers. New accounts get a random local password.
+* `find`, `bind`, `rebind` and `unbind` return a serializable `SessionUser`
+  and never expose the password hash or TOTP secret. Do not serialize the
+  `komari-db` `User` model directly in API responses.
 * `bind` refuses an identity that already belongs to another account
   (`AlreadyBound`) and refuses to replace a different binding
   (`UserAlreadyBound`). `rebind` replaces only the target account's own
@@ -160,13 +163,14 @@ Rules:
 
 ## Security notes
 
-* `client_secret`, `app_key`, `access_token`, `refresh_token` and `id_token`
-  values are replaced with `********` before any transport or response error is
-  returned. Redaction understands query/form values, JSON object keys and
-  nested JSON, and normalizes `access_token`, `accessToken`, `access-token`
-  and `access.token`. Non-2xx JSON bodies retain only `error`/
-  `error_description`/`error_uri`/`message`/`msg`; unknown fields and
-  non-JSON bodies are never echoed.
+* `client_secret`, `app_key`, `access_token`, `refresh_token`, `id_token`,
+  `code`, `state`, `passwd`, `two_factor` and TOTP values are replaced with
+  `********` before any transport or response error is returned. Redaction
+  understands query/form values, JSON object keys and nested JSON, and
+  normalizes separators and casing (`access_token`, `accessToken`,
+  `access-token` and `access.token` are equivalent). Non-2xx JSON bodies
+  retain only `error`/`error_description`/`error_uri`/`message`/`msg`;
+  unknown fields, non-object JSON and non-JSON bodies are never echoed.
 * Provider raw payloads (`UserInfo::raw`, `OAuthUser::raw`, `TokenSet::raw`)
   are not serialized, are omitted from `Debug`, and are recursively stripped
   of token/secret keys before storage.
@@ -207,9 +211,10 @@ redirect mismatch, provider error callbacks, OIDC discovery/JWKS/id-token
 validation (wrong audience, missing `id_token`, nonce mismatch, discovery
 skip, OIDC subject override, no-userinfo id_token flow), Cloudflare JWT
 verification, missing-header rejection and query-token switch, PKCE, token
-refresh/expiry, JSON-body/raw-payload secret redaction (including camelCase and
-kebab-case keys), JWKS refresh amplification and claim-error no-refresh,
-redirect-base rejection, QQ default-config loadability, and account
+refresh/expiry, JSON/query/form secret redaction (including camelCase,
+kebab-case, `code`, `state`, `passwd` and `two_factor`), non-object JSON error
+bodies, JWKS refresh amplification and claim-error no-refresh, redirect-base
+rejection for all four providers, QQ default-config loadability, and account
 creation/binding/duplicate-binding/legacy-row/`rebind`/`AccountNotBound`/
 `SessionUser` serialization behaviour.
 
