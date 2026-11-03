@@ -338,6 +338,20 @@ async fn browser_websocket_serves_snapshots_and_rejects_foreign_origins() {
     match error {
         tokio_tungstenite::tungstenite::Error::Http(response) => {
             assert_eq!(response.status(), 403);
+            assert_eq!(
+                response
+                    .headers()
+                    .get("content-type")
+                    .and_then(|value| value.to_str().ok()),
+                Some("text/plain; charset=utf-8")
+            );
+            assert_eq!(
+                response
+                    .headers()
+                    .get("x-content-type-options")
+                    .and_then(|value| value.to_str().ok()),
+                Some("nosniff")
+            );
             let body = response.body().as_deref().unwrap_or_default();
             assert_eq!(String::from_utf8_lossy(body), "Forbidden\n");
         }
@@ -491,4 +505,24 @@ async fn http_expiry_does_not_emit_offline_while_ws_is_live() {
     assert_eq!(offline.source, PresenceSource::WebSocket);
 
     server.abort();
+}
+
+#[tokio::test]
+async fn allow_cors_db_error_does_not_fall_back_to_true() {
+    let config = ApiConfig {
+        allow_cors: true,
+        ..default_config()
+    };
+    let (state, _app) = app_with(config);
+    // Missing key falls back to the explicit startup value.
+    assert!(state.allow_cors());
+
+    state
+        .db
+        .config()
+        .set_raw(komari_config::keys::ALLOW_CORS_KEY, "{not-json")
+        .expect("corrupt config row");
+    // A corrupt value is a DB error in Go and therefore false, not the
+    // permissive startup override.
+    assert!(!state.allow_cors());
 }

@@ -3,8 +3,8 @@ mod common;
 use axum::body::Body;
 use axum::http::{Method, StatusCode, header};
 use common::{
-    app, bearer_request, call, create_admin_session, create_client, flush, records_for,
-    report_body, request, set_api_key,
+    app, bearer_request, call, create_admin_session, create_client, flush, gpu_rows_for,
+    record_rows_for, records_for, report_body, request, set_api_key,
 };
 use komari_api::{ClientEventKind, PresenceSource};
 use serde_json::json;
@@ -418,6 +418,119 @@ fn database_errors_keep_samples_buffered_for_retry() {
             ..komari_api::Report::default()
         },
     );
-    assert!(cache.flush(&db).is_err());
+    let (summary, _error) = cache.flush(&db).expect_err("flush must fail");
+    assert_eq!(summary.failed_clients, 1);
     assert_eq!(cache.buffered("client"), 1);
+}
+
+#[test]
+fn record_failure_rolls_back_gpu_rows_and_retries_once() {
+    use komari_api::{ManualClock, ReportCache};
+    use std::sync::Arc;
+    use std::time::Duration;
+
+    let db = common::memory_db();
+    db.execute_batch("DROP TABLE records").unwrap();
+    let cache = ReportCache::new(
+        Arc::new(ManualClock::new(1_000_000)),
+        Duration::from_secs(60),
+        0.3,
+    );
+    cache.record(
+        "gpu-client",
+        komari_api::Report {
+            gpu: Some(komari_api::GpuDetailReport {
+                count: 1,
+                average_usage: 50.0,
+                detailed_info: vec![komari_api::GpuDeviceInfo {
+                    name: "gpu0".to_owned(),
+                    memory_total: 1024,
+                    memory_used: 512,
+                    utilization: 50.0,
+                    temperature: 50,
+                }],
+            }),
+            ..komari_api::Report::default()
+        },
+    );
+
+    assert!(cache.flush(&db).is_err());
+    assert!(cache.flush(&db).is_err());
+    assert_eq!(gpu_rows_for(&db, "gpu-client"), 0);
+    assert_eq!(cache.buffered("gpu-client"), 1);
+}
+
+#[test]
+fn failed_client_keeps_gpu_pending_while_others_commit() {
+    use komari_api::{ManualClock, ReportCache};
+    use std::sync::Arc;
+    use std::time::Duration;
+
+    let db = common::memory_db();
+    db.execute_batch(
+        "CREATE TRIGGER fail_bad BEFORE INSERT ON records          WHEN NEW.client = 'bad' BEGIN SELECT RAISE(ABORT, 'boom'); END;",
+    )
+    .unwrap();
+    let cache = ReportCache::new(
+        Arc::new(ManualClock::new(1_000_000)),
+        Duration::from_secs(60),
+        0.3,
+    );
+    cache.record(
+        "bad",
+        komari_api::Report {
+            gpu: Some(komari_api::GpuDetailReport {
+                count: 1,
+                average_usage: 50.0,
+                detailed_info: vec![komari_api::GpuDeviceInfo {
+                    name: "gpu0".to_owned(),
+                    memory_total: 1024,
+                    memory_used: 512,
+                    utilization: 50.0,
+                    temperature: 50,
+                }],
+            }),
+            ..komari_api::Report::default()
+        },
+    );
+    cache.record(
+        "good",
+        komari_api::Report {
+            cpu: komari_api::CpuReport {
+                usage: 10.0,
+                ..komari_api::CpuReport::default()
+            },
+            ..komari_api::Report::default()
+        },
+    );
+
+    let (summary, error) = cache.flush(&db).expect_err("bad client must fail");
+    assert_eq!(summary.clients, 1);
+    assert_eq!(summary.records, 1);
+    assert_eq!(summary.failed_clients, 1);
+    assert!(error.contains("bad"));
+    assert_eq!(record_rows_for(&db, "good"), 1);
+    assert_eq!(record_rows_for(&db, "bad"), 0);
+    assert_eq!(gpu_rows_for(&db, "bad"), 0);
+    assert_eq!(cache.buffered("bad"), 1);
+
+    db.execute_batch("DROP TRIGGER fail_bad;").unwrap();
+    let summary = cache.flush(&db).expect("retry succeeds");
+    assert_eq!(summary.clients, 2);
+    assert_eq!(record_rows_for(&db, "bad"), 1);
+    assert_eq!(gpu_rows_for(&db, "bad"), 1);
+}
+
+#[tokio::test]
+async fn latest_report_keeps_raw_tiny_cpu_value() {
+    let (state, app) = app();
+    let client = create_client(&state, "raw");
+    let mut body = report_body(&client.uuid);
+    body["cpu"]["usage"] = json!(0.005);
+    let (status, _) = call(&app, post_report(&report_uri(&client.token), &body)).await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(
+        state.hub.latest_report(&client.uuid).unwrap().cpu.usage,
+        0.005
+    );
 }

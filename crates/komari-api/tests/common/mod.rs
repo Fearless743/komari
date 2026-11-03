@@ -149,6 +149,28 @@ pub async fn call(app: &Router, request: Request<Body>) -> (StatusCode, Value) {
     (status, value)
 }
 
+pub fn gpu_rows_for(db: &Db, uuid: &str) -> i64 {
+    db.with_connection(|conn| {
+        Ok(conn.query_row(
+            "SELECT COUNT(*) FROM gpu_records WHERE client = ?1",
+            [uuid],
+            |row| row.get(0),
+        )?)
+    })
+    .expect("count gpu rows")
+}
+
+pub fn record_rows_for(db: &Db, uuid: &str) -> i64 {
+    db.with_connection(|conn| {
+        Ok(conn.query_row(
+            "SELECT COUNT(*) FROM records WHERE client = ?1",
+            [uuid],
+            |row| row.get(0),
+        )?)
+    })
+    .expect("count records")
+}
+
 pub fn records_for(state: &ApiState, uuid: &str) -> Vec<Record> {
     let now = LocalTime::now().timestamp().expect("timestamp");
     let start = LocalTime::from_unix_timestamp(now - 3600).expect("start");
