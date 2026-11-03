@@ -139,6 +139,8 @@ pub(crate) fn is_sensitive_credential_key(key: &str) -> bool {
             | "xamzcredential"
             | "awsaccesskeyid"
             | "xgoogcredential"
+            | "xauthorization"
+            | "xforwardedauthorization"
             | "auth"
             | "authorization"
             | "apikey"
@@ -200,45 +202,65 @@ pub(crate) fn url_has_credentials(raw: &str) -> bool {
 
 fn url_path_has_token(url: &reqwest::Url) -> bool {
     let host = url.host_str().unwrap_or("").to_ascii_lowercase();
-    let path = url.path().to_ascii_lowercase();
+    let path = url.path();
+    let lower_path = path.to_ascii_lowercase();
 
-    if host == "api.telegram.org" && path.starts_with("/bot") {
+    if host == "api.telegram.org" && lower_path.starts_with("/bot") {
         // The default endpoint is `/bot`; a token may be appended directly
         // (`/bot123:SECRET`) or after one slash (`/bot/SECRET`).
-        let remainder = &path[4..];
+        let remainder = &lower_path[4..];
         let remainder = remainder.strip_prefix('/').unwrap_or(remainder);
         if !remainder.is_empty() {
             return true;
         }
     }
-    if host == "hooks.slack.com" && path.starts_with("/services/") {
+    if host == "hooks.slack.com" && lower_path.starts_with("/services/") {
         return true;
     }
     if (host == "discord.com"
         || host == "discordapp.com"
         || host.ends_with(".discord.com")
         || host.ends_with(".discordapp.com"))
-        && path.starts_with("/api/webhooks/")
+        && lower_path.starts_with("/api/webhooks/")
     {
         return true;
     }
     if (host.ends_with("office.com") || host.ends_with("office365.com"))
-        && (path.contains("/webhook") || path.contains("/incomingwebhook"))
+        && (lower_path.contains("/webhook") || lower_path.contains("/incomingwebhook"))
     {
         return true;
     }
 
     // Common self-hosted patterns: /token/<secret>, /key/<secret>,
-    // /secret/<secret>, /webhook/<secret>, /send/<sendkey>. This deliberately
-    // treats a non-empty segment after the marker as a token.
+    // /secret/<secret>, /webhook/<secret>, /send/<sendkey>. Only a token-shaped
+    // segment triggers redaction so `/send/message` and `/webhook/events` are
+    // preserved.
     const MARKERS: &[&str] = &["token", "key", "secret", "webhook", "send"];
     let segments = path
         .split('/')
         .filter(|segment| !segment.is_empty())
         .collect::<Vec<_>>();
-    segments
-        .windows(2)
-        .any(|pair| MARKERS.contains(&pair[0]) && !pair[1].is_empty())
+    segments.windows(2).any(|pair| {
+        let marker = pair[0].to_ascii_lowercase();
+        MARKERS.contains(&marker.as_str()) && looks_like_path_token(pair[1])
+    })
+}
+
+/// Heuristic token shape for self-hosted path segments.
+///
+/// Accepts uppercase/mixed-case segments, segments containing digits, long
+/// separated values, or very long opaque strings. Plain lowercase words such as
+/// `message`, `events` and `refresh` stay readable.
+fn looks_like_path_token(segment: &str) -> bool {
+    if segment.len() < 6 {
+        return false;
+    }
+    let has_upper = segment
+        .chars()
+        .any(|character| character.is_ascii_uppercase());
+    let has_digit = segment.chars().any(|character| character.is_ascii_digit());
+    let has_separator = segment.contains('_') || segment.contains('-');
+    has_upper || has_digit || (has_separator && segment.len() >= 8) || segment.len() >= 32
 }
 
 /// URL rendering used by `Debug`: scheme + host + port only. Paths and query
