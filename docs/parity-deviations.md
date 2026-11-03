@@ -38,13 +38,18 @@ verbatim, including tokens. The Rust API must return a redacted copy.
 credential-query list (`token`, `sig`, `signature`, `x-amz-signature`,
 `x-hub-signature-256`, `hmac`, ...), known Slack/Discord/Teams path tokens,
 common self-hosted markers (`/token/`, `/key/`, `/secret/`, `/webhook/`,
-`/send/`) and Telegram bot tokens embedded in the path. Names are matched
-exactly after normalization; unrelated keys such as `author`, `monkey`,
-`secretary`, `tokenizer` and `signature_pad` are not removed.
+`/send/`) followed by a token-shaped segment, and Telegram bot tokens embedded
+in the path. Token shape means uppercase/mixed case, digits, a longer separated
+value, or a very long opaque string; `/send/message`, `/webhook/events` and
+`/token/refresh` are preserved. Query/header names are matched exactly after
+normalization; unrelated keys such as `author`, `monkey`, `secretary`,
+`tokenizer` and `signature_pad` are not removed.
 
 **Debug/logging:** every URL in `Debug` output is reduced to scheme + host +
-port (paths and query strings are hidden). Sensitive headers include
-`Authorization`, `X-Auth`, `X-Hub-Signature-256`, `X-Api-Key` and similar.
+port (paths and query strings are hidden). Sensitive headers include `Authorization`, `X-Authorization`,
+`X-Forwarded-Authorization`, `X-Auth`, `X-Hub-Signature-256`,
+`X-Amz-Signature`, `X-Amz-Credential`, `X-Amz-Security-Token`,
+`X-Goog-Credential`, `X-Api-Key`, `hmac`, `sig` and similar.
 `HttpRequest` bodies and `HttpResponse` bodies are never printed; remote
 response bodies/descriptions are not included in errors. Registry type errors
 retain only provider, field path and serde error category, never the offending
