@@ -219,12 +219,13 @@ fn hybrid_configs_from_a_previous_migration_are_converted() {
             "CREATE TABLE configs (\
                  `id` integer PRIMARY KEY AUTOINCREMENT, \
                  `sitename` varchar(100), \
+                 `theme` varchar(100), \
                  `allow_cors` boolean, \
                  `key` text, \
                  `value` text\
              );\
-             INSERT INTO configs (id, sitename, allow_cors, key, value) \
-             VALUES (1, 'Hybrid Site', 1, '', '');\
+             INSERT INTO configs (id, sitename, theme, allow_cors, key, value) \
+             VALUES (1, 'Hybrid Site', 'legacy-theme', 1, '', '');\
              INSERT INTO configs (id, sitename, key, value) \
              VALUES (2, NULL, 'theme', '\"dark\"');",
         )?;

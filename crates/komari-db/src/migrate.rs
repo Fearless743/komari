@@ -715,12 +715,8 @@ fn convert_legacy_configs(tx: &rusqlite::Transaction<'_>) -> crate::error::Resul
     tx.execute_batch(&format!("ALTER TABLE `configs` RENAME TO `{backup}`"))?;
     tx.execute_batch("CREATE TABLE `configs` (`key` text, `value` text, PRIMARY KEY (`key`))")?;
 
-    for (key, value) in existing {
-        tx.execute(
-            "INSERT OR REPLACE INTO `configs` (`key`, `value`) VALUES (?1, ?2)",
-            rusqlite::params![key, value],
-        )?;
-    }
+    // Legacy columns are written first; any valid KV rows that already existed
+    // in a hybrid table are newer and therefore win on conflict.
     for (column, cell) in values {
         let Some(value) = legacy_config_value(&column, &cell) else {
             continue;
@@ -728,6 +724,12 @@ fn convert_legacy_configs(tx: &rusqlite::Transaction<'_>) -> crate::error::Resul
         tx.execute(
             "INSERT OR REPLACE INTO `configs` (`key`, `value`) VALUES (?1, ?2)",
             rusqlite::params![column, serde_json::to_string(&value)?],
+        )?;
+    }
+    for (key, value) in existing {
+        tx.execute(
+            "INSERT OR REPLACE INTO `configs` (`key`, `value`) VALUES (?1, ?2)",
+            rusqlite::params![key, value],
         )?;
     }
     Ok(())
