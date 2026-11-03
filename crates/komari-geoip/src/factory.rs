@@ -79,6 +79,10 @@ impl GeoIpFactory {
 /// Register the providers used by the Go `InitGeoIp` switch.
 pub fn register_builtin_providers(factory: &GeoIpFactory) {
     crate::providers::empty::register(factory);
+    crate::providers::geojs::register(factory);
+    crate::providers::ipapi::register(factory);
+    crate::providers::ipinfo::register(factory);
+    crate::providers::mmdb::register(factory);
 }
 
 /// Process-wide registry with all built-in providers.

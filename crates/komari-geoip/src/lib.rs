@@ -18,8 +18,10 @@ pub mod factory;
 pub mod model;
 pub mod provider;
 pub mod providers;
+pub mod service;
 
 pub use error::GeoIpError;
 pub use factory::{GeoIpConstructor, GeoIpFactory, factory};
 pub use model::{GeoInfo, region_unicode_emoji};
 pub use provider::GeoIpProvider;
+pub use service::GeoIpService;
