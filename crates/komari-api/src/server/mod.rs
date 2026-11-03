@@ -771,6 +771,7 @@ fn apply_cors_headers(headers: &mut axum::http::HeaderMap) {
 async fn shutdown_signal() {
     let ctrl_c = async {
         let _ = tokio::signal::ctrl_c().await;
+        info!("received SIGINT");
     };
 
     #[cfg(unix)]
@@ -778,6 +779,9 @@ async fn shutdown_signal() {
         use tokio::signal::unix::{SignalKind, signal};
         if let Ok(mut signal) = signal(SignalKind::terminate()) {
             signal.recv().await;
+            info!("received SIGTERM");
+        } else {
+            warn!("failed to register SIGTERM handler");
         }
     };
     #[cfg(not(unix))]
@@ -851,5 +855,19 @@ mod tests {
         .expect("utf8");
         assert!(output.contains("path=/api/clients"), "{output}");
         assert!(!output.contains("super-secret"), "{output}");
+    }
+}
+
+#[cfg(test)]
+mod shutdown_tests {
+    use super::*;
+
+    #[tokio::test]
+    async fn shutdown_signal_waits_for_an_actual_signal() {
+        assert!(
+            tokio::time::timeout(Duration::from_millis(200), shutdown_signal())
+                .await
+                .is_err()
+        );
     }
 }
