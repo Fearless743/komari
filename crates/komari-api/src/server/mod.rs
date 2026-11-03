@@ -286,6 +286,12 @@ impl ServerBuilder {
         router = router
             .layer(PrivateSite::new(auth.clone()))
             .layer(AuthLayer::new(auth))
+            // A real body-stream limit must wrap `AuthLayer`, which buffers
+            // non-GET bodies before extractors run. `DefaultBodyLimit` alone
+            // would be bypassed by that buffering.
+            .layer(RequestBodyLimitLayer::new(config.body_limit_bytes))
+            // CORS wraps the body limit so a 413 still carries CORS headers,
+            // matching the Go middleware order.
             .layer(middleware::from_fn_with_state(
                 state.clone(),
                 cors_and_cache,
@@ -297,10 +303,6 @@ impl ServerBuilder {
                     .on_response(DefaultOnResponse::new().level(Level::INFO)),
             );
         }
-        // A real body-stream limit must wrap `AuthLayer`, which buffers
-        // non-GET bodies before extractors run. `DefaultBodyLimit` alone would
-        // be bypassed by that buffering.
-        router = router.layer(RequestBodyLimitLayer::new(config.body_limit_bytes));
 
         let background =
             BackgroundTasks::start(&state, assets.clone(), ddns.clone(), &config.background);
