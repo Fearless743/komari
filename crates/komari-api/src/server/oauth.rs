@@ -207,7 +207,7 @@ async fn oauth_callback(
         return error_response(
             StatusCode::INTERNAL_SERVER_ERROR,
             "OAuth provider is not initialized",
-            &[clear_state.clone()],
+            std::slice::from_ref(&clear_state),
         );
     };
 
@@ -217,14 +217,14 @@ async fn oauth_callback(
             return error_response(
                 StatusCode::BAD_REQUEST,
                 "Invalid state",
-                &[clear_state.clone()],
+                std::slice::from_ref(&clear_state),
             );
         }
     } else if state_cookie.is_empty() || query_state != Some(state_cookie.as_str()) {
         return error_response(
             StatusCode::BAD_REQUEST,
             "Invalid state",
-            &[clear_state.clone()],
+            std::slice::from_ref(&clear_state),
         );
     }
 
@@ -247,7 +247,7 @@ async fn oauth_callback(
             return error_response(
                 StatusCode::INTERNAL_SERVER_ERROR,
                 &format!("Failed to get user info: {error}"),
-                &[clear_state.clone()],
+                std::slice::from_ref(&clear_state),
             );
         }
     };
@@ -307,7 +307,7 @@ async fn oauth_callback(
             return error_response(
                 StatusCode::UNAUTHORIZED,
                 "please log in and bind your external account first.",
-                &[clear_state.clone()],
+                std::slice::from_ref(&clear_state),
             );
         }
         Err(error) => {
@@ -315,7 +315,7 @@ async fn oauth_callback(
             return error_response(
                 StatusCode::INTERNAL_SERVER_ERROR,
                 &error.to_string(),
-                &[clear_state.clone()],
+                std::slice::from_ref(&clear_state),
             );
         }
     };
@@ -334,7 +334,7 @@ async fn oauth_callback(
             return error_response(
                 StatusCode::INTERNAL_SERVER_ERROR,
                 &error.to_string(),
-                &[clear_state.clone()],
+                std::slice::from_ref(&clear_state),
             );
         }
     };
