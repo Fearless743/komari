@@ -10,8 +10,10 @@ use crate::time::LocalTime;
 pub struct OfflineNotification {
     pub client: String,
     /// Joined client information. Not a column on `offline_notifications`.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub client_info: Option<Client>,
+    ///
+    /// Go declares this as a value type (`Client`, not `*Client`), so it is
+    /// always present in JSON even when it is the zero value.
+    pub client_info: Client,
     pub enable: bool,
     pub grace_period: i64,
     pub last_notified: LocalTime,
@@ -24,7 +26,7 @@ impl OfflineNotification {
             enable: false,
             grace_period: 180,
             last_notified: LocalTime::default(),
-            client_info: None,
+            client_info: Client::default(),
         }
     }
 }
@@ -33,7 +35,7 @@ impl FromRow for OfflineNotification {
     fn from_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<Self> {
         Ok(Self {
             client: row.get("client")?,
-            client_info: None,
+            client_info: Client::default(),
             enable: row.get("enable")?,
             grace_period: row.get("grace_period")?,
             last_notified: row.get("last_notified")?,

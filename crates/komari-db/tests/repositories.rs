@@ -819,4 +819,11 @@ fn json_field_names_match_the_go_models() {
     assert!(legacy.get("o_auth_enabled").is_some());
     assert!(legacy.get("o_auth_provider").is_some());
     assert!(legacy.get("geo_ip_enabled").is_some());
+
+    // Go's OfflineNotification.ClientInfo is a value type, so the field is
+    // always serialized (even as a zero-valued object).
+    let offline = OfflineNotification::default();
+    let offline = serde_json::to_value(&offline).unwrap();
+    assert!(offline.get("client_info").is_some());
+    assert!(offline["client_info"].is_object());
 }
