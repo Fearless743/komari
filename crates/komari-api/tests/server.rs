@@ -623,6 +623,45 @@ async fn pending_backup_is_restored_before_the_database_opens() {
 }
 
 #[tokio::test]
+async fn pending_backup_is_archived_before_restore() {
+    let root = TempDir::new().expect("temp root");
+    let data_dir = root.path().join("data");
+    std::fs::create_dir_all(&data_dir).expect("data dir");
+    let db_path = data_dir.join("komari.db");
+    let db = Db::open(&db_path).expect("open db");
+    db.migrate().expect("migrate");
+    std::fs::write(data_dir.join("hello.txt"), "restored").expect("data file");
+    let options = BackupOptions::new(&data_dir).with_database_path(&db_path);
+    let archive = db.export_backup(&options).expect("export backup");
+    drop(db);
+    std::fs::remove_file(data_dir.join("hello.txt")).expect("remove original");
+    std::fs::write(data_dir.join("backup.zip"), archive).expect("write pending backup");
+
+    let config = ServerConfig {
+        database_path: db_path,
+        data_dir: data_dir.clone(),
+        ..server_config(&root)
+    };
+    ServerBuilder::new(config)
+        .skip_services()
+        .build()
+        .await
+        .expect("restore and build");
+
+    let backup_dir = root.path().join("backup");
+    let archives: Vec<_> = std::fs::read_dir(&backup_dir)
+        .expect("backup dir")
+        .filter_map(Result::ok)
+        .filter(|entry| entry.path().extension().is_some_and(|ext| ext == "zip"))
+        .collect();
+    assert_eq!(archives.len(), 1, "expected one pre-restore archive");
+    assert_eq!(
+        std::fs::read_to_string(data_dir.join("hello.txt")).expect("restored file"),
+        "restored"
+    );
+}
+
+#[tokio::test]
 async fn graceful_shutdown_completes_and_cancels_background_tasks() {
     let dir = TempDir::new().expect("temp dir");
     let config = ServerConfig {

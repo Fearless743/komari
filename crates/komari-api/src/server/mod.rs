@@ -486,12 +486,28 @@ pub fn prepare_database(config: &ServerConfig) -> Result<Db> {
     })?;
 
     if config.database_path.as_os_str() != ":memory:" {
-        let options =
-            BackupOptions::new(&config.data_dir).with_database_path(&config.database_path);
+        // Go snapshots the current data directory to `./backup/{ts}.zip`
+        // before replacing it. Use a sibling of the data directory so the
+        // archive survives the swap.
+        let backup_dir = config
+            .data_dir
+            .parent()
+            .filter(|parent| !parent.as_os_str().is_empty())
+            .unwrap_or_else(|| std::path::Path::new("."))
+            .join("backup");
+        let mut options = BackupOptions::new(&config.data_dir)
+            .with_database_path(&config.database_path)
+            // Startup restore is deliberately more permissive than the admin
+            // upload endpoint: an old database may predate the current schema
+            // and may not contain the Go marker file.
+            .require_markup(false)
+            .allow_legacy_schema(true);
+        options.pre_restore_backup_dir = Some(backup_dir.clone());
         match restore_pending_backup(&options) {
             Ok(Some(report)) => info!(
                 database_bytes = report.database_bytes,
                 data_entries = report.data_entries,
+                pre_restore_archive = ?report.pre_restore_archive,
                 "restored pending backup.zip"
             ),
             Ok(None) => {}
