@@ -32,7 +32,7 @@ RUN cargo chef prepare --recipe-path recipe.json
 FROM chef AS builder
 
 COPY --from=planner /src/recipe.json recipe.json
-RUN cargo chef cook --release --recipe-path recipe.json --package komari-cli
+RUN cargo chef cook --release --locked --recipe-path recipe.json --package komari-cli
 
 # Frontend static assets (B14). Override with a real build output directory.
 ARG KOMARI_WEB_DIST=web/dist
