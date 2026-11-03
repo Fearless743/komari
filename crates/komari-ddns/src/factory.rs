@@ -14,6 +14,7 @@ pub type DdnsConstructor = Arc<dyn Fn() -> Box<dyn DdnsProvider> + Send + Sync>;
 struct Registration {
     constructor: DdnsConstructor,
     configuration_items: Vec<ConfigurationItem>,
+    sensitive_fields: Vec<&'static str>,
 }
 
 /// Registry of DDNS provider constructors.
@@ -52,6 +53,7 @@ impl DdnsFactory {
         let provider = constructor();
         let name = provider.name().to_owned();
         let configuration_items = provider.configuration_items();
+        let sensitive_fields = provider.sensitive_fields().to_vec();
         let mut registrations = self.registrations.write().expect("ddns registry poisoned");
         if registrations.contains_key(&name) {
             tracing::warn!("DDNS provider already registered: {name}");
@@ -61,6 +63,7 @@ impl DdnsFactory {
             Registration {
                 constructor,
                 configuration_items,
+                sensitive_fields,
             },
         );
     }
@@ -97,6 +100,17 @@ impl DdnsFactory {
             .collect()
     }
 
+    /// Sensitive configuration fields declared by a registered provider.
+    /// Returns `None` for unknown providers so callers can choose a safe
+    /// fallback instead of leaking an unclassified configuration.
+    pub fn sensitive_fields(&self, name: &str) -> Option<Vec<&'static str>> {
+        self.registrations
+            .read()
+            .expect("ddns registry poisoned")
+            .get(name)
+            .map(|registration| registration.sensitive_fields.clone())
+    }
+
     /// Port of `factory.GetAllDdnsProviders`: a fresh instance per provider.
     pub fn get_all_providers(&self) -> Vec<(String, Box<dyn DdnsProvider>)> {
         let constructors: Vec<(String, DdnsConstructor)> = {
@@ -130,5 +144,5 @@ pub fn factory() -> &'static DdnsFactory {
 pub fn configuration_to_json(provider: &dyn DdnsProvider) -> Result<String, DdnsError> {
     let configuration: Value = provider.configuration();
     serde_json::to_string(&configuration)
-        .map_err(|error| DdnsError::InvalidConfig(error.to_string()))
+        .map_err(|_| DdnsError::InvalidConfig("invalid provider configuration".to_owned()))
 }

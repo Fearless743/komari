@@ -11,6 +11,7 @@ pub mod http;
 pub mod notifier;
 pub mod provider;
 pub mod providers;
+pub mod redact;
 pub mod registry;
 pub mod service;
 
@@ -20,6 +21,7 @@ pub use http::{
     HttpRequest, HttpResponse, HttpTransport, ReqwestTransport, form_encode, query_escape,
 };
 pub use provider::{ConfigField, EventMessageSender, MessageSender};
+pub use redact::redact_addition;
 pub use registry::{
     ProviderRegistration, ProviderRegistry, get_provider_configuration, initialize_defaults,
     load_provider, load_provider_from_db, registry,

@@ -73,7 +73,8 @@ async fn telegram_rejects_empty_message_and_api_error() {
         transport,
     );
     let error = sender.send_text("hello", "").await.unwrap_err();
-    assert!(error.to_string().contains("chat not found"));
+    assert!(error.to_string().contains("telegram API error"));
+    assert!(!error.to_string().contains("chat not found"));
 }
 
 #[tokio::test]
@@ -194,7 +195,71 @@ async fn webhook_rejects_unknown_method_and_non_2xx() {
     );
     let error = sender.send_text("x", "y").await.unwrap_err();
     assert!(error.to_string().contains("500"));
-    assert!(error.to_string().contains("boom"));
+    assert!(!error.to_string().contains("boom"));
+}
+
+#[tokio::test]
+async fn remote_response_bodies_are_not_echoed_in_errors() {
+    let telegram = TelegramSender::with_transport(
+        TelegramConfig {
+            bot_token: "t".to_owned(),
+            chat_id: "1".to_owned(),
+            ..TelegramConfig::default()
+        },
+        Arc::new(MockHttp::with_json(&serde_json::json!({
+            "ok": false,
+            "description": "RESPONSE_SECRET"
+        }))),
+    );
+    let error = telegram.send_text("hello", "").await.unwrap_err();
+    assert!(!error.to_string().contains("RESPONSE_SECRET"));
+
+    let bark = bark_sender(HttpResponse::new(
+        200,
+        br#"{"code":500,"message":"RESPONSE_SECRET"}"#.to_vec(),
+    ));
+    let error = bark.send_text("body", "title").await.unwrap_err();
+    assert!(!error.to_string().contains("RESPONSE_SECRET"));
+
+    let webhook = WebhookSender::with_transport(
+        WebhookConfig {
+            url: "https://hook.example".to_owned(),
+            method: "POST".to_owned(),
+            ..WebhookConfig::default()
+        },
+        Arc::new(MockHttp::new(vec![HttpResponse::new(
+            500,
+            b"RESPONSE_SECRET".to_vec(),
+        )])),
+    );
+    let error = webhook.send_text("x", "y").await.unwrap_err();
+    assert!(!error.to_string().contains("RESPONSE_SECRET"));
+
+    let sc3 = ServerChan3Sender::with_transport(
+        ServerChan3Config {
+            api_url: "https://sc3.example/send/key.send".to_owned(),
+            ..ServerChan3Config::default()
+        },
+        Arc::new(MockHttp::new(vec![HttpResponse::new(
+            500,
+            b"RESPONSE_SECRET".to_vec(),
+        )])),
+    );
+    let error = sc3.send_text("x", "y").await.unwrap_err();
+    assert!(!error.to_string().contains("RESPONSE_SECRET"));
+
+    let turbo = ServerChanTurboSender::with_transport(
+        ServerChanTurboConfig {
+            api_url: "https://sct.example/key.send".to_owned(),
+            ..ServerChanTurboConfig::default()
+        },
+        Arc::new(MockHttp::new(vec![HttpResponse::new(
+            500,
+            b"RESPONSE_SECRET".to_vec(),
+        )])),
+    );
+    let error = turbo.send_text("x", "y").await.unwrap_err();
+    assert!(!error.to_string().contains("RESPONSE_SECRET"));
 }
 
 #[tokio::test]

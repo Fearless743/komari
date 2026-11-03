@@ -10,14 +10,41 @@ use std::time::Duration;
 use async_trait::async_trait;
 
 use crate::error::{NotifyError, Result};
+use crate::redact::{is_sensitive_header, redact_url_for_debug};
 
 /// A fully-resolved HTTP request.
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, PartialEq, Eq)]
 pub struct HttpRequest {
     pub method: String,
     pub url: String,
     pub headers: Vec<(String, String)>,
     pub body: Option<Vec<u8>>,
+}
+
+impl std::fmt::Debug for HttpRequest {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        let headers = self
+            .headers
+            .iter()
+            .map(|(name, value)| {
+                if is_sensitive_header(name) {
+                    (name.as_str(), "<redacted>")
+                } else {
+                    (name.as_str(), value.as_str())
+                }
+            })
+            .collect::<Vec<_>>();
+        let body = self
+            .body
+            .as_ref()
+            .map(|body| format!("<{} bytes redacted>", body.len()));
+        f.debug_struct("HttpRequest")
+            .field("method", &self.method)
+            .field("url", &redact_url_for_debug(&self.url))
+            .field("headers", &headers)
+            .field("body", &body)
+            .finish()
+    }
 }
 
 impl HttpRequest {
@@ -74,10 +101,19 @@ impl HttpRequest {
 }
 
 /// A raw HTTP response.
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, PartialEq, Eq)]
 pub struct HttpResponse {
     pub status: u16,
     pub body: Vec<u8>,
+}
+
+impl std::fmt::Debug for HttpResponse {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("HttpResponse")
+            .field("status", &self.status)
+            .field("body", &format!("<{} bytes redacted>", self.body.len()))
+            .finish()
+    }
 }
 
 impl HttpResponse {
@@ -165,18 +201,26 @@ impl HttpTransport for ReqwestTransport {
             builder = builder.body(body);
         }
 
-        let response = builder
-            .send()
-            .await
-            .map_err(|error| NotifyError::Http(error.to_string()))?;
+        let response = builder.send().await.map_err(reqwest_error)?;
         let status = response.status().as_u16();
-        let body = response
-            .bytes()
-            .await
-            .map_err(|error| NotifyError::Http(error.to_string()))?
-            .to_vec();
+        let body = response.bytes().await.map_err(reqwest_error)?.to_vec();
         Ok(HttpResponse { status, body })
     }
+}
+
+/// Map a reqwest error without ever including the request URL (which can
+/// contain bot tokens, sendkeys or webhook path tokens).
+fn reqwest_error(error: reqwest::Error) -> NotifyError {
+    let kind = if error.is_timeout() {
+        "timeout"
+    } else if error.is_connect() {
+        "connect"
+    } else if error.is_body() || error.is_decode() {
+        "response body"
+    } else {
+        "request"
+    };
+    NotifyError::Http(format!("{kind} failed"))
 }
 
 /// Percent-encode one `application/x-www-form-urlencoded` component the same
