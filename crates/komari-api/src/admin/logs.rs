@@ -10,6 +10,7 @@ use komari_auth::RequireAdmin;
 use serde_json::json;
 
 use super::{bad_request, internal};
+use crate::response;
 use crate::state::ApiState;
 
 pub(crate) fn routes() -> Router<ApiState> {
@@ -44,7 +45,7 @@ pub(crate) async fn get_logs(
         Err(error) => return internal(format!("Failed to count logs: {error}")),
     };
     match state.db.logs().list_page(limit, offset) {
-        Ok(logs) => axum::Json(json!({"logs": logs, "total": total})).into_response(),
+        Ok(logs) => response::success(json!({"logs": logs, "total": total})).into_response(),
         Err(error) => internal(format!("Failed to retrieve logs: {error}")),
     }
 }

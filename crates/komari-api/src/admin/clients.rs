@@ -9,8 +9,7 @@ use komari_auth::RequireAdmin;
 use komari_db::{ClientPatch, LocalTime};
 use serde_json::{Value, json};
 
-use super::{audit, bad_request, internal, ok, parse_value};
-use crate::response;
+use super::{audit, bad_request, internal, ok, parse_value, status_only};
 use crate::state::ApiState;
 
 pub(crate) fn routes() -> Router<ApiState> {
@@ -136,7 +135,7 @@ pub(crate) async fn edit_client(
                     let _ = service.sync_client(&client, "client_edit", false).await;
                 });
             }
-            ok()
+            status_only()
         }
         Err(error) => (
             axum::http::StatusCode::INTERNAL_SERVER_ERROR,
@@ -156,7 +155,7 @@ pub(crate) async fn remove_client(
         Ok(_) => {
             audit(&state, &admin, &format!("delete client:{uuid}"), "warn");
             state.hub.remove_latest_report(&uuid);
-            ok()
+            status_only()
         }
         Err(error) => (
             axum::http::StatusCode::INTERNAL_SERVER_ERROR,
@@ -225,7 +224,7 @@ pub(crate) async fn order_weight(
         }
     }
     audit(&state, &admin, "order clients", "info");
-    response::success(Value::Null).into_response()
+    ok()
 }
 
 /// `POST /api/admin/record/clear` — Go `admin.ClearRecord`.
@@ -233,7 +232,7 @@ pub(crate) async fn clear_record(State(state): State<ApiState>, admin: RequireAd
     match state.db.records().delete_all() {
         Ok(()) => {
             audit(&state, &admin, "clear records", "warn");
-            ok()
+            status_only()
         }
         Err(error) => (
             axum::http::StatusCode::INTERNAL_SERVER_ERROR,

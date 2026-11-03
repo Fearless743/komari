@@ -14,6 +14,14 @@ pub fn success(data: Value) -> Json<Value> {
     }))
 }
 
+/// Go `RespondSuccess(nil)`: the `omitempty` data field is omitted.
+pub fn success_no_data() -> Json<Value> {
+    Json(json!({
+        "status": "success",
+        "message": "",
+    }))
+}
+
 /// Go `RespondSuccessMessage`: a success envelope with a custom message.
 pub fn success_message(message: impl Into<String>, data: Value) -> Json<Value> {
     Json(json!({

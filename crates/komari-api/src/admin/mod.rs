@@ -128,9 +128,14 @@ pub(crate) fn not_found(message: impl Into<String>) -> Response {
     response::error_status(StatusCode::NOT_FOUND, message)
 }
 
-/// `200 {"status":"success","message":"","data":null}`.
+/// `200 {"status":"success","message":""}` (Go `RespondSuccess(nil)`).
 pub(crate) fn ok() -> Response {
-    response::success(Value::Null).into_response()
+    response::success_no_data().into_response()
+}
+
+/// `200 {"status":"success"}` (Go handlers that return `gin.H{"status":"success"}`).
+pub(crate) fn status_only() -> Response {
+    response::status_success().into_response()
 }
 
 pub(crate) use clients::client_patch;
