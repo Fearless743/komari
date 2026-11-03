@@ -77,30 +77,45 @@ pub fn check_expire(db: &Db, now: DateTime<Utc>) -> Result<Option<ExpireCheck>> 
 
 /// Days left rounded up, matching `math.Ceil(remainingDuration.Hours()/24)`.
 fn days_left(client: &Client, now: DateTime<Utc>) -> i64 {
-    let Some(timestamp) = client.expired_at.timestamp() else {
+    // Go subtracts two `time.Time` values (nanosecond resolution) and applies
+    // math.Ceil to Duration.Hours()/24. Use the wall-clock pair so a duration
+    // that is an exact multiple of 24h remains exact.
+    let now_naive = LocalTime::from_instant(now).to_naive();
+    let remaining = client.expired_at.to_naive() - now_naive;
+    let Some(nanos) = remaining.num_nanoseconds() else {
         return 0;
     };
-    let remaining = timestamp - now.timestamp();
-    // ceil(seconds / 86400)
-    (remaining + 86_399).div_euclid(86_400)
+    if nanos <= 0 {
+        return 0;
+    }
+    (nanos as f64 / 86_400_000_000_000.0).ceil() as i64
 }
 
 /// Next local 09:00 boundary used by Go's daily expiry loop.
 pub fn next_run(now: DateTime<Utc>) -> DateTime<Utc> {
     let wall_now = LocalTime::from_instant(now).to_naive();
-    let today_nine = wall_now
+    let today_nine_wall = wall_now
         .date()
         .and_hms_opt(9, 0, 0)
         .expect("09:00 is a valid time");
-    let next_wall = if wall_now > today_nine {
-        today_nine + TimeDelta::days(1)
+    let today_nine = LocalTime::from_naive(today_nine_wall)
+        .timestamp()
+        .and_then(|timestamp| DateTime::from_timestamp(timestamp, 0))
+        .unwrap_or(now);
+    next_run_from(now, today_nine)
+}
+
+/// Apply Go's rule to an already-resolved local 09:00 instant:
+/// `if now.After(next) { next = next.Add(24 * time.Hour) }`.
+///
+/// The addition is an absolute 24 hours, so crossing a DST boundary changes
+/// the wall-clock hour, exactly like Go.
+pub fn next_run_from(now: DateTime<Utc>, today_nine: DateTime<Utc>) -> DateTime<Utc> {
+    if now > today_nine {
+        today_nine + TimeDelta::hours(24)
     } else {
         today_nine
-    };
-    let wall = LocalTime::from_naive(next_wall);
-    wall.timestamp()
-        .and_then(|timestamp| DateTime::from_timestamp(timestamp, 0))
-        .unwrap_or(now)
+    }
 }
 
 #[cfg(test)]
@@ -155,9 +170,44 @@ mod tests {
     }
 
     #[test]
-    fn next_run_is_the_following_nine_when_past_it() {
+    fn days_left_uses_nanosecond_precision() {
+        let base = now();
+        let mut client = Client::new("expiring");
+        client.expired_at = LocalTime::from_instant(base + TimeDelta::days(3));
+        assert_eq!(days_left(&client, base), 3);
+
+        client.expired_at =
+            LocalTime::from_instant(base + TimeDelta::days(3) + TimeDelta::nanoseconds(1));
+        assert_eq!(days_left(&client, base), 4);
+    }
+
+    #[test]
+    fn next_run_after_nine_adds_an_absolute_day() {
+        let today_nine = Utc.with_ymd_and_hms(2026, 1, 1, 9, 0, 0).unwrap();
         let after_nine = Utc.with_ymd_and_hms(2026, 1, 1, 10, 0, 0).unwrap();
-        let next = next_run(after_nine);
-        assert!(next > after_nine);
+        assert_eq!(
+            next_run_from(after_nine, today_nine),
+            Utc.with_ymd_and_hms(2026, 1, 2, 9, 0, 0).unwrap()
+        );
+        let before_nine = Utc.with_ymd_and_hms(2026, 1, 1, 8, 0, 0).unwrap();
+        assert_eq!(next_run_from(before_nine, today_nine), today_nine);
+    }
+
+    #[test]
+    fn next_run_crosses_dst_as_an_absolute_duration() {
+        // 13:00Z is 09:00 EDT on the US fall-back day; the next run is
+        // 13:00Z the following day (08:00 EST), exactly 24 hours later.
+        let today_nine = Utc.with_ymd_and_hms(2026, 11, 1, 13, 0, 0).unwrap();
+        let now = Utc.with_ymd_and_hms(2026, 11, 1, 14, 0, 0).unwrap();
+        assert_eq!(
+            next_run_from(now, today_nine),
+            today_nine + TimeDelta::hours(24)
+        );
+    }
+
+    #[test]
+    fn next_run_is_in_the_future() {
+        let after_nine = Utc.with_ymd_and_hms(2026, 1, 1, 10, 0, 0).unwrap();
+        assert!(next_run(after_nine) > after_nine);
     }
 }
