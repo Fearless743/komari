@@ -100,6 +100,19 @@ fn write_theme_asset(theme: &Path, relative_path: &str, bytes: &[u8]) {
     fs::write(path, bytes).expect("asset");
 }
 
+fn tempdir() -> TempDir {
+    // Cargo points this at `target/tmp`, which avoids depending on `/tmp`
+    // capacity (important in constrained CI containers).
+    let base = std::env::var_os("CARGO_TARGET_TMPDIR")
+        .map(PathBuf::from)
+        .unwrap_or_else(std::env::temp_dir);
+    fs::create_dir_all(&base).expect("temp base");
+    tempfile::Builder::new()
+        .prefix("komari-web-")
+        .tempdir_in(base)
+        .expect("tempdir")
+}
+
 fn now_unix() -> i64 {
     SystemTime::now()
         .duration_since(UNIX_EPOCH)
@@ -113,7 +126,7 @@ fn header_str(headers: &HeaderMap, name: axum::http::HeaderName) -> Option<&str>
 
 #[tokio::test]
 async fn serves_embedded_index_with_short_cache() {
-    let data = TempDir::new().expect("tempdir");
+    let data = tempdir();
     let app = test_app(data.path());
 
     let (status, headers, body) = send(&app, get("/")).await;
@@ -135,7 +148,7 @@ async fn serves_embedded_index_with_short_cache() {
 
 #[tokio::test]
 async fn serves_theme_asset_with_long_cache_and_javascript_type() {
-    let data = TempDir::new().expect("tempdir");
+    let data = tempdir();
     let theme = write_theme(data.path(), "acme", "<html></html>");
     write_theme_asset(
         &theme,
@@ -159,7 +172,7 @@ async fn serves_theme_asset_with_long_cache_and_javascript_type() {
 
 #[tokio::test]
 async fn spa_route_falls_back_to_theme_index() {
-    let data = TempDir::new().expect("tempdir");
+    let data = tempdir();
     write_theme(
         data.path(),
         "acme",
@@ -179,7 +192,7 @@ async fn spa_route_falls_back_to_theme_index() {
 
 #[tokio::test]
 async fn api_routes_never_fall_back_to_the_spa() {
-    let data = TempDir::new().expect("tempdir");
+    let data = tempdir();
     let app = test_app(data.path());
 
     let (status, headers, body) = send(&app, get("/api/does-not-exist")).await;
@@ -201,7 +214,7 @@ async fn api_routes_never_fall_back_to_the_spa() {
 
 #[tokio::test]
 async fn blocks_path_traversal() {
-    let data = TempDir::new().expect("tempdir");
+    let data = tempdir();
     let app = test_app(data.path());
 
     for path in [
@@ -233,7 +246,7 @@ async fn blocks_path_traversal() {
 
 #[tokio::test]
 async fn missing_theme_falls_back_to_default() {
-    let data = TempDir::new().expect("tempdir");
+    let data = tempdir();
     let assets = theme_assets(data.path(), "missing-theme");
     let app = router(assets.clone());
 
@@ -250,7 +263,7 @@ async fn missing_theme_falls_back_to_default() {
 
 #[tokio::test]
 async fn theme_without_metadata_is_still_served() {
-    let data = TempDir::new().expect("tempdir");
+    let data = tempdir();
     let dist = data.path().join("theme/raw/dist");
     fs::create_dir_all(&dist).expect("raw theme");
     fs::write(
@@ -270,7 +283,7 @@ async fn theme_without_metadata_is_still_served() {
 
 #[tokio::test]
 async fn custom_theme_overrides_default_and_falls_back_per_file() {
-    let data = TempDir::new().expect("tempdir");
+    let data = tempdir();
     write_theme(
         data.path(),
         "acme",
@@ -303,7 +316,7 @@ async fn custom_theme_overrides_default_and_falls_back_per_file() {
 
 #[tokio::test]
 async fn lists_themes_and_skips_invalid_configs() {
-    let data = TempDir::new().expect("tempdir");
+    let data = tempdir();
     write_theme(data.path(), "acme", "<html></html>");
 
     let broken = data.path().join("theme/broken");
@@ -334,7 +347,7 @@ async fn lists_themes_and_skips_invalid_configs() {
 
 #[test]
 fn list_themes_returns_empty_without_theme_directory() {
-    let data = TempDir::new().expect("tempdir");
+    let data = tempdir();
     let assets = WebAssets::with_data_dir(data.path());
     assert!(assets.list_themes().is_empty());
 }
@@ -359,7 +372,7 @@ fn theme_config_requires_name_and_short() {
 
 #[tokio::test]
 async fn preview_images_support_both_spellings() {
-    let data = TempDir::new().expect("tempdir");
+    let data = tempdir();
     let theme = write_theme(data.path(), "acme", "<html></html>");
     fs::write(theme.join("preview.png"), b"png-preview").expect("preview");
     fs::write(theme.join("perview.png"), b"png-perview").expect("perview");
@@ -401,7 +414,7 @@ async fn preview_images_support_both_spellings() {
 
 #[tokio::test]
 async fn etag_revalidation_returns_304() {
-    let data = TempDir::new().expect("tempdir");
+    let data = tempdir();
     let theme = write_theme(data.path(), "acme", "<html></html>");
     write_theme_asset(&theme, "dist/assets/app-abc12345.css", b"body{color:red}");
 
@@ -430,7 +443,7 @@ async fn etag_revalidation_returns_304() {
 
 #[tokio::test]
 async fn head_requests_return_headers_without_a_body() {
-    let data = TempDir::new().expect("tempdir");
+    let data = tempdir();
     let theme = write_theme(data.path(), "acme", "<html></html>");
     let payload = b"console.log('head');";
     write_theme_asset(&theme, "dist/assets/app-abc12345.js", payload);
@@ -453,7 +466,7 @@ async fn head_requests_return_headers_without_a_body() {
 
 #[tokio::test]
 async fn index_replacements_apply_and_admin_is_untouched() {
-    let data = TempDir::new().expect("tempdir");
+    let data = tempdir();
     write_theme(
         data.path(),
         "acme",
@@ -509,7 +522,7 @@ fn html_replacements_are_single_pass() {
 
 #[tokio::test]
 async fn favicon_prefers_data_directory() {
-    let data = TempDir::new().expect("tempdir");
+    let data = tempdir();
     let app = test_app(data.path());
 
     let (status, headers, body) = send(&app, get("/favicon.ico")).await;
@@ -528,7 +541,7 @@ async fn favicon_prefers_data_directory() {
 
 #[tokio::test]
 async fn precompressed_variants_are_optional() {
-    let data = TempDir::new().expect("tempdir");
+    let data = tempdir();
     let theme = write_theme(data.path(), "acme", "<html></html>");
     write_theme_asset(&theme, "dist/assets/app-abc12345.js", b"identity");
     write_theme_asset(&theme, "dist/assets/app-abc12345.js.gz", b"gzip-bytes");
@@ -575,7 +588,7 @@ async fn precompressed_variants_are_optional() {
 
 #[tokio::test]
 async fn precompressed_negotiates_quality_and_wildcard() {
-    let data = TempDir::new().expect("tempdir");
+    let data = tempdir();
     let theme = write_theme(data.path(), "acme", "<html></html>");
     write_theme_asset(&theme, "dist/assets/app-abc12345.js", b"identity");
     write_theme_asset(&theme, "dist/assets/app-abc12345.js.gz", b"gzip-bytes");
@@ -644,19 +657,19 @@ async fn precompressed_negotiates_quality_and_wildcard() {
 
 #[test]
 fn theme_layout_reports_missing_parts() {
-    let missing = TempDir::new().expect("tempdir");
+    let missing = tempdir();
     assert!(matches!(
         validate_theme_layout(missing.path().join("nope")),
         Err(ThemeLayoutError::MissingDirectory(_))
     ));
 
-    let no_dist = TempDir::new().expect("tempdir");
+    let no_dist = tempdir();
     assert!(matches!(
         validate_theme_layout(no_dist.path()),
         Err(ThemeLayoutError::MissingDist(_))
     ));
 
-    let no_index = TempDir::new().expect("tempdir");
+    let no_index = tempdir();
     fs::create_dir(no_index.path().join("dist")).expect("dist");
     fs::write(no_index.path().join("komari-theme.json"), "{}").expect("config");
     fs::write(no_index.path().join("preview.png"), b"png").expect("preview");
@@ -665,7 +678,7 @@ fn theme_layout_reports_missing_parts() {
         Err(ThemeLayoutError::MissingIndex(_))
     ));
 
-    let no_preview = TempDir::new().expect("tempdir");
+    let no_preview = tempdir();
     fs::create_dir(no_preview.path().join("dist")).expect("dist");
     fs::write(no_preview.path().join("dist/index.html"), "html").expect("index");
     fs::write(no_preview.path().join("komari-theme.json"), "{}").expect("config");
@@ -674,7 +687,7 @@ fn theme_layout_reports_missing_parts() {
         Err(ThemeLayoutError::MissingPreview(_))
     ));
 
-    let complete = TempDir::new().expect("tempdir");
+    let complete = tempdir();
     fs::create_dir(complete.path().join("dist")).expect("dist");
     fs::write(complete.path().join("dist/index.html"), "html").expect("index");
     fs::write(complete.path().join("komari-theme.json"), "{}").expect("config");
@@ -719,7 +732,7 @@ fn routes_compose_with_an_application_state() {
     #[derive(Clone)]
     struct AppState;
 
-    let data = TempDir::new().expect("tempdir");
+    let data = tempdir();
     let assets = test_assets(data.path());
 
     let _: Router<AppState> = routes_for::<AppState>(assets.clone());
@@ -728,7 +741,7 @@ fn routes_compose_with_an_application_state() {
 
 #[tokio::test]
 async fn temp_key_sets_cookie_for_valid_share() {
-    let data = TempDir::new().expect("tempdir");
+    let data = tempdir();
     let assets = test_assets(data.path());
     let app = router(assets.clone());
 
@@ -749,6 +762,12 @@ async fn temp_key_sets_cookie_for_valid_share() {
     assert_eq!(status, StatusCode::NOT_FOUND);
     assert!(headers.get(header::SET_COOKIE).is_some());
 
+    // Non-GET requests are rejected before the cookie block in Go.
+    let (status, headers, _) =
+        send(&app, request(Method::POST, "/share?temp_key=secret-token")).await;
+    assert_eq!(status, StatusCode::NOT_FOUND);
+    assert!(headers.get(header::SET_COOKIE).is_none());
+
     assets.set_temp_share_token("secret-token", now_unix() - 1);
     let (_, headers, _) = send(&app, get("/share?temp_key=secret-token")).await;
     assert!(headers.get(header::SET_COOKIE).is_none());
@@ -760,7 +779,7 @@ async fn temp_key_sets_cookie_for_valid_share() {
 
 #[tokio::test]
 async fn non_get_static_routes_return_404() {
-    let data = TempDir::new().expect("tempdir");
+    let data = tempdir();
     let app = test_app(data.path());
 
     let (status, _, body) = send(&app, request(Method::POST, "/favicon.ico")).await;
@@ -774,7 +793,7 @@ async fn non_get_static_routes_return_404() {
 
 #[tokio::test]
 async fn theme_switch_validates_and_takes_effect() {
-    let data = TempDir::new().expect("tempdir");
+    let data = tempdir();
     write_theme(
         data.path(),
         "acme",
@@ -808,7 +827,7 @@ async fn theme_switch_validates_and_takes_effect() {
 async fn symlinked_theme_file_is_rejected() {
     use std::os::unix::fs::symlink;
 
-    let data = TempDir::new().expect("tempdir");
+    let data = tempdir();
     let theme = write_theme(data.path(), "acme", "<html>ACME</html>");
     let outside = data.path().join("outside-secret.txt");
     fs::write(&outside, b"outside-secret").expect("outside file");
@@ -823,7 +842,7 @@ async fn symlinked_theme_file_is_rejected() {
 
 #[tokio::test]
 async fn placeholder_documentation_is_not_embedded() {
-    let data = TempDir::new().expect("tempdir");
+    let data = tempdir();
     let app = test_app(data.path());
 
     for path in [

@@ -604,8 +604,13 @@ pub fn serve_theme_asset(
 /// `index.html` is returned last.
 pub async fn serve_fallback(assets: &WebAssets, request: Request) -> Response {
     // Go's noRoute sets the temporary-share cookie before dispatching to the
-    // SPA/static handler, including for paths that end up as 404.
-    let cookie = temp_key_cookie(assets, request.uri().query());
+    // SPA/static handler, including for paths that end up as 404. Non-GET
+    // requests are rejected before that block, so they never set a cookie.
+    let cookie = if request.method() == Method::GET || request.method() == Method::HEAD {
+        temp_key_cookie(assets, request.uri().query())
+    } else {
+        None
+    };
     let mut response = fallback_response(assets, request).await;
     if let Some(cookie) = cookie {
         response.headers_mut().insert(header::SET_COOKIE, cookie);
