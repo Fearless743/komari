@@ -254,15 +254,9 @@ pub fn save_report(db: &Db, client: &str, report: &Report) -> Result<(), String>
 
     let now = LocalTime::now();
     let gpu_records = to_gpu_records(client, &report, now);
-    if !gpu_records.is_empty() {
-        db.records()
-            .insert_gpu_batch(&gpu_records)
-            .map_err(|error| format!("failed to save GPU record: {error}"))?;
-    }
-
     let record = to_record(client, &report, now);
     db.records()
-        .insert(&record)
+        .insert_with_gpu(&record, &gpu_records)
         .map_err(|error| format!("failed to save Record: {error}"))
 }
 

@@ -173,15 +173,22 @@ impl ApiState {
             ticker.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
             loop {
                 ticker.tick().await;
-                if let Err(error) = cache.flush(&db) {
-                    tracing::error!(%error, "failed to flush client reports");
+                match cache.flush(&db) {
+                    Ok(summary) => {
+                        tracing::debug!(?summary, "flushed client reports");
+                    }
+                    Err((summary, error)) => {
+                        tracing::error!(?summary, %error, "failed to flush client reports");
+                    }
                 }
             }
         });
     }
 
     /// Aggregate and persist buffered reports immediately.
-    pub fn flush_reports(&self) -> Result<crate::cache::FlushSummary, String> {
+    pub fn flush_reports(
+        &self,
+    ) -> Result<crate::cache::FlushSummary, (crate::cache::FlushSummary, String)> {
         self.report_cache.flush(&self.db)
     }
 
@@ -202,9 +209,14 @@ impl ApiState {
     pub fn allow_cors(&self) -> bool {
         match self.db.config().get_as::<bool>(keys::ALLOW_CORS_KEY) {
             Ok(Some(value)) => value,
-            // Only fall back to the explicit startup value when the database
-            // has no usable row; a persisted `false` always wins.
-            _ => self.config.allow_cors,
+            // Only an absent key falls back to the explicit startup value; a
+            // persisted `false` always wins.
+            Ok(None) => self.config.allow_cors,
+            Err(error) => {
+                // Go `GetAs` returns the zero value (false) on decode errors.
+                tracing::warn!(%error, "failed to read allow_cors; defaulting to false");
+                false
+            }
         }
     }
 

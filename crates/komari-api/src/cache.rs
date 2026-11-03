@@ -110,7 +110,7 @@ impl ReportCache {
     ///
     /// All clients are attempted even when some fail; the returned error is a
     /// summary of the database failures.
-    pub fn flush(&self, db: &Db) -> Result<FlushSummary, String> {
+    pub fn flush(&self, db: &Db) -> Result<FlushSummary, (FlushSummary, String)> {
         let now_millis = self.clock.now_millis();
         let cutoff = now_millis.saturating_sub(self.retention.as_millis() as i64);
         let batches: Vec<(String, Vec<CachedReport>)> = {
@@ -177,10 +177,13 @@ impl ReportCache {
         if errors.is_empty() {
             Ok(summary)
         } else {
-            Err(format!(
-                "{} client(s) failed to flush: {}",
-                errors.len(),
-                errors.join("; ")
+            Err((
+                summary,
+                format!(
+                    "{} client(s) failed to flush: {}",
+                    errors.len(),
+                    errors.join("; ")
+                ),
             ))
         }
     }
