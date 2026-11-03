@@ -1,0 +1,75 @@
+[workspace]
+members = [
+    "crates/komari-cli",
+    "crates/komari-config",
+    "crates/komari-db",
+    "crates/komari-auth",
+    "crates/komari-api",
+    "crates/komari-notify",
+    "crates/komari-jobs",
+    "crates/komari-ddns",
+    "crates/komari-geoip",
+    "crates/komari-oauth",
+    "crates/komari-web",
+]
+resolver = "3"
+
+[workspace.package]
+version = "0.1.0"
+edition = "2024"
+rust-version = "1.85"
+license = "MIT"
+repository = "https://github.com/komari-monitor/komari"
+
+[workspace.dependencies]
+# Internal crates. Later tasks add code to these crates but must not need to
+# change the workspace membership below.
+komari-cli = { path = "crates/komari-cli" }
+komari-config = { path = "crates/komari-config" }
+komari-db = { path = "crates/komari-db" }
+komari-auth = { path = "crates/komari-auth" }
+komari-api = { path = "crates/komari-api" }
+komari-notify = { path = "crates/komari-notify" }
+komari-jobs = { path = "crates/komari-jobs" }
+komari-ddns = { path = "crates/komari-ddns" }
+komari-geoip = { path = "crates/komari-geoip" }
+komari-oauth = { path = "crates/komari-oauth" }
+komari-web = { path = "crates/komari-web" }
+
+# Async runtime and web stack.
+tokio = { version = "1", features = ["full"] }
+tokio-tungstenite = { version = "0.26", default-features = true }
+axum = { version = "0.8", features = ["macros", "multipart", "ws"] }
+tower = { version = "0.5", features = ["full"] }
+tower-http = { version = "0.6", features = ["full"] }
+http = "1"
+hyper = { version = "1", features = ["full"] }
+bytes = "1"
+futures-util = "0.3"
+async-trait = "0.1"
+
+# Serialization and errors.
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+toml = "0.8"
+anyhow = "1"
+thiserror = "2"
+
+# Logging.
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter", "fmt", "ansi", "time"] }
+
+# CLI and utilities.
+clap = { version = "4", features = ["derive", "env", "wrap_help"] }
+uuid = { version = "1", features = ["v4", "v7", "serde"] }
+chrono = { version = "0.4", features = ["serde"] }
+bcrypt = "0.16"
+rand = "0.8"
+reqwest = { version = "0.12", default-features = false, features = ["rustls-tls", "json", "stream", "http2", "charset"] }
+once_cell = "1"
+parking_lot = "0.12"
+dotenvy = "0.15"
+
+# Databases.
+sqlx = { version = "0.8", default-features = false, features = ["runtime-tokio", "sqlite", "mysql", "chrono", "uuid", "migrate", "macros"] }
+rusqlite = { version = "0.32", features = ["bundled"] }
