@@ -1,13 +1,12 @@
 //! Notification delivery and notification decision logic.
 //!
 //! This crate mirrors the Go backend's `utils/messageSender` and
-//! `utils/notifier` packages. The HTTP abstraction and provider factory are
-//! added first; providers, the retry service and the notifier rules build on
-//! top of them.
+//! `utils/notifier` packages.
 
 pub mod error;
 pub mod http;
 pub mod provider;
+pub mod providers;
 
 pub use error::{NotifyError, Result};
 pub use http::{
