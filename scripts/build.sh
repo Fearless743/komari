@@ -208,5 +208,18 @@ else
   echo "  theme:   B14 placeholder (set KOMARI_DEFAULT_THEME_DIR for a real UI)"
   if [[ ! -f crates/komari-web/build.rs ]]; then
     echo "  warning: crates/komari-web/build.rs is missing (B14 not merged)" >&2
+  else
+    PLACEHOLDER_THEME="crates/komari-web/defaultTheme"
+    MARKER=""
+    if [[ -f "$PLACEHOLDER_THEME/dist/index.html" ]]; then
+      MARKER="$(grep -oE 'assets/[A-Za-z0-9._-]+\.(js|css)' \
+        "$PLACEHOLDER_THEME/dist/index.html" | head -n1 || true)"
+    fi
+    if [[ -n "$MARKER" ]] && grep -a -q "$MARKER" "$BINARY"; then
+      echo "  theme:   placeholder linked into the binary"
+    else
+      echo "  warning: komari-cli does not link komari-web until B09;" >&2
+      echo "           this binary does not contain the UI." >&2
+    fi
   fi
 fi

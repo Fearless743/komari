@@ -28,8 +28,10 @@ make release        # release build with version injection -> dist/komari
 ./dist/komari --version
 ```
 
-The default `make release` embeds B14's committed placeholder theme. For a real
-UI, build the frontend, normalize the output into a theme directory and pass it:
+The default `make release` compiles and embeds B14's committed placeholder
+theme into `komari-web`. The final `komari` binary only contains the UI after
+B09 links `komari-web`; until then the build warns about that. For a real UI,
+build the frontend, normalize the output into a theme directory and pass it:
 
 ```sh
 make release DEFAULT_THEME_DIR=/path/to/defaultTheme
@@ -269,7 +271,8 @@ committed placeholder before the real theme is copied.
 The working directory is `/app`, so downloaded GeoIP data
 (`data/GeoLite2-Country.mmdb`) and installed themes live under the `/app/data`
 volume, matching the Go backend's relative paths. The default theme is embedded
-in the binary; no separate web-assets directory is shipped in the image.
+into `komari-web`; it reaches the final `komari` binary once B09 wires the
+static-serving integration. No separate web-assets directory is shipped.
 
 `docker-compose.yml` starts the same image with a named volume, restart policy,
 port mapping and environment examples:
