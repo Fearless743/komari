@@ -20,7 +20,7 @@ use std::time::Duration;
 
 use chrono::Utc;
 use futures_util::FutureExt;
-use komari_config::keys::DDNS_SYNC_INTERVAL_KEY;
+use komari_config::keys::{DDNS_SYNC_INTERVAL_KEY, RECORD_ENABLED_KEY};
 use komari_db::models::{EventMessage, message_event};
 use komari_db::{Db, LocalTime};
 use komari_ddns::DdnsService;
@@ -102,6 +102,7 @@ impl BackgroundTasks {
         }
 
         tasks.spawn_record_maintenance(state.db.clone(), config);
+        tasks.spawn_record_retention(state.db.clone());
         tasks.spawn_asset_refresh(assets, state.db.clone(), config);
         tasks.spawn_ddns_sync(ddns, state.db.clone(), config);
         tasks.spawn_notification_tick(state.clone(), config);
@@ -196,6 +197,35 @@ impl BackgroundTasks {
                         }
                         if let Err(error) = db.logs().remove_old(30) {
                             tracing::warn!(%error, "failed to remove old audit logs");
+                        }
+                    }
+                }
+            }
+        });
+    }
+
+    /// Go deletes every record once a minute while `record_enabled` is false.
+    fn spawn_record_retention(&self, db: Arc<Db>) {
+        let cancel = self.cancel.clone();
+        self.spawn("record-retention", async move {
+            let mut ticker = tokio::time::interval(Duration::from_secs(60));
+            ticker.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
+            ticker.tick().await;
+            loop {
+                tokio::select! {
+                    biased;
+                    () = cancel.cancelled() => break,
+                    _ = ticker.tick() => {
+                        let enabled = db
+                            .config()
+                            .get_as::<bool>(RECORD_ENABLED_KEY)
+                            .ok()
+                            .flatten()
+                            .unwrap_or(true);
+                        if !enabled {
+                            if let Err(error) = db.records().delete_all() {
+                                tracing::warn!(%error, "failed to clear records while recording is disabled");
+                            }
                         }
                     }
                 }

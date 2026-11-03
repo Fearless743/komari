@@ -284,7 +284,10 @@ async fn oauth_callback(
                 &[clear_state.clone(), clear_binding],
             );
         }
-        if linker.bind(&binding_uuid, &identity).is_err() {
+        // Go's `BindingExternalAccount` overwrites the account's `sso_id`.
+        // `rebind` preserves that behaviour while still refusing an identity
+        // that already belongs to a different account.
+        if linker.rebind(&binding_uuid, &identity).is_err() {
             return json_error(
                 StatusCode::INTERNAL_SERVER_ERROR,
                 "message",

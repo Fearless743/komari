@@ -40,12 +40,26 @@ pub fn refresh_web_assets(assets: &WebAssets, db: &Db) -> Result<(), DbError> {
         assets.set_theme(theme);
     }
 
+    // Site fields may intentionally be empty (for example an empty custom
+    // head); only an absent key keeps the current value.
     let current = assets.site_meta();
     assets.set_site_meta(SiteMeta {
-        sitename: read_string(db, keys::SITENAME_KEY)?.unwrap_or(current.sitename),
-        description: read_string(db, keys::DESCRIPTION_KEY)?.unwrap_or(current.description),
-        custom_head: read_string(db, keys::CUSTOM_HEAD_KEY)?.unwrap_or(current.custom_head),
-        custom_body: read_string(db, keys::CUSTOM_BODY_KEY)?.unwrap_or(current.custom_body),
+        sitename: db
+            .config()
+            .get_as::<String>(keys::SITENAME_KEY)?
+            .unwrap_or(current.sitename),
+        description: db
+            .config()
+            .get_as::<String>(keys::DESCRIPTION_KEY)?
+            .unwrap_or(current.description),
+        custom_head: db
+            .config()
+            .get_as::<String>(keys::CUSTOM_HEAD_KEY)?
+            .unwrap_or(current.custom_head),
+        custom_body: db
+            .config()
+            .get_as::<String>(keys::CUSTOM_BODY_KEY)?
+            .unwrap_or(current.custom_body),
     });
 
     let token = read_string(db, TEMP_SHARE_TOKEN_KEY)?;
