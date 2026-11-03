@@ -31,6 +31,7 @@ use std::path::{Component, Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, OnceLock};
 
+use chrono::{Datelike, Timelike};
 use parking_lot::{ArcMutexGuard, Mutex, RawMutex};
 use zip::write::SimpleFileOptions;
 use zip::{CompressionMethod, ZipArchive, ZipWriter};
@@ -944,7 +945,24 @@ fn path_to_zip_name(path: &Path) -> Result<Option<String>> {
             }
         }
     }
-    Ok(parts.join("/"))
+    Ok(Some(parts.join("/")))
+}
+
+fn zip_options(mode: u32, compression: CompressionMethod) -> SimpleFileOptions {
+    let now = chrono::Local::now();
+    let modified = zip::DateTime::from_date_and_time(
+        now.year() as u16,
+        now.month() as u8,
+        now.day() as u8,
+        now.hour() as u8,
+        now.minute() as u8,
+        now.second() as u8,
+    )
+    .unwrap_or_default();
+    SimpleFileOptions::default()
+        .compression_method(compression)
+        .unix_permissions(mode)
+        .last_modified_time(modified)
 }
 
 fn add_file_from_disk<W: Write + Seek>(
@@ -953,10 +971,7 @@ fn add_file_from_disk<W: Write + Seek>(
     path: &Path,
     mode: u32,
 ) -> Result<()> {
-    let options = SimpleFileOptions::default()
-        .compression_method(CompressionMethod::Deflated)
-        .unix_permissions(mode);
-    zip.start_file(name, options)?;
+    zip.start_file(name, zip_options(mode, CompressionMethod::Deflated))?;
     let mut file = File::open(path)?;
     io::copy(&mut file, zip)?;
     Ok(())
@@ -968,29 +983,25 @@ fn add_bytes<W: Write + Seek>(
     bytes: &[u8],
     mode: u32,
 ) -> Result<()> {
-    let options = SimpleFileOptions::default()
-        .compression_method(CompressionMethod::Deflated)
-        .unix_permissions(mode);
-    zip.start_file(name, options)?;
+    zip.start_file(name, zip_options(mode, CompressionMethod::Deflated))?;
     zip.write_all(bytes)?;
     Ok(())
 }
 
 fn add_directory<W: Write + Seek>(zip: &mut ZipWriter<W>, name: &str, mode: u32) -> Result<()> {
-    let options = SimpleFileOptions::default()
-        .compression_method(CompressionMethod::Stored)
-        .unix_permissions(mode);
     let name = format!("{}/", name.trim_end_matches('/'));
-    zip.add_directory(name, options)?;
+    zip.add_directory(name, zip_options(mode, CompressionMethod::Stored))?;
     Ok(())
 }
 
 fn markup_content() -> String {
+    // Go uses time.RFC3339: second precision, numeric offset, no trailing
+    // newline.
     format!(
         "此文件为 Komari 备份标记文件，请勿删除。\n\
          This is a Komari backup markup file, please do not delete.\n\n\
-         备份时间 / Backup Time: {}\n",
-        chrono::Local::now().to_rfc3339()
+         备份时间 / Backup Time: {}",
+        chrono::Local::now().to_rfc3339_opts(chrono::SecondsFormat::Secs, false)
     )
 }
 
