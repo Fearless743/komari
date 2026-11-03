@@ -829,9 +829,12 @@ fn exchange_directories(left: &Path, right: &Path) -> io::Result<()> {
         .map_err(|_| io::Error::new(io::ErrorKind::InvalidInput, "path contains NUL"))?;
 
     // SAFETY: both pointers are valid NUL-terminated strings for the duration
-    // of the call and `AT_FDCWD` is a valid dirfd.
+    // of the call and `AT_FDCWD` is a valid dirfd. `SYS_renameat2` avoids a
+    // hard dependency on the glibc 2.28 wrapper; older libcs return ENOSYS and
+    // the caller falls back to two renames.
     let result = unsafe {
-        libc::renameat2(
+        libc::syscall(
+            libc::SYS_renameat2,
             libc::AT_FDCWD,
             left.as_ptr(),
             libc::AT_FDCWD,
