@@ -1038,6 +1038,7 @@ mod tests {
         Router::new()
             .route("/api/secret", get(|| async { "ok" }))
             .route("/api/admin/x", get(|| async { "ok" }))
+            .route("/api/clients/report", get(|| async { "ok" }))
             .route("/ping", get(|| async { "pong" }))
             .route("/api/login", get(|| async { "login" }))
             .route("/api/public/x", get(|| async { "public" }))
@@ -1078,7 +1079,14 @@ mod tests {
             "Private site is enabled, please login first."
         );
 
-        for path in ["/ping", "/assets/app.js", "/api/login", "/api/public/x"] {
+        for path in [
+            "/ping",
+            "/assets/app.js",
+            "/api/login",
+            "/api/public/x",
+            "/api/admin/x",
+            "/api/clients/report",
+        ] {
             let request = axum::http::Request::builder()
                 .uri(path)
                 .body(Body::empty())
@@ -1089,6 +1097,33 @@ mod tests {
                 "{path}"
             );
         }
+    }
+
+    #[tokio::test]
+    async fn private_site_reports_configuration_failures_as_500() {
+        let fixture = fixture();
+        fixture
+            .state
+            .db()
+            .config()
+            .set_raw(PRIVATE_SITE_CONFIG_KEY, "not-json")
+            .unwrap();
+        let request = axum::http::Request::builder()
+            .uri("/api/secret")
+            .body(Body::empty())
+            .unwrap();
+        let response = private_router(fixture.state)
+            .oneshot(request)
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::INTERNAL_SERVER_ERROR);
+        let body = axum::body::to_bytes(response.into_body(), usize::MAX)
+            .await
+            .unwrap();
+        assert_eq!(
+            String::from_utf8_lossy(&body),
+            r#"{"status":"error","message":"Failed to get configuration."}"#
+        );
     }
 
     #[tokio::test]
