@@ -18,6 +18,8 @@ tracked here so later tasks can adapt them.
 - Static totals (`ram_total`, `swap_total`, `disk_total`) come from the sample
   with the highest UDP connection count, matching the final sort in Go's
   `AverageReport`.
+- One aggregated `records` row and its `gpu_records` rows are written in a
+  single SQLite transaction, so a failed retry cannot duplicate GPU samples.
 - `allow_cors` is read from the database on every browser WebSocket upgrade;
   `KOMARI_WS_DISABLE_ORIGIN` only accepts a case-insensitive `true`.
 - Report POST tokens come from `?token=` or a JSON body `token` for non-GET
