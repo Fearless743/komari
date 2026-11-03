@@ -13,6 +13,7 @@ http = { workspace = true }
 komari-auth = { workspace = true }
 komari-config = { workspace = true }
 komari-db = { workspace = true }
+komari-geoip = { workspace = true }
 serde = { workspace = true }
 serde_json = { workspace = true }
 thiserror = { workspace = true }
@@ -20,5 +21,6 @@ tokio = { workspace = true }
 tracing = { workspace = true }
 
 [dev-dependencies]
+async-trait = { workspace = true }
 tokio-tungstenite = { workspace = true }
 tower = { workspace = true }

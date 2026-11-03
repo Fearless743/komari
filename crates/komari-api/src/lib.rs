@@ -12,6 +12,7 @@
 //! crates/tasks; [`client_router`] can be merged into a larger router.
 
 mod agent;
+mod cache;
 mod clock;
 mod presence;
 mod report;
@@ -19,17 +20,19 @@ mod response;
 mod state;
 pub mod ws;
 
+pub use cache::{FlushSummary, ReportCache};
 pub use clock::{Clock, ManualClock, SystemClock};
 pub use presence::{PresenceExpiry, PresenceTracker, PresenceUpdate};
 pub use report::{
     ConnectionsReport, CpuReport, DiskReport, GpuDetailReport, GpuDeviceInfo, LoadReport,
-    NetworkReport, RamReport, Report, save_report, verify_report,
+    NetworkReport, RamReport, Report, aggregate_reports, save_report, verify_report,
 };
 pub use state::{ApiConfig, ApiState};
 pub use ws::{ClientEvent, ClientEventKind, ConnectionHandle, PresenceSource, WsHub, check_origin};
 
 use axum::Router;
 use axum::routing::{get, post};
+use komari_auth::{AuthLayer, RequireRole};
 
 /// Routes owned by the agent API and the dashboard's client WebSocket.
 ///
@@ -51,6 +54,12 @@ pub fn client_router() -> Router<ApiState> {
             "/api/clients/register",
             post(agent::register::register_client),
         )
+        .merge(agent_routes())
+}
+
+/// The `/api/clients` group that requires `Admin` or `Client`, matching Go.
+fn agent_routes() -> Router<ApiState> {
+    Router::new()
         .route(
             "/api/clients/report",
             get(ws::agent_ws).post(agent::report::upload_report),
@@ -62,6 +71,21 @@ pub fn client_router() -> Router<ApiState> {
 }
 
 /// Convenience helper for binaries that do not compose several routers.
+///
+/// In addition to the handlers' own B03-based checks, this installs B03's
+/// [`AuthLayer`] and [`RequireRole`] around the agent group so body tokens are
+/// resolved once and the cached [`komari_auth::AuthContext`] is reused.
 pub fn client_router_with_state(state: ApiState) -> Router {
-    client_router().with_state(state)
+    let auth = state.auth.clone();
+    let agent = agent_routes()
+        .layer(RequireRole::admin_or_client(auth.clone()))
+        .layer(AuthLayer::new(auth));
+    Router::new()
+        .route("/api/clients", get(ws::clients_ws))
+        .route(
+            "/api/clients/register",
+            post(agent::register::register_client),
+        )
+        .merge(agent)
+        .with_state(state)
 }

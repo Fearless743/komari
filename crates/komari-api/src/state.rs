@@ -3,9 +3,13 @@
 use std::sync::Arc;
 use std::time::Duration;
 
+use axum::extract::FromRef;
+use komari_auth::AuthState;
 use komari_config::keys;
 use komari_db::{Db, DbError};
+use komari_geoip::GeoIpService;
 
+use crate::cache::ReportCache;
 use crate::clock::{Clock, SystemClock};
 use crate::presence::PresenceTracker;
 use crate::ws::WsHub;
@@ -22,10 +26,14 @@ pub struct ApiConfig {
     pub presence_ttl: Duration,
     /// WebSocket read timeout; Go also uses 11 seconds.
     pub socket_read_timeout: Duration,
-    /// Maximum accepted JSON body for report/basic-info requests.
-    pub max_report_body: usize,
     /// How often the background presence sweeper runs.
     pub presence_sweep_interval: Duration,
+    /// Retention window for buffered reports (Go's 1-minute cache).
+    pub report_retention: Duration,
+    /// How often buffered reports are aggregated into `records`.
+    pub report_flush_interval: Duration,
+    /// Top fraction used by `AverageReport` (Go passes 0.3).
+    pub report_top_percentage: f64,
 }
 
 impl Default for ApiConfig {
@@ -35,44 +43,42 @@ impl Default for ApiConfig {
             ws_disable_origin: false,
             presence_ttl: Duration::from_secs(11),
             socket_read_timeout: Duration::from_secs(11),
-            max_report_body: 1024 * 1024,
             presence_sweep_interval: Duration::from_secs(1),
+            report_retention: Duration::from_secs(60),
+            report_flush_interval: Duration::from_secs(60),
+            report_top_percentage: 0.3,
         }
     }
 }
 
 impl ApiConfig {
-    /// Load the persisted/startup configuration used by this task.
-    pub fn from_db(db: &Db) -> Self {
-        let allow_cors = db
-            .config()
-            .get_as_or::<bool>(keys::ALLOW_CORS_KEY, false)
-            .unwrap_or(false);
-        let ws_disable_origin = std::env::var(keys::ENV_WS_DISABLE_ORIGIN)
-            .map(|value| truthy(&value))
-            .unwrap_or(false);
-        Self {
-            allow_cors,
-            ws_disable_origin,
-            ..Self::default()
-        }
+    /// Load startup defaults. `allow_cors` is deliberately *not* snapshotted:
+    /// the Go backend reads the persisted value on every upgrade, so
+    /// [`ApiState::allow_cors`] consults the database each time.
+    pub fn from_db(_db: &Db) -> Self {
+        Self::default()
     }
-}
-
-fn truthy(value: &str) -> bool {
-    matches!(
-        value.trim().to_ascii_lowercase().as_str(),
-        "1" | "true" | "yes" | "on"
-    )
 }
 
 /// State shared by every `komari-api` route.
 #[derive(Clone)]
 pub struct ApiState {
     pub db: Arc<Db>,
+    pub auth: AuthState,
     pub hub: Arc<WsHub>,
     pub presence: Arc<PresenceTracker>,
+    pub report_cache: Arc<ReportCache>,
+    /// Optional GeoIP service. It is not initialized automatically; the
+    /// server assembly can call `initialize()` and install it with
+    /// [`ApiState::with_geoip_service`].
+    pub geoip: Option<Arc<GeoIpService>>,
     config: Arc<ApiConfig>,
+}
+
+impl FromRef<ApiState> for AuthState {
+    fn from_ref(state: &ApiState) -> Self {
+        state.auth.clone()
+    }
 }
 
 impl ApiState {
@@ -92,22 +98,39 @@ impl ApiState {
         let db = Arc::new(db);
         let hub = Arc::new(WsHub::new(clock.clone()));
         let presence = Arc::new(PresenceTracker::new(
-            clock,
+            clock.clone(),
             config.presence_ttl,
             Arc::clone(&hub),
         ));
+        let report_cache = Arc::new(ReportCache::new(
+            clock,
+            config.report_retention,
+            config.report_top_percentage,
+        ));
+        let auth = AuthState::new(Arc::clone(&db));
+        let geoip = Some(Arc::new(GeoIpService::new().with_database(Arc::clone(&db))));
         let state = Self {
             db,
+            auth,
             hub,
             presence,
+            report_cache,
+            geoip,
             config: Arc::new(config),
         };
         state.spawn_presence_sweeper();
+        state.spawn_report_flusher();
         state
     }
 
     pub fn config(&self) -> &ApiConfig {
         &self.config
+    }
+
+    /// Install a GeoIP service (already initialized by the server assembly).
+    pub fn with_geoip_service(mut self, service: Arc<GeoIpService>) -> Self {
+        self.geoip = Some(service);
+        self
     }
 
     fn spawn_presence_sweeper(&self) {
@@ -127,6 +150,33 @@ impl ApiState {
                 presence.expire_due();
             }
         });
+    }
+
+    fn spawn_report_flusher(&self) {
+        let Ok(handle) = tokio::runtime::Handle::try_current() else {
+            return;
+        };
+        let interval = self.config.report_flush_interval;
+        if interval.is_zero() {
+            return;
+        }
+        let cache = Arc::clone(&self.report_cache);
+        let db = Arc::clone(&self.db);
+        handle.spawn(async move {
+            let mut ticker = tokio::time::interval(interval);
+            ticker.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
+            loop {
+                ticker.tick().await;
+                if let Err(error) = cache.flush(&db) {
+                    tracing::error!(%error, "failed to flush client reports");
+                }
+            }
+        });
+    }
+
+    /// Aggregate and persist buffered reports immediately.
+    pub fn flush_reports(&self) -> Result<crate::cache::FlushSummary, String> {
+        self.report_cache.flush(&self.db)
     }
 
     /// Read the auto-discovery key from the persisted configuration.
@@ -154,7 +204,36 @@ impl ApiState {
     }
 
     /// Whether the `Origin` check is disabled.
+    ///
+    /// Go accepts only a case-insensitive `"true"` in
+    /// `KOMARI_WS_DISABLE_ORIGIN`; the environment is read on each upgrade so
+    /// changes take effect without rebuilding the state.
     pub fn ws_disable_origin(&self) -> bool {
         self.config.ws_disable_origin
+            || std::env::var(keys::ENV_WS_DISABLE_ORIGIN)
+                .map(|value| parse_ws_disable_origin(&value))
+                .unwrap_or(false)
+    }
+}
+
+fn parse_ws_disable_origin(value: &str) -> bool {
+    // Go compares against "true" with `strings.EqualFold`; values like "1"
+    // and "yes" do *not* disable the check.
+    value.trim().eq_ignore_ascii_case("true")
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn ws_disable_origin_only_accepts_true() {
+        assert!(parse_ws_disable_origin("true"));
+        assert!(parse_ws_disable_origin("TRUE"));
+        assert!(parse_ws_disable_origin(" True "));
+        assert!(!parse_ws_disable_origin("1"));
+        assert!(!parse_ws_disable_origin("yes"));
+        assert!(!parse_ws_disable_origin("on"));
+        assert!(!parse_ws_disable_origin(""));
     }
 }

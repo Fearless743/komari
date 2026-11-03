@@ -11,17 +11,17 @@ use std::sync::{Arc, Mutex, RwLock};
 use std::time::Duration;
 
 use axum::extract::ws::{Message, WebSocket, WebSocketUpgrade};
-use axum::extract::{Query, State};
+use axum::extract::{FromRequestParts, Request, State};
 use axum::http::HeaderMap;
 use axum::http::StatusCode;
 use axum::response::{IntoResponse, Response};
-use komari_auth::Role;
+use futures_util::SinkExt;
+use komari_auth::{AuthContext, Role, extract_client_token};
 use serde_json::json;
 use tokio::sync::{broadcast, oneshot};
 
 use crate::clock::Clock;
 use crate::report::Report;
-use crate::response::error_json;
 use crate::state::ApiState;
 
 /// Where an online/offline event originated.
@@ -168,7 +168,8 @@ impl WsHub {
     /// when the hub had to remove it (and therefore published an offline
     /// event).
     pub fn unregister_ws(&self, uuid: &str, connection_id: i64) -> bool {
-        let removed = {
+        let now = self.clock.now_millis();
+        let (removed, still_online) = {
             let mut inner = self.inner.write().unwrap_or_else(|p| p.into_inner());
             let is_current = inner
                 .connected
@@ -177,9 +178,13 @@ impl WsHub {
             if is_current {
                 inner.connected.remove(uuid);
             }
-            is_current
+            let still_online = inner
+                .presence
+                .get(uuid)
+                .is_some_and(|presence| presence.expires_at_millis > now);
+            (is_current, still_online)
         };
-        if removed {
+        if removed && !still_online {
             self.emit(ClientEvent {
                 kind: ClientEventKind::Offline,
                 uuid: uuid.to_owned(),
@@ -273,6 +278,15 @@ impl WsHub {
                 .is_some_and(|presence| presence.expires_at_millis > now)
     }
 
+    /// Whether a live WebSocket exists for `uuid` (HTTP presence excluded).
+    pub fn is_ws_connected(&self, uuid: &str) -> bool {
+        self.inner
+            .read()
+            .unwrap_or_else(|p| p.into_inner())
+            .connected
+            .contains_key(uuid)
+    }
+
     pub fn connected_count(&self) -> usize {
         self.inner
             .read()
@@ -359,38 +373,65 @@ pub fn check_origin(headers: &HeaderMap, disable: bool) -> bool {
 }
 
 /// `GET /api/clients/report` — agent WebSocket.
-pub async fn agent_ws(
-    State(state): State<ApiState>,
-    Query(query): Query<HashMap<String, String>>,
-    headers: HeaderMap,
-    ws: WebSocketUpgrade,
-) -> Response {
-    let token = komari_auth::extract_agent_token(&headers, query.get("token").map(String::as_str));
-    let identity = match komari_auth::require_role(&state.db, token.as_deref(), &[Role::Client]) {
-        Ok(identity) => identity,
-        Err(komari_auth::RequireRoleError::Backend(error)) => {
-            return (
-                StatusCode::INTERNAL_SERVER_ERROR,
-                error_json(format!("Failed to authenticate client: {error}")),
-            )
-                .into_response();
-        }
+pub async fn agent_ws(State(state): State<ApiState>, request: Request) -> Response {
+    let (mut parts, _body) = request.into_parts();
+    let context = AuthContext::from_request_parts(&mut parts, &state)
+        .await
+        .expect("AuthContext extraction is infallible");
+    if !context.permits(&[Role::Admin, Role::Client]) {
+        return komari_auth::unauthorized_response();
+    }
+
+    // Go resolves the client UUID from the query token even when an admin
+    // session/API key authenticated the request.
+    let token = extract_client_token(parts.uri.query(), &parts.method, None);
+    let uuid = token.and_then(|token| {
+        state
+            .db
+            .clients()
+            .get_by_token(&token)
+            .ok()
+            .flatten()
+            .map(|client| client.uuid)
+    });
+    let Some(uuid) = uuid else {
+        return komari_auth::unauthorized_response();
+    };
+
+    let ws = match WebSocketUpgrade::from_request_parts(&mut parts, &state).await {
+        Ok(ws) => ws,
         Err(_) => {
             return (
-                StatusCode::UNAUTHORIZED,
-                axum::Json(json!({"status": "error", "message": "Unauthorized."})),
+                StatusCode::BAD_REQUEST,
+                axum::Json(json!({"status": "error", "error": "Require WebSocket upgrade"})),
             )
                 .into_response();
         }
     };
-
-    ws.on_upgrade(move |socket| handle_agent_socket(state, identity.uuid, socket))
+    ws.on_upgrade(move |socket| handle_agent_socket(state, uuid, socket))
 }
 
 async fn handle_agent_socket(state: ApiState, uuid: String, mut socket: WebSocket) {
+    // Go reads and validates the first frame *before* registering the client
+    // as online. An invalid first frame closes the socket without an online
+    // event or a report.
+    let first = loop {
+        match socket.recv().await {
+            Some(Ok(Message::Text(text))) => break text.as_bytes().to_vec(),
+            Some(Ok(Message::Binary(bytes))) => break bytes.to_vec(),
+            Some(Ok(Message::Ping(_) | Message::Pong(_))) => continue,
+            Some(Ok(Message::Close(_))) | Some(Err(_)) | None => return,
+        }
+    };
+    if !valid_first_frame(&first) {
+        let _ = socket.close().await;
+        return;
+    }
+
     let connection_id = state.hub.next_connection_id();
     let (handle, mut close_rx) = ConnectionHandle::new(connection_id);
     state.hub.register_ws(uuid.clone(), Arc::new(handle));
+    process_agent_message(&state, &uuid, &first);
 
     let timeout = state.config().socket_read_timeout;
     loop {
@@ -416,6 +457,13 @@ async fn handle_agent_socket(state: ApiState, uuid: String, mut socket: WebSocke
     }
 
     state.hub.unregister_ws(&uuid, connection_id);
+}
+
+fn valid_first_frame(payload: &[u8]) -> bool {
+    matches!(
+        serde_json::from_slice::<serde_json::Value>(payload),
+        Ok(serde_json::Value::Object(_) | serde_json::Value::Null)
+    )
 }
 
 /// Parse one v1 agent frame. Returns `false` when the socket should close.
@@ -446,13 +494,8 @@ fn process_agent_message(state: &ApiState, uuid: &str, payload: &[u8]) -> bool {
             };
             report.uuid = uuid.to_owned();
             report.mark_updated();
-            if let Err(error) = crate::report::save_report(&state.db, uuid, &report) {
-                tracing::warn!(client = %uuid, %error, "failed to save report");
-                return true;
-            }
-            state
-                .hub
-                .set_latest_report(uuid, crate::report::cache_report(report));
+            state.report_cache.record(uuid, report.clone());
+            state.hub.set_latest_report(uuid, report);
             true
         }
         other => {
@@ -467,15 +510,23 @@ fn process_agent_message(state: &ApiState, uuid: &str, payload: &[u8]) -> bool {
 /// Login/session handling and hidden-client filtering are completed in the web
 /// task; this implementation exposes the same `get` / `get <uuid>` protocol so
 /// the route is usable today.
-pub async fn clients_ws(
-    State(state): State<ApiState>,
-    headers: HeaderMap,
-    ws: WebSocketUpgrade,
-) -> Response {
-    if !state.allow_cors() && !check_origin(&headers, state.ws_disable_origin()) {
+pub async fn clients_ws(State(state): State<ApiState>, request: Request) -> Response {
+    let (mut parts, _body) = request.into_parts();
+    let ws = match WebSocketUpgrade::from_request_parts(&mut parts, &state).await {
+        Ok(ws) => ws,
+        Err(_) => {
+            return (
+                StatusCode::BAD_REQUEST,
+                axum::Json(json!({"status": "error", "error": "Require WebSocket upgrade"})),
+            )
+                .into_response();
+        }
+    };
+    if !state.allow_cors() && !check_origin(&parts.headers, state.ws_disable_origin()) {
+        // gorilla/websocket's upgrader writes this plain-text body.
         return (
             StatusCode::FORBIDDEN,
-            axum::Json(json!({"status": "error", "error": "Origin not allowed"})),
+            "request origin not allowed by Upgrader.CheckOrigin",
         )
             .into_response();
     }

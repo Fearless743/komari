@@ -1,58 +1,56 @@
 //! `POST /api/clients/uploadBasicInfo` — static hardware/OS information.
 
-use std::collections::HashMap;
-use std::net::SocketAddr;
+use std::net::{IpAddr, SocketAddr};
 
 use axum::body::to_bytes;
 use axum::extract::connect_info::MockConnectInfo;
-use axum::extract::{ConnectInfo, Query, Request, State};
-use axum::http::HeaderMap;
+use axum::extract::{ConnectInfo, Request, State};
 use axum::http::StatusCode;
 use axum::response::{IntoResponse, Response};
+use komari_config::keys;
 use komari_db::{ClientPatch, LocalTime};
+use komari_geoip::region_unicode_emoji;
 use serde_json::{Map, Value, json};
 
-use super::{auth_failure_response, authenticate, unauthorized};
+use super::unauthorized;
 use crate::response::status_success;
 use crate::state::ApiState;
 
-pub async fn upload_basic_info(
-    State(state): State<ApiState>,
-    Query(query): Query<HashMap<String, String>>,
-    headers: HeaderMap,
-    request: Request,
-) -> Response {
-    let peer = request
-        .extensions()
+pub async fn upload_basic_info(State(state): State<ApiState>, request: Request) -> Response {
+    let (parts, body) = request.into_parts();
+    let peer = parts
+        .extensions
         .get::<ConnectInfo<SocketAddr>>()
         .map(|connect_info| connect_info.0)
         .or_else(|| {
-            request
-                .extensions()
+            parts
+                .extensions
                 .get::<MockConnectInfo<SocketAddr>>()
                 .map(|connect_info| connect_info.0)
         });
-    let query_token = query.get("token").cloned();
-    let token = komari_auth::extract_agent_token(&headers, query_token.as_deref());
-    let identity = match token.as_deref() {
-        Some(token) => match authenticate(&state, token) {
-            Ok(identity) => identity,
-            Err(failure) => return auth_failure_response(failure),
-        },
-        None => return unauthorized(),
-    };
-
-    let max_body = state.config().max_report_body;
-    let body = match to_bytes(request.into_body(), max_body).await {
+    let body = match to_bytes(body, usize::MAX).await {
         Ok(body) => body,
         Err(_) => {
             return (
-                StatusCode::PAYLOAD_TOO_LARGE,
+                StatusCode::BAD_REQUEST,
                 basic_info_error("Invalid or missing data"),
             )
                 .into_response();
         }
     };
+
+    let context = komari_auth::authenticate_request_with(
+        &state.auth,
+        &parts.headers,
+        &parts.uri,
+        &parts.method,
+        Some(&body),
+    )
+    .await;
+    if !context.permits(&[komari_auth::Role::Admin, komari_auth::Role::Client]) {
+        return unauthorized();
+    }
+
     let value = match serde_json::from_slice::<Value>(&body) {
         Ok(Value::Object(map)) => map,
         _ => {
@@ -65,18 +63,42 @@ pub async fn upload_basic_info(
     };
 
     let mut info = value;
-    info.insert("uuid".to_owned(), Value::String(identity.uuid.clone()));
+    // Agent identities always update their own row. Administrators may target
+    // a client explicitly through the body UUID.
+    let uuid = context.client_uuid.clone().or_else(|| {
+        info.get("uuid")
+            .and_then(Value::as_str)
+            .filter(|uuid| !uuid.is_empty())
+            .map(str::to_owned)
+    });
+    let Some(uuid) = uuid else {
+        return (StatusCode::BAD_REQUEST, basic_info_error("Invalid token")).into_response();
+    };
+    info.insert("uuid".to_owned(), Value::String(uuid.clone()));
 
-    // If the agent did not provide an address, use the peer address.
+    // If the agent did not provide an address, use the same trusted proxy
+    // headers as Go's `c.ClientIP()` and fall back to the socket peer.
     let has_address = non_empty_string(&info, "ipv4") || non_empty_string(&info, "ipv6");
     if !has_address {
-        if let Some(address) = peer {
-            match address.ip() {
-                std::net::IpAddr::V4(ip) => {
-                    info.insert("ipv4".to_owned(), Value::String(ip.to_string()));
-                }
-                std::net::IpAddr::V6(ip) => {
-                    info.insert("ipv6".to_owned(), Value::String(ip.to_string()));
+        if let Some(ip) = trusted_client_ip(&parts.headers, peer.map(|address| address.ip())) {
+            let key = if ip.is_ipv4() { "ipv4" } else { "ipv6" };
+            info.insert(key.to_owned(), Value::String(ip.to_string()));
+        }
+    }
+
+    // Go writes the regional-indicator emoji when GeoIP is enabled.
+    if let Ok(Some(true)) = state.db.config().get_as::<bool>(keys::GEO_IP_ENABLED_KEY) {
+        if let Some(service) = state.geoip.as_ref() {
+            let address = non_empty_string_value(&info, "ipv4")
+                .or_else(|| non_empty_string_value(&info, "ipv6"))
+                .and_then(|value| value.parse::<IpAddr>().ok());
+            if let Some(address) = address {
+                let geo = service.lookup(address).await;
+                if !geo.is_empty() {
+                    info.insert(
+                        "region".to_owned(),
+                        Value::String(region_unicode_emoji(&geo.iso_code)),
+                    );
                 }
             }
         }
@@ -89,7 +111,7 @@ pub async fn upload_basic_info(
         }
     };
 
-    match state.db.clients().patch(&identity.uuid, &patch) {
+    match state.db.clients().patch(&uuid, &patch) {
         Ok(_) => (StatusCode::OK, status_success()).into_response(),
         Err(error) => (
             StatusCode::INTERNAL_SERVER_ERROR,
@@ -104,9 +126,34 @@ fn basic_info_error(message: impl Into<String>) -> axum::Json<Value> {
 }
 
 fn non_empty_string(map: &Map<String, Value>, key: &str) -> bool {
+    non_empty_string_value(map, key).is_some()
+}
+
+fn non_empty_string_value(map: &Map<String, Value>, key: &str) -> Option<String> {
     map.get(key)
         .and_then(Value::as_str)
-        .is_some_and(|value| !value.is_empty())
+        .filter(|value| !value.is_empty())
+        .map(str::to_owned)
+}
+
+fn trusted_client_ip(headers: &axum::http::HeaderMap, peer: Option<IpAddr>) -> Option<IpAddr> {
+    if let Some(value) = headers
+        .get("x-forwarded-for")
+        .and_then(|value| value.to_str().ok())
+        .and_then(|value| value.split(',').next())
+    {
+        if let Ok(ip) = value.trim().parse::<IpAddr>() {
+            return Some(ip);
+        }
+    }
+    if let Some(value) = headers
+        .get("x-real-ip")
+        .and_then(|value| value.to_str().ok())
+        .and_then(|value| value.trim().parse::<IpAddr>().ok())
+    {
+        return Some(value);
+    }
+    peer
 }
 
 fn basic_info_patch(info: &Map<String, Value>) -> Result<ClientPatch, String> {

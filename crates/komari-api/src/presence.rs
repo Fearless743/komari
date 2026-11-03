@@ -117,13 +117,18 @@ impl PresenceTracker {
 
         let mut confirmed = Vec::with_capacity(expired.len());
         for expiry in expired {
-            self.hub.clear_presence(&expiry.uuid, expiry.connection_id);
-            self.hub.emit_offline(
-                expiry.uuid.clone(),
-                expiry.connection_id,
-                PresenceSource::HttpPost,
-            );
-            confirmed.push(expiry);
+            if self.hub.clear_presence(&expiry.uuid, expiry.connection_id) {
+                // A live WebSocket keeps the client online; only emit the
+                // offline event when no other presence source remains.
+                if !self.hub.is_ws_connected(&expiry.uuid) {
+                    self.hub.emit_offline(
+                        expiry.uuid.clone(),
+                        expiry.connection_id,
+                        PresenceSource::HttpPost,
+                    );
+                }
+                confirmed.push(expiry);
+            }
         }
         confirmed
     }
@@ -142,8 +147,10 @@ impl PresenceTracker {
         };
         if removed {
             self.hub.clear_presence(uuid, connection_id);
-            self.hub
-                .emit_offline(uuid, connection_id, PresenceSource::HttpPost);
+            if !self.hub.is_ws_connected(uuid) {
+                self.hub
+                    .emit_offline(uuid, connection_id, PresenceSource::HttpPost);
+            }
         }
         removed
     }
