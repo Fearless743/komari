@@ -92,14 +92,33 @@ jobs:
             echo "::warning::komari-web build.rs not present (B14 not merged); skipping theme byte check"
             exit 0
           fi
-          cargo build -p komari-web --release --locked
+          rlib="$(
+            cargo build -p komari-web --release --locked --message-format=json |
+              python3 -c '
+          import json, sys
+          found = ""
+          for line in sys.stdin:
+              try:
+                  message = json.loads(line)
+              except json.JSONDecodeError:
+                  continue
+              if message.get("reason") != "compiler-artifact":
+                  continue
+              if message.get("target", {}).get("name") not in ("komari_web", "komari-web"):
+                  continue
+              for name in message.get("filenames", []):
+                  if name.endswith(".rlib"):
+                      found = name
+          if found:
+              print(found)
+          '
+          )"
           marker="$(grep -oE 'assets/[A-Za-z0-9._-]+\.(js|css)' \
             "$KOMARI_DEFAULT_THEME_DIR/dist/index.html" | head -n1 || true)"
           if [[ -z "$marker" ]]; then
             echo "::error::no asset reference found in dist/index.html"
             exit 1
           fi
-          rlib="$(ls target/release/deps/libkomari_web-*.rlib 2>/dev/null | head -n1 || true)"
           if [[ -z "$rlib" ]]; then
             echo "::error::komari-web rlib not found"
             exit 1
@@ -285,6 +304,8 @@ jobs:
         uses: docker/build-push-action@v6
         with:
           context: .
+          load: true
+          platforms: linux/amd64
           push: false
           tags: komari:ci
           build-args: |
@@ -294,3 +315,19 @@ jobs:
             KOMARI_DEFAULT_THEME_DIR=/src/theme
           cache-from: type=gha
           cache-to: type=gha,mode=max
+
+      - name: Check image theme marker
+        shell: bash
+        run: |
+          marker="$(grep -oE 'assets/[A-Za-z0-9._-]+\.(js|css)' \
+            .komari-theme/dist/index.html | head -n1 || true)"
+          if [[ -z "$marker" ]]; then
+            echo "::warning::no theme asset marker found in .komari-theme/dist/index.html"
+            exit 0
+          fi
+          cid="$(docker create komari:ci)"
+          trap 'docker rm -f "$cid" >/dev/null 2>&1 || true' EXIT
+          docker cp "$cid:/usr/local/bin/komari" "$RUNNER_TEMP/komari-image"
+          if ! grep -a -q "$marker" "$RUNNER_TEMP/komari-image"; then
+            echo "::warning::komari-cli does not link komari-web yet (B09); the image has no UI"
+          fi
