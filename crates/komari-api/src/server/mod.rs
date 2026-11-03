@@ -34,21 +34,19 @@ pub use assets::{
     refresh_web_assets,
 };
 pub use background::{BackgroundConfig, BackgroundTasks};
-pub use oauth::{
-    BINDING_COOKIE, OAUTH_STATE_COOKIE, OAuthRuntime, SESSION_COOKIE,
-};
+pub use oauth::{BINDING_COOKIE, OAUTH_STATE_COOKIE, OAuthRuntime, SESSION_COOKIE};
 
 use std::future::Future;
 use std::path::PathBuf;
 use std::sync::Arc;
 
 use anyhow::{Context, Result};
+use axum::Router;
 use axum::extract::{DefaultBodyLimit, Request, State};
 use axum::http::{HeaderValue, Method, StatusCode, header};
 use axum::middleware::{self, Next};
 use axum::response::{IntoResponse, Response};
 use axum::routing::any;
-use axum::Router;
 use komari_auth::{AuthLayer, PrivateSite};
 use komari_config::Config;
 use komari_db::{BackupOptions, Db, DbError, restore_pending_backup};
@@ -298,7 +296,8 @@ impl ServerBuilder {
         }
         router = router.layer(DefaultBodyLimit::max(config.body_limit_bytes));
 
-        let background = BackgroundTasks::start(&state, assets.clone(), ddns.clone(), &config.background);
+        let background =
+            BackgroundTasks::start(&state, assets.clone(), ddns.clone(), &config.background);
 
         info!(
             listen = %config.listen,
@@ -393,7 +392,9 @@ impl Server {
             config,
             ..
         } = self;
-        let address = listener.local_addr().context("failed to read listen address")?;
+        let address = listener
+            .local_addr()
+            .context("failed to read listen address")?;
         info!("Starting server on {} ...", config.listen);
         let result = axum::serve(listener, router)
             .with_graceful_shutdown(shutdown)
@@ -413,14 +414,22 @@ impl Server {
 /// A failed restore is logged and ignored, matching the Go startup path: a
 /// broken old database must not prevent the operator from fixing it.
 pub fn prepare_database(config: &ServerConfig) -> Result<Db> {
-    std::fs::create_dir_all(&config.data_dir)
-        .with_context(|| format!("failed to create data directory {}", config.data_dir.display()))?;
-    std::fs::create_dir_all(config.data_dir.join("theme"))
-        .with_context(|| format!("failed to create theme directory {}", config.data_dir.display()))?;
+    std::fs::create_dir_all(&config.data_dir).with_context(|| {
+        format!(
+            "failed to create data directory {}",
+            config.data_dir.display()
+        )
+    })?;
+    std::fs::create_dir_all(config.data_dir.join("theme")).with_context(|| {
+        format!(
+            "failed to create theme directory {}",
+            config.data_dir.display()
+        )
+    })?;
 
     if config.database_path.as_os_str() != ":memory:" {
-        let options = BackupOptions::new(&config.data_dir)
-            .with_database_path(&config.database_path);
+        let options =
+            BackupOptions::new(&config.data_dir).with_database_path(&config.database_path);
         match restore_pending_backup(&options) {
             Ok(Some(report)) => info!(
                 database_bytes = report.database_bytes,
@@ -434,10 +443,19 @@ pub fn prepare_database(config: &ServerConfig) -> Result<Db> {
 
     let db = Db::open(&config.database_path)
         .with_context(|| format!("failed to open database {}", config.database_path.display()))?;
-    db.migrate()
-        .with_context(|| format!("failed to migrate database {}", config.database_path.display()))?;
+    db.migrate().with_context(|| {
+        format!(
+            "failed to migrate database {}",
+            config.database_path.display()
+        )
+    })?;
 
-    if db.accounts().count().context("failed to count user accounts")? == 0 {
+    if db
+        .accounts()
+        .count()
+        .context("failed to count user accounts")?
+        == 0
+    {
         let (username, password, _) = db
             .accounts()
             .create_default_admin()
@@ -464,11 +482,7 @@ async fn ping() -> &'static str {
 
 /// Go's dynamic CORS middleware plus the `/api` `Cache-Control: no-store`
 /// header.
-async fn cors_and_cache(
-    State(state): State<ApiState>,
-    request: Request,
-    next: Next,
-) -> Response {
+async fn cors_and_cache(State(state): State<ApiState>, request: Request, next: Next) -> Response {
     let path = request.uri().path().to_owned();
     let cors = state.allow_cors();
 

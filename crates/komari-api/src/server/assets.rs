@@ -15,10 +15,7 @@ use komari_web::{SiteMeta, WebAssets, WebConfig};
 use crate::server::ServerConfig;
 
 /// Build the asset service for a server configuration.
-pub fn build_web_assets(
-    config: &ServerConfig,
-    db: &Db,
-) -> Result<Arc<WebAssets>, DbError> {
+pub fn build_web_assets(config: &ServerConfig, db: &Db) -> Result<Arc<WebAssets>, DbError> {
     let assets = Arc::new(WebAssets::new(WebConfig {
         data_dir: config.data_dir.clone(),
         theme: config.theme.clone(),

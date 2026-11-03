@@ -26,14 +26,14 @@ use komari_db::{Db, LocalTime};
 use komari_ddns::DdnsService;
 use komari_jobs::CancelToken;
 use komari_notify::NotificationService;
+use komari_notify::notifier::offline::OfflineNotifier;
 use komari_notify::notifier::traffic::{TrafficTracker, TrafficUsage};
 use komari_notify::notifier::{
     OnlineDecision, check_expire, check_traffic, next_run, run_all_load_tasks,
 };
-use komari_notify::notifier::offline::OfflineNotifier;
 use komari_web::WebAssets;
-use tokio::task::JoinHandle;
 use tokio::sync::broadcast::error::RecvError;
+use tokio::task::JoinHandle;
 
 use crate::ClientEventKind;
 use crate::server::assets::refresh_web_assets;
@@ -203,12 +203,7 @@ impl BackgroundTasks {
         });
     }
 
-    fn spawn_asset_refresh(
-        &self,
-        assets: Arc<WebAssets>,
-        db: Arc<Db>,
-        config: &BackgroundConfig,
-    ) {
+    fn spawn_asset_refresh(&self, assets: Arc<WebAssets>, db: Arc<Db>, config: &BackgroundConfig) {
         let cancel = self.cancel.clone();
         let interval = config.asset_refresh_interval;
         self.spawn("asset-refresh", async move {
@@ -230,12 +225,7 @@ impl BackgroundTasks {
         });
     }
 
-    fn spawn_ddns_sync(
-        &self,
-        ddns: Arc<DdnsService>,
-        db: Arc<Db>,
-        config: &BackgroundConfig,
-    ) {
+    fn spawn_ddns_sync(&self, ddns: Arc<DdnsService>, db: Arc<Db>, config: &BackgroundConfig) {
         let cancel = self.cancel.clone();
         let fallback = config.ddns_interval;
         self.spawn("ddns-sync", async move {
@@ -457,5 +447,3 @@ async fn deliver(db: &Db, event: &EventMessage) {
         Err(error) => tracing::warn!(%error, "failed to load notification provider"),
     }
 }
-
-
