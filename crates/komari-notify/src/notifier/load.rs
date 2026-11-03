@@ -55,7 +55,8 @@ pub fn get_metric_value(record: &Record, metric: &str, client: Option<&Client>) 
 
 fn percentage(used: i64, record_total: i64, client_total: i64) -> f32 {
     // Go only checks `record.*Total > 0`, then divides by the client's total.
-    if record_total > 0 && client_total > 0 && used >= 0 {
+    if record_total > 0 && used >= 0 {
+        // Dividing by a zero client total yields infinity, exactly like Go.
         used as f32 / client_total as f32 * 100.0
     } else {
         0.0
