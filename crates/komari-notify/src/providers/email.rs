@@ -19,8 +19,11 @@ use serde_json::Value;
 use crate::error::{NotifyError, Result};
 use crate::provider::{ConfigField, MessageSender};
 
+/// Configuration keys removed from external API responses.
+pub const SENSITIVE_FIELDS: &[&str] = &["password"];
+
 /// Provider configuration (`email.Addition`).
-#[derive(Clone, Debug, Default, Serialize, Deserialize)]
+#[derive(Clone, Default, Serialize, Deserialize)]
 #[serde(default)]
 pub struct EmailConfig {
     pub host: String,
@@ -33,8 +36,17 @@ pub struct EmailConfig {
     pub use_login_auth: bool,
 }
 
+impl std::fmt::Debug for EmailConfig {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        let redacted = crate::redact::redact_serialized("email", self);
+        f.debug_struct("EmailConfig")
+            .field("config", &redacted)
+            .finish()
+    }
+}
+
 /// A fully-built SMTP message.
-#[derive(Clone, Debug)]
+#[derive(Clone)]
 pub struct EmailEnvelope {
     pub host: String,
     pub port: u16,
@@ -46,6 +58,22 @@ pub struct EmailEnvelope {
     pub recipients: Vec<String>,
     /// The fully built MIME message (lettre keeps the encoded headers/body).
     pub message: Message,
+}
+
+impl std::fmt::Debug for EmailEnvelope {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("EmailEnvelope")
+            .field("host", &self.host)
+            .field("port", &self.port)
+            .field("use_ssl", &self.use_ssl)
+            .field("use_login_auth", &self.use_login_auth)
+            .field("username", &self.username)
+            .field("password", &"<redacted>")
+            .field("from", &self.from)
+            .field("recipients", &self.recipients)
+            .field("message", &format!("<{} bytes redacted>", self.raw().len()))
+            .finish()
+    }
 }
 
 impl EmailEnvelope {
@@ -146,7 +174,7 @@ impl EmailSender {
     }
 
     pub fn from_value(value: Value) -> Result<Self> {
-        let config: EmailConfig = serde_json::from_value(value)?;
+        let config: EmailConfig = crate::provider::deserialize_config("email", value)?;
         Ok(Self::new(config))
     }
 
@@ -154,7 +182,7 @@ impl EmailSender {
         value: Value,
         transport: Arc<dyn EmailTransport>,
     ) -> Result<Self> {
-        let config: EmailConfig = serde_json::from_value(value)?;
+        let config: EmailConfig = crate::provider::deserialize_config("email", value)?;
         Ok(Self::with_transport(config, transport))
     }
 
@@ -299,6 +327,10 @@ impl MessageSender for EmailSender {
 
     fn config(&self) -> Value {
         serde_json::to_value(&self.config).unwrap_or(Value::Null)
+    }
+
+    fn sensitive_fields(&self) -> &'static [&'static str] {
+        crate::providers::email::SENSITIVE_FIELDS
     }
 
     async fn send_text(&self, message: &str, title: &str) -> Result<()> {

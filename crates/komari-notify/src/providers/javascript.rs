@@ -13,11 +13,23 @@ use serde_json::Value;
 use crate::error::{NotifyError, Result};
 use crate::provider::{ConfigField, MessageSender};
 
+/// Configuration keys removed from external API responses.
+pub const SENSITIVE_FIELDS: &[&str] = &["script", "code"];
+
 /// Provider configuration (`javascript.Addition`).
-#[derive(Clone, Debug, Default, Serialize, Deserialize)]
+#[derive(Clone, Default, Serialize, Deserialize)]
 #[serde(default)]
 pub struct JavaScriptConfig {
     pub script: String,
+}
+
+impl std::fmt::Debug for JavaScriptConfig {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        let redacted = crate::redact::redact_serialized("Javascript", self);
+        f.debug_struct("JavaScriptConfig")
+            .field("config", &redacted)
+            .finish()
+    }
 }
 
 /// Placeholder for Go's `JavaScriptSender`.
@@ -31,7 +43,7 @@ impl JavaScriptSender {
     }
 
     pub fn from_value(value: Value) -> Result<Self> {
-        let config: JavaScriptConfig = serde_json::from_value(value)?;
+        let config: JavaScriptConfig = crate::provider::deserialize_config("Javascript", value)?;
         Ok(Self::new(config))
     }
 
@@ -64,6 +76,10 @@ impl MessageSender for JavaScriptSender {
 
     fn config(&self) -> Value {
         serde_json::to_value(&self.config).unwrap_or(Value::Null)
+    }
+
+    fn sensitive_fields(&self) -> &'static [&'static str] {
+        crate::providers::javascript::SENSITIVE_FIELDS
     }
 
     async fn init(&self) -> Result<()> {

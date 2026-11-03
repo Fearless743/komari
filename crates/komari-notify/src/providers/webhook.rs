@@ -14,8 +14,11 @@ use crate::provider::{ConfigField, MessageSender};
 /// Default request body from `webhook.Addition`.
 pub const DEFAULT_BODY: &str = r#"{"message":"{{message}}","title":"{{title}}"}"#;
 
+/// Configuration keys removed from external API responses.
+pub const SENSITIVE_FIELDS: &[&str] = &["headers", "body", "password"];
+
 /// Provider configuration (`webhook.Addition`).
-#[derive(Clone, Debug, Default, Serialize, Deserialize)]
+#[derive(Clone, Default, Serialize, Deserialize)]
 #[serde(default)]
 pub struct WebhookConfig {
     pub url: String,
@@ -25,6 +28,15 @@ pub struct WebhookConfig {
     pub body: String,
     pub username: String,
     pub password: String,
+}
+
+impl std::fmt::Debug for WebhookConfig {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        let redacted = crate::redact::redact_serialized("webhook", self);
+        f.debug_struct("WebhookConfig")
+            .field("config", &redacted)
+            .finish()
+    }
 }
 
 /// Webhook sender.
@@ -43,7 +55,7 @@ impl WebhookSender {
     }
 
     pub fn from_value(value: Value) -> Result<Self> {
-        let config: WebhookConfig = serde_json::from_value(value)?;
+        let config: WebhookConfig = crate::provider::deserialize_config("webhook", value)?;
         Ok(Self::new(config))
     }
 
@@ -51,7 +63,7 @@ impl WebhookSender {
         value: Value,
         transport: Arc<dyn HttpTransport>,
     ) -> Result<Self> {
-        let config: WebhookConfig = serde_json::from_value(value)?;
+        let config: WebhookConfig = crate::provider::deserialize_config("webhook", value)?;
         Ok(Self::with_transport(config, transport))
     }
 
@@ -197,6 +209,10 @@ impl MessageSender for WebhookSender {
         serde_json::to_value(&self.config).unwrap_or(Value::Null)
     }
 
+    fn sensitive_fields(&self) -> &'static [&'static str] {
+        crate::providers::webhook::SENSITIVE_FIELDS
+    }
+
     async fn send_text(&self, message: &str, title: &str) -> Result<()> {
         let request = self.build_request(message, title)?;
         let response = self.transport.execute(request).await?;
@@ -206,10 +222,10 @@ impl MessageSender for WebhookSender {
 
 fn check_response(response: HttpResponse) -> Result<()> {
     if !(200..300).contains(&response.status) {
+        // Never echo the remote body: it can contain tokens or secrets.
         return Err(NotifyError::Send(format!(
-            "webhook request failed with status {}: {}",
-            response.status,
-            response.body_text()
+            "webhook request failed with status {}",
+            response.status
         )));
     }
     Ok(())
