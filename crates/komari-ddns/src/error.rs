@@ -33,6 +33,10 @@ pub enum DdnsError {
         body: String,
     },
 
+    /// An endpoint returned a body that is not valid JSON.
+    #[error("invalid JSON response: {0}")]
+    Json(#[from] serde_json::Error),
+
     /// A provider rejected the synchronization request.
     #[error("{0}")]
     Provider(String),

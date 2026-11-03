@@ -115,7 +115,9 @@ impl DdnsFactory {
 
 /// Register the providers that the Go backend links through `ddns.All()`.
 pub fn register_builtin_providers(factory: &DdnsFactory) {
+    crate::providers::cloudflare::register(factory);
     crate::providers::empty::register(factory);
+    crate::providers::webhook::register(factory);
 }
 
 /// Process-wide registry with all built-in providers.
