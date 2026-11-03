@@ -903,9 +903,11 @@ fn max_compression_ratio_is_enforced() {
     let destination = TempDir::new("backup-ratio-destination");
     let target = sentinel_target(&destination);
     let mut limited = options(&target);
-    limited.max_compression_ratio = 10;
+    // Above the SQLite snapshot's ratio, below the zero-filled file's ratio.
+    limited.max_compression_ratio = 50;
     let error = import_backup_bytes(&limited, &archive).unwrap_err();
     assert!(matches!(error, DbError::BackupLimit(_)), "{error}");
+    assert!(error.to_string().contains("zeros.bin"), "{error}");
     assert_sentinel(&target);
 }
 
