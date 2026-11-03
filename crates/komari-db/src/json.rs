@@ -11,8 +11,7 @@ use serde::{Deserialize, Serialize};
 /// `Value` marshals to a JSON array and `Scan` accepts the text produced by SQLite.
 /// SQL `NULL` is treated as an empty array (the Go implementation would error;
 /// accepting `NULL` lets us read rows written by other tools without failing).
-#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize)]
-#[serde(transparent)]
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub struct StringArray(pub Vec<String>);
 
 impl StringArray {
@@ -32,10 +31,17 @@ impl StringArray {
         self.0.is_empty()
     }
 
-    /// Serialize exactly as Go's `StringArray.Value` does.
+    /// Serialize exactly as Go's `StringArray.Value` does for its zero value:
+    /// a nil slice marshals to JSON `null`. An empty but non-nil Go slice
+    /// marshals to `[]`; Rust has no nil distinction, so the zero value uses
+    /// `null` to match the common GORM path.
     pub fn to_json(&self) -> String {
-        // Serializing a `Vec<String>` cannot fail.
-        serde_json::to_string(&self.0).expect("string arrays always serialize")
+        if self.0.is_empty() {
+            "null".to_owned()
+        } else {
+            // Serializing a `Vec<String>` cannot fail.
+            serde_json::to_string(&self.0).expect("string arrays always serialize")
+        }
     }
 
     /// Parse the JSON representation produced by `StringArray.Value`.
@@ -117,6 +123,16 @@ impl<'de> Deserialize<'de> for StringArray {
     }
 }
 
+impl Serialize for StringArray {
+    fn serialize<S: serde::Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
+        if self.0.is_empty() {
+            serializer.serialize_none()
+        } else {
+            self.0.serialize(serializer)
+        }
+    }
+}
+
 impl fmt::Display for StringArray {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.write_str(&self.to_json())
@@ -168,8 +184,13 @@ mod tests {
     }
 
     #[test]
-    fn empty_array_is_not_null() {
-        assert_eq!(StringArray::default().to_json(), "[]");
+    fn empty_array_serializes_as_go_nil() {
+        assert_eq!(StringArray::default().to_json(), "null");
+        assert_eq!(
+            serde_json::to_string(&StringArray::default()).unwrap(),
+            "null"
+        );
+        assert_eq!(StringArray::new(["a"]).to_json(), r#"["a"]"#);
     }
 
     #[test]

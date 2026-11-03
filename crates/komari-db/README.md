@@ -116,6 +116,9 @@ Errors are defined by `DbError` (`thiserror`); lookups return
   correct across DST transitions.
 
 `StringArray` stores a JSON array of strings, matching `models.StringArray`.
+Its zero value serializes as `null` (Go's nil slice) and both `null` and SQL
+`NULL` are read back as an empty array, so rows written by Go or other tools
+remain readable.
 
 ## Tests
 
