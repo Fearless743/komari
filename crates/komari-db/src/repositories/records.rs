@@ -154,6 +154,22 @@ impl Records<'_> {
         Ok(())
     }
 
+    /// Insert one metric sample and its GPU rows atomically.
+    ///
+    /// The record is inserted first (matching Go's realtime order), then the
+    /// GPU rows; any failure rolls the whole transaction back so a retry does
+    /// not duplicate GPU samples.
+    pub fn insert_with_gpu(&self, record: &Record, gpu_records: &[GPURecord]) -> Result<()> {
+        let mut conn = self.db.conn();
+        let tx = conn.transaction()?;
+        insert_record(&tx, RecordTable::Live.table(), record)?;
+        for gpu in gpu_records {
+            insert_gpu_record(&tx, RecordTable::Live.gpu_table(), gpu)?;
+        }
+        tx.commit()?;
+        Ok(())
+    }
+
     pub fn insert_gpu_batch(&self, records: &[GPURecord]) -> Result<()> {
         self.insert_gpu_batch_into(RecordTable::Live, records)
     }
