@@ -124,6 +124,25 @@ fn empty_database_round_trip() {
 }
 
 #[test]
+fn in_memory_database_exports_to_a_restorable_archive() {
+    let db = Db::open_in_memory().expect("in-memory database");
+    db.migrate().expect("migrate");
+    db.config().set("sitename", "in-memory").unwrap();
+
+    let mut export_options = BackupOptions::new("unused");
+    export_options.include_data = false;
+    let archive = db.export_backup(&export_options).expect("export");
+
+    let destination = TempDir::new("backup-memory-destination");
+    let target = destination.join("data");
+    import_backup_bytes(&options(&target), &archive).expect("import");
+
+    let restored = Db::open(target.join(BACKUP_DB_NAME)).unwrap();
+    let sitename: Option<String> = restored.config().get_as("sitename").unwrap();
+    assert_eq!(sitename.as_deref(), Some("in-memory"));
+}
+
+#[test]
 fn data_directory_and_rows_round_trip() {
     let source = TempDir::new("backup-data-source");
     let data = make_data_dir(&source);
