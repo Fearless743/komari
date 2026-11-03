@@ -76,8 +76,16 @@ pub(crate) async fn get_records(
         return respond_error(StatusCode::BAD_REQUEST, "Invalid load_type parameter");
     }
 
+    let Some(window) = chrono::TimeDelta::try_hours(hours) else {
+        // Go silently wraps the duration for absurd values; rejecting keeps
+        // chrono from panicking on an out-of-range TimeDelta.
+        return respond_error(StatusCode::BAD_REQUEST, "Invalid hours parameter");
+    };
+    let Some(start_instant) = chrono::Utc::now().checked_sub_signed(window) else {
+        return respond_error(StatusCode::BAD_REQUEST, "Invalid hours parameter");
+    };
     let end = LocalTime::now();
-    let start = LocalTime::from_instant(chrono::Utc::now() - chrono::TimeDelta::hours(hours));
+    let start = LocalTime::from_instant(start_instant);
     let client_records = match state.db.records().by_client_and_time(&uuid, start, end) {
         Ok(records) => records,
         Err(error) => {
@@ -226,9 +234,11 @@ fn filter_records_by_load_type(records: &[Record], load_type: &str) -> Vec<Value
                 "connections" => {
                     filtered.insert("connections".to_owned(), json!(record.connections));
                     filtered.insert("connections_udp".to_owned(), json!(record.connections_udp));
+                    // Go's `int` subtraction wraps on overflow; avoid a Rust
+                    // debug-build panic on corrupt database values.
                     filtered.insert(
                         "connections_tcp".to_owned(),
-                        json!(record.connections - record.connections_udp),
+                        json!(record.connections.wrapping_sub(record.connections_udp)),
                     );
                 }
                 _ => {}
