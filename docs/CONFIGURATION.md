@@ -48,6 +48,7 @@ CLI 的 `--database` 与 `--db-file` 是同一个参数，`--db-file` 是可见�
 | `KOMARI_ENABLE_CLOUDFLARED` | `--enable-cloudflared[=BOOL]` | `false` | 是否启用 cloudflared。当前只解析，尚未启动隧道进程。 |
 | `KOMARI_CLOUDFLARED_TOKEN` | 无 | 未设置 | cloudflared tunnel token。当前只解析，尚未使用。 |
 | `KOMARI_WS_DISABLE_ORIGIN` | `--ws-disable-origin[=BOOL]` | `false` | 是否关闭 WebSocket Origin 校验。当前只解析，WS 由 B05/B14 装配。 |
+| `KOMARI_BODY_LIMIT` | `--body-limit <BYTES>` | `16777216`（16 MiB） | 普通 HTTP 请求体上限（字节），必须为正整数。`/api/admin/upload/backup` 使用独立的 2 GiB 上限。 |
 
 ### 编译期与测试变量
 
@@ -107,6 +108,7 @@ CLI 的 `--database` 与 `--db-file` 是同一个参数，`--db-file` 是可见�
 | `--allow-cors[=<BOOL>]` | 布尔 | 启动 CORS 开关。 |
 | `--enable-cloudflared[=<BOOL>]` | 布尔 | 启用 cloudflared。 |
 | `--ws-disable-origin[=<BOOL>]` | 布尔 | 关闭 WS Origin 校验。 |
+| `--body-limit <BYTES>` | 正整数 | 普通 HTTP 请求体上限；备份上传路径使用独立上限。 |
 
 全局参数可以写在子命令之前或之后（clap `global = true`）。
 
