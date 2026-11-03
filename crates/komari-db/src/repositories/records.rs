@@ -168,9 +168,43 @@ impl Records<'_> {
         Ok(())
     }
 
-    /// Samples for one client in `[start, end]`, oldest first (Go
-    /// `GetRecordsByClientAndTime`).
+    /// Samples for one client in `[start, end]`, oldest first.
+    ///
+    /// This is the port of Go `GetRecordsByClientAndTime`: recent rows are
+    /// read from `records` (clamped to the last four hours), long-term rows
+    /// from `records_long_term`, and the recent rows are downsampled to one
+    /// sample per 15-minute bucket when long-term rows exist.
     pub fn by_client_and_time(
+        &self,
+        client: &str,
+        start: LocalTime,
+        end: LocalTime,
+    ) -> Result<Vec<Record>> {
+        self.combined_by_client_and_time(client, start, end)
+    }
+
+    /// Explicit alias for the combined live + long-term query.
+    pub fn combined_by_client_and_time(
+        &self,
+        client: &str,
+        start: LocalTime,
+        end: LocalTime,
+    ) -> Result<Vec<Record>> {
+        let live = self.recent_records(client, start, end)?;
+        let long_term = self.by_client_and_time_in(RecordTable::LongTerm, client, start, end)?;
+
+        if long_term.is_empty() {
+            // Go returns the raw recent rows when no long-term data exists.
+            return Ok(live);
+        }
+
+        let mut records = downsample_recent_records(live);
+        records.extend(long_term);
+        Ok(records)
+    }
+
+    /// Live-table-only query, without long-term merging or downsampling.
+    pub fn live_by_client_and_time(
         &self,
         client: &str,
         start: LocalTime,
@@ -179,6 +213,7 @@ impl Records<'_> {
         self.by_client_and_time_in(RecordTable::Live, client, start, end)
     }
 
+    /// Query a single physical table.
     pub fn by_client_and_time_in(
         &self,
         table: RecordTable,
@@ -198,9 +233,77 @@ impl Records<'_> {
         )
     }
 
-    /// GPU samples for one client in `[start, end]`, ordered by time then
-    /// device index.
+    /// Recent records clamped to the same window Go uses (`now - 4h - 1m`).
+    fn recent_records(
+        &self,
+        client: &str,
+        start: LocalTime,
+        end: LocalTime,
+    ) -> Result<Vec<Record>> {
+        let four_hours_ago = LocalTime::from_naive(
+            LocalTime::now().to_naive() - chrono::TimeDelta::minutes(4 * 60 + 1),
+        );
+        if end <= four_hours_ago {
+            return Ok(Vec::new());
+        }
+        let recent_start = if start < four_hours_ago {
+            four_hours_ago
+        } else {
+            start
+        };
+        self.by_client_and_time_in(RecordTable::Live, client, recent_start, end)
+    }
+
+    /// GPU samples for one client in `[start, end]`.
+    ///
+    /// This is the port of Go `GetGPURecordsByClientAndTime`: live samples
+    /// from the last four hours plus long-term samples, ordered by time and
+    /// device index. GPU records are not downsampled.
     pub fn gpu_by_client_and_time(
+        &self,
+        client: &str,
+        start: LocalTime,
+        end: LocalTime,
+    ) -> Result<Vec<GPURecord>> {
+        self.combined_gpu_by_client_and_time(client, start, end)
+    }
+
+    /// Explicit alias for the combined GPU query.
+    pub fn combined_gpu_by_client_and_time(
+        &self,
+        client: &str,
+        start: LocalTime,
+        end: LocalTime,
+    ) -> Result<Vec<GPURecord>> {
+        let four_hours_ago = LocalTime::from_naive(
+            LocalTime::now().to_naive() - chrono::TimeDelta::minutes(4 * 60 + 1),
+        );
+
+        let mut records = Vec::new();
+        if end > four_hours_ago {
+            let recent_start = if start < four_hours_ago {
+                four_hours_ago
+            } else {
+                start
+            };
+            records.extend(self.gpu_by_client_and_time_in(
+                RecordTable::Live,
+                client,
+                recent_start,
+                end,
+            )?);
+        }
+        records.extend(self.gpu_by_client_and_time_in(
+            RecordTable::LongTerm,
+            client,
+            start,
+            end,
+        )?);
+        Ok(records)
+    }
+
+    /// Live-table-only GPU query.
+    pub fn live_gpu_by_client_and_time(
         &self,
         client: &str,
         start: LocalTime,
@@ -209,6 +312,7 @@ impl Records<'_> {
         self.gpu_by_client_and_time_in(RecordTable::Live, client, start, end)
     }
 
+    /// Query a single physical GPU table.
     pub fn gpu_by_client_and_time_in(
         &self,
         table: RecordTable,
@@ -419,4 +523,30 @@ fn insert_gpu_record(conn: &Connection, table: &str, record: &GPURecord) -> Resu
         ],
     )?;
     Ok(())
+}
+
+/// Port of the recent-record grouping in Go `GetRecordsByClientAndTime`: when
+/// long-term data exists, keep only the newest sample in each 15-minute bucket
+/// and return the buckets in ascending time order.
+fn downsample_recent_records(records: Vec<Record>) -> Vec<Record> {
+    use std::collections::HashMap;
+
+    let mut grouped: HashMap<i64, Record> = HashMap::new();
+    for record in records {
+        let bucket = record
+            .time
+            .timestamp()
+            .unwrap_or_default()
+            .div_euclid(15 * 60);
+        match grouped.get(&bucket) {
+            Some(existing) if existing.time >= record.time => {}
+            _ => {
+                grouped.insert(bucket, record);
+            }
+        }
+    }
+
+    let mut result: Vec<Record> = grouped.into_values().collect();
+    result.sort_by_key(|record| record.time);
+    result
 }

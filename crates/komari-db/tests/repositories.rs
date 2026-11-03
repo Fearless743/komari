@@ -344,6 +344,119 @@ fn records_insert_query_latest_and_aggregate() {
 }
 
 #[test]
+fn records_combined_merges_long_term_and_downsamples_recent() {
+    let db = memory_db();
+    let records = db.records();
+    let client = db.clients().create_named("combined").unwrap();
+
+    // Anchor three live samples in a completed 15-minute bucket so the
+    // grouping is deterministic regardless of when the test runs.
+    let now = LocalTime::now().timestamp().unwrap();
+    let quarter = ((now - 900) / 900) * 900;
+    let at = |offset: i64| LocalTime::from_unix_timestamp(quarter + offset).unwrap();
+
+    let mut first = Record::new(&client.uuid);
+    first.time = at(60);
+    first.cpu = 10.0;
+    let mut second = Record::new(&client.uuid);
+    second.time = at(120);
+    second.cpu = 20.0;
+    let mut third = Record::new(&client.uuid);
+    third.time = at(180);
+    third.cpu = 30.0;
+    records
+        .insert_batch(&[first, second, third.clone()])
+        .unwrap();
+
+    let mut long_term = Record::new(&client.uuid);
+    long_term.time = at(-1800);
+    long_term.cpu = 99.0;
+    records
+        .insert_into(RecordTable::LongTerm, &long_term)
+        .unwrap();
+
+    let start = at(-7200);
+    let end = LocalTime::now();
+    let combined = records
+        .combined_by_client_and_time(&client.uuid, start, end)
+        .unwrap();
+    assert_eq!(combined.len(), 2, "recent bucket + one long-term row");
+    // The newest sample in the bucket survives; long-term rows are appended.
+    assert_eq!(combined[0].cpu, 30.0);
+    assert_eq!(combined[0].time, third.time);
+    assert_eq!(combined[1].cpu, 99.0);
+    assert_eq!(combined[1].time, long_term.time);
+
+    // The explicit live-only API still returns all raw rows.
+    assert_eq!(
+        records
+            .live_by_client_and_time(&client.uuid, start, end)
+            .unwrap()
+            .len(),
+        3
+    );
+}
+
+#[test]
+fn gpu_combined_merges_live_and_long_term_without_downsampling() {
+    let db = memory_db();
+    let records = db.records();
+    let client = db.clients().create_named("gpu-combined").unwrap();
+
+    let now = LocalTime::now().timestamp().unwrap();
+    let quarter = ((now - 900) / 900) * 900;
+    let at = |offset: i64| LocalTime::from_unix_timestamp(quarter + offset).unwrap();
+
+    let live_one = GPURecord {
+        client: client.uuid.clone(),
+        time: at(60),
+        device_index: 1,
+        device_name: "GPU A".to_owned(),
+        utilization: 10.0,
+        ..GPURecord::default()
+    };
+    let live_two = GPURecord {
+        client: client.uuid.clone(),
+        time: at(120),
+        device_index: 0,
+        device_name: "GPU B".to_owned(),
+        utilization: 20.0,
+        ..GPURecord::default()
+    };
+    let long_term = GPURecord {
+        client: client.uuid.clone(),
+        time: at(-1800),
+        device_index: 2,
+        device_name: "GPU C".to_owned(),
+        utilization: 30.0,
+        ..GPURecord::default()
+    };
+    records
+        .insert_gpu_batch(&[live_one.clone(), live_two.clone()])
+        .unwrap();
+    records
+        .insert_gpu_into(RecordTable::LongTerm, &long_term)
+        .unwrap();
+
+    let start = at(-7200);
+    let end = LocalTime::now();
+    let combined = records
+        .combined_gpu_by_client_and_time(&client.uuid, start, end)
+        .unwrap();
+    assert_eq!(combined.len(), 3);
+    assert_eq!(combined[0].time, live_one.time);
+    assert_eq!(combined[1].time, live_two.time);
+    assert_eq!(combined[2].time, long_term.time);
+    assert_eq!(
+        records
+            .live_gpu_by_client_and_time(&client.uuid, start, end)
+            .unwrap()
+            .len(),
+        2
+    );
+}
+
+#[test]
 fn gpu_records_round_trip() {
     let db = memory_db();
     let records = db.records();
