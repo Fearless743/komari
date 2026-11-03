@@ -55,7 +55,7 @@ use komari_geoip::GeoIpService;
 use komari_web::WebAssets;
 use tokio::net::TcpListener;
 use tower_http::limit::RequestBodyLimitLayer;
-use tower_http::trace::{DefaultMakeSpan, DefaultOnResponse, TraceLayer};
+use tower_http::trace::{DefaultOnResponse, MakeSpan, TraceLayer};
 use tracing::{Level, error, info, warn};
 
 use crate::client_router_with_state;
@@ -299,7 +299,7 @@ impl ServerBuilder {
         if config.request_logging {
             router = router.layer(
                 TraceLayer::new_for_http()
-                    .make_span_with(DefaultMakeSpan::new().level(Level::INFO))
+                    .make_span_with(RequestSpan)
                     .on_response(DefaultOnResponse::new().level(Level::INFO)),
             );
         }
@@ -494,6 +494,24 @@ pub async fn run(config: ServerConfig) -> Result<()> {
 
 async fn ping() -> &'static str {
     "pong"
+}
+
+/// Request span that logs the path but never the query string.
+///
+/// Agent tokens are passed as `?token=`, so logging the full URI would leak
+/// credentials into access logs.
+#[derive(Clone, Copy, Debug)]
+struct RequestSpan;
+
+impl<B> MakeSpan<B> for RequestSpan {
+    fn make_span(&mut self, request: &http::Request<B>) -> tracing::Span {
+        tracing::info_span!(
+            "http",
+            method = %request.method(),
+            path = %request.uri().path(),
+            version = ?request.version(),
+        )
+    }
 }
 
 /// Go's dynamic CORS middleware plus the `/api` `Cache-Control: no-store`
