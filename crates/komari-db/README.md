@@ -145,10 +145,14 @@ println!("restored {} data files", report.data_entries);
 | `restore_pending_backup(&options)` | restore `<data_dir>/backup.zip` when present (Go startup behaviour) |
 
 `export_backup_to` refuses to write over the live database, its `-wal`/`-shm`
-sidecars or the configured database path; use a separate archive path.
+sidecars or the configured database path, including through symlinked
+directories or symlinked destination files; use a separate archive path.
 `restore_pending_backup` is the helper a server startup task can call before
-opening the database; wiring it into a concrete server lifecycle is left to the
-startup/integration task.
+opening the database: it checks `max_archive_bytes` from metadata, copies the
+pending ZIP to a sibling temporary file outside `data_dir`, streams the import
+from disk, and removes the restored `backup.zip` (even when the archive itself
+contained a `backup.zip` entry). Wiring it into a concrete server lifecycle is
+left to the startup/integration task.
 
 `BackupOptions` defaults match the Go backend: `data_dir = "./data"`,
 database at `<data_dir>/komari.db`, marker required. Limits default to 10 000
@@ -159,7 +163,11 @@ predate the current table set so `Db::migrate()` can add the missing tables
 afterwards. Set `pre_restore_backup_dir` to opt into the Go backend's
 `./backup/{timestamp}.zip` pre-restore archive; it is best effort and disabled
 by default so a library call never writes outside the configured data
-directory unless asked.
+directory unless asked. The pre-restore directory must be **outside**
+`data_dir`; an inside path is ignored to avoid recursive/self-including
+archives. The pre-restore snapshot intentionally keeps transient files and
+ignores `BackupOptions::exclude`, matching Go's pre-restore safety copy; it only
+excludes the database sidecars, the marker and `backup.zip`.
 
 ### Archive layout (Go parity)
 
@@ -167,7 +175,7 @@ directory unless asked.
 | --- | --- |
 | `komari.db` | consistent SQLite snapshot created with `VACUUM INTO` (committed WAL content included) |
 | `<relative path>` | every file below `data_dir`, excluding SQLite files and transient files |
-| `komari-backup-markup` | marker file at the archive root, same text as Go, with an RFC 3339 second-precision timestamp and no trailing newline |
+| `komari-backup-markup` | marker file at the archive root, same text as Go, with an RFC 3339 second-precision timestamp (`Z` for UTC, `±HH:MM` otherwise) and no trailing newline |
 
 The export walk skips `*.db`, `*.db-wal`, `*.db-shm`, `backup.zip`, the marker,
 the destination archive itself, common temporary file suffixes (`.tmp`,
@@ -177,7 +185,8 @@ only to files: a directory with such a name is still walked. Likewise, a
 directory named like a database file is not stored as an entry but its children
 are still archived, matching Go's `Walk` behaviour. Non-UTF-8 file names are
 skipped with a warning instead of failing the whole export (the ZIP writer API
-is UTF-8 only).
+is UTF-8 only); a non-UTF-8 directory name skips its entire subtree and the
+warning says so explicitly.
 
 ### Import safety
 
@@ -192,12 +201,12 @@ The archive is inspected before anything is written:
 4. The database is opened read-only and must pass `PRAGMA integrity_check`;
    missing tables are rejected unless legacy schemas are explicitly allowed.
 5. Files are extracted into a sibling staging directory, then the whole data
-   directory is replaced. On Linux the swap uses
-   `renameat2(RENAME_EXCHANGE)`, so there is no moment where `data_dir` is
-   missing. Other platforms (or kernels/filesystems without exchange support)
-   fall back to two renames; if the process crashes between them, the previous
-   data is at a `.komari-backup-previous-*` sibling and can be moved back
-   manually. A failure at any point removes the staging directory and leaves
+   directory is replaced. On Linux the swap uses the
+   `SYS_renameat2` syscall with `RENAME_EXCHANGE`, so there is no moment where
+   `data_dir` is missing and no glibc 2.28 wrapper dependency. Other platforms
+   (or kernels/filesystems without exchange support, including `ENOSYS`) fall
+   back to two renames; if the process crashes between them, the previous data
+   is at a `.komari-backup-previous-*` sibling and can be moved back manually. A failure at any point removes the staging directory and leaves
    the existing data untouched. If `pre_restore_backup_dir` is set, a
    best-effort snapshot of the whole old data directory is written there
    first, matching the Go startup restore (even when the restore itself was
