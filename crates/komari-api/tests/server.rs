@@ -22,7 +22,8 @@ use komari_oauth::{
 use komari_web::WebAssets;
 use serde_json::Value;
 use tempfile::TempDir;
-use tokio::net::TcpListener;
+use tokio::io::AsyncWriteExt;
+use tokio::net::{TcpListener, TcpStream};
 use tokio::sync::oneshot;
 use tokio::task::JoinHandle;
 use tokio_tungstenite::tungstenite::Message;
@@ -662,6 +663,40 @@ async fn graceful_shutdown_completes_and_cancels_background_tasks() {
     assert!(result.is_ok(), "{result:?}");
     assert!(background.is_cancelled());
     assert!(state.background_cancelled());
+}
+
+#[tokio::test]
+async fn graceful_shutdown_times_out_half_open_connections() {
+    let dir = TempDir::new().expect("temp dir");
+    let config = ServerConfig {
+        shutdown_timeout: Duration::from_millis(100),
+        ..server_config(&dir)
+    };
+    let server = build(config, memory_db()).await;
+    let listener = TcpListener::bind("127.0.0.1:0")
+        .await
+        .expect("bind random port");
+    let address = listener.local_addr().expect("address");
+    let (shutdown, receiver) = oneshot::channel();
+    let handle = tokio::spawn(server.serve_with_shutdown(listener, async {
+        let _ = receiver.await;
+    }));
+
+    // Send headers without the terminating blank line: the connection is
+    // accepted but never becomes a complete request.
+    let mut stream = TcpStream::connect(address).await.expect("connect");
+    stream
+        .write_all(b"GET /ping HTTP/1.1\r\nHost: localhost\r\n")
+        .await
+        .expect("write partial request");
+    tokio::time::sleep(Duration::from_millis(50)).await;
+
+    let _ = shutdown.send(());
+    let result = tokio::time::timeout(Duration::from_secs(2), handle)
+        .await
+        .expect("shutdown timeout")
+        .expect("server task");
+    assert!(result.is_ok(), "{result:?}");
 }
 
 #[tokio::test]

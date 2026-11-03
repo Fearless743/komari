@@ -139,8 +139,13 @@ impl BackgroundTasks {
         self.cancel.cancel();
     }
 
-    /// Cancel and wait for every task, bounded by five seconds per task.
+    /// Cancel and wait for every task, bounded by a total five seconds.
     pub async fn shutdown(&self) {
+        self.shutdown_with_timeout(Duration::from_secs(5)).await;
+    }
+
+    /// Cancel and wait for every task, bounded by one overall timeout.
+    pub async fn shutdown_with_timeout(&self, timeout: Duration) {
         self.cancel.cancel();
         let handles = {
             let mut handles = self
@@ -149,9 +154,17 @@ impl BackgroundTasks {
                 .unwrap_or_else(|poisoned| poisoned.into_inner());
             std::mem::take(&mut *handles)
         };
-        for handle in handles {
-            let _ = tokio::time::timeout(Duration::from_secs(5), handle).await;
-        }
+        let timeout = if timeout.is_zero() {
+            Duration::from_secs(5)
+        } else {
+            timeout
+        };
+        let join = async move {
+            for handle in handles {
+                let _ = handle.await;
+            }
+        };
+        let _ = tokio::time::timeout(timeout, join).await;
     }
 
     fn spawn<F>(&self, name: &'static str, future: F)

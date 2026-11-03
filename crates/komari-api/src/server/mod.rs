@@ -39,6 +39,7 @@ pub use oauth::{BINDING_COOKIE, OAUTH_STATE_COOKIE, OAuthRuntime, SESSION_COOKIE
 use std::future::Future;
 use std::path::PathBuf;
 use std::sync::Arc;
+use std::time::Duration;
 
 use anyhow::{Context, Result};
 use axum::Router;
@@ -86,6 +87,8 @@ pub struct ServerConfig {
     pub body_limit_bytes: usize,
     /// Install tower-http's request/response tracing layer.
     pub request_logging: bool,
+    /// Maximum time graceful shutdown waits for half-open connections.
+    pub shutdown_timeout: Duration,
 }
 
 impl Default for ServerConfig {
@@ -99,6 +102,7 @@ impl Default for ServerConfig {
             background: BackgroundConfig::default(),
             body_limit_bytes: DEFAULT_BODY_LIMIT,
             request_logging: true,
+            shutdown_timeout: Duration::from_secs(5),
         }
     }
 }
@@ -431,18 +435,28 @@ impl Server {
         // `Server` implements `Drop`, so the router is moved out instead of
         // destructuring `self`.
         let router = std::mem::replace(&mut self.router, Router::new());
-        let result = axum::serve(listener, router)
-            .with_graceful_shutdown(shutdown)
-            .await;
+        let serve = axum::serve(listener, router).with_graceful_shutdown(shutdown);
+        let result = match tokio::time::timeout(self.config.shutdown_timeout, serve).await {
+            Ok(result) => result.context("HTTP server failed"),
+            Err(_) => {
+                warn!(
+                    timeout = ?self.config.shutdown_timeout,
+                    "graceful shutdown timed out; forcing shutdown"
+                );
+                Ok(())
+            }
+        };
         let _ = self
             .state
             .db
             .logs()
             .log("", "", "server is shutting down", "info");
         self.state.shutdown_background();
-        self.background.shutdown().await;
+        self.background
+            .shutdown_with_timeout(self.config.shutdown_timeout)
+            .await;
         info!(%address, "server stopped");
-        result.context("HTTP server failed")
+        result
     }
 }
 
