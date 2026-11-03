@@ -441,9 +441,35 @@ impl Server {
     /// Re-read theme/site/temp-share configuration from the database.
     ///
     /// B06 should call this after updating settings for an immediate effect;
-    /// the background asset task also refreshes every minute.
+    /// the SPA fallback also refreshes on every request.
     pub fn refresh_assets(&self) -> Result<(), DbError> {
         refresh_web_assets(&self.assets, &self.state.db)
+    }
+
+    /// Reload GeoIP, notification, DDNS, OAuth and web-asset configuration.
+    ///
+    /// Go subscribes to `config` changes and reloads these services. B06 can
+    /// call this after a settings update; failures are logged and do not abort
+    /// the server.
+    pub async fn reload_services(&self) {
+        if let Some(geoip) = self.state.geoip.as_ref() {
+            if let Err(error) = geoip.initialize().await {
+                warn!(%error, "failed to reload GeoIP");
+            }
+        }
+        if let Err(error) = komari_notify::initialize_defaults(&self.state.db) {
+            warn!(%error, "failed to reload notification providers");
+        }
+        if let Err(error) = self.ddns.initialize().await {
+            warn!(%error, "failed to reload DDNS");
+        }
+        if let Err(error) = self.oauth.initialize_from_db(&self.state.db).await {
+            warn!(%error, "failed to reload the OAuth provider");
+        }
+        self.state.set_oauth_provider(self.oauth.current());
+        if let Err(error) = self.refresh_assets() {
+            warn!(%error, "failed to reload web assets");
+        }
     }
 
     /// Serve until the process receives `SIGINT`/`SIGTERM`.

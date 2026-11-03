@@ -739,6 +739,30 @@ async fn public_router_can_own_ping_and_oauth_without_duplicate_routes() {
 }
 
 #[tokio::test]
+async fn reload_services_refreshes_the_oauth_provider_snapshot() {
+    let dir = TempDir::new().expect("temp dir");
+    let oauth = OAuthRuntime::with_provider(Arc::new(FakeProvider::named("fake-a", "a")));
+    let server = ServerBuilder::new(server_config(&dir))
+        .with_db(memory_db())
+        .skip_services()
+        .with_oauth(oauth.clone())
+        .build()
+        .await
+        .expect("build");
+    assert_eq!(
+        server.state().oauth_provider().expect("provider").name(),
+        "fake-a"
+    );
+
+    oauth.set_provider(Some(Arc::new(FakeProvider::named("fake-b", "b"))));
+    server.reload_services().await;
+    assert_eq!(
+        server.state().oauth_provider().expect("provider").name(),
+        "fake-b"
+    );
+}
+
+#[tokio::test]
 async fn background_tasks_start_and_cancel() {
     let dir = TempDir::new().expect("temp dir");
     let config = ServerConfig {
@@ -965,13 +989,19 @@ async fn oauth_is_disabled_by_default() {
 struct FakeProvider {
     states: StateStore,
     subject: String,
+    provider_name: &'static str,
 }
 
 impl FakeProvider {
     fn new(subject: &str) -> Self {
+        Self::named("fake", subject)
+    }
+
+    fn named(name: &'static str, subject: &str) -> Self {
         Self {
             states: StateStore::default(),
             subject: subject.to_owned(),
+            provider_name: name,
         }
     }
 }
@@ -979,7 +1009,7 @@ impl FakeProvider {
 #[async_trait]
 impl OAuthProvider for FakeProvider {
     fn name(&self) -> &'static str {
-        "fake"
+        self.provider_name
     }
 
     fn configuration(&self) -> Value {
@@ -1017,7 +1047,7 @@ impl OAuthProvider for FakeProvider {
     async fn callback(&self, request: CallbackRequest<'_>) -> komari_oauth::Result<OAuthUser> {
         self.states.consume(request.state, request.redirect_uri)?;
         Ok(OAuthUser {
-            provider: "fake".to_owned(),
+            provider: self.provider_name.to_owned(),
             subject: self.subject.clone(),
             username: Some("fake-user".to_owned()),
             ..OAuthUser::default()
