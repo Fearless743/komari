@@ -43,6 +43,9 @@ async fn http_report_buffers_until_flush_then_writes_aggregate() {
     let summary = flush(&state);
     assert_eq!(summary.clients, 1);
     assert_eq!(summary.records, 1);
+    // Recent samples stay buffered for the RPC layer.
+    assert_eq!(state.report_cache.buffered(&client.uuid), 1);
+    assert_eq!(state.report_cache.recent_reports()[&client.uuid].len(), 1);
 
     let records = records_for(&state, &client.uuid);
     assert_eq!(records.len(), 1);
@@ -187,12 +190,14 @@ async fn flush_rejects_invalid_metric_ranges() {
     let mut body = report_body(&client.uuid);
     body["cpu"]["usage"] = json!(140.0);
 
-    // Go accepts the report into its cache and only fails when persisting.
+    // Go accepts the report into its cache; validation failure discards only
+    // that client's batch.
     let (status, _) = call(&app, post_report(&report_uri(&client.token), &body)).await;
     assert_eq!(status, StatusCode::OK);
-    let error = state.flush_reports().expect_err("flush must fail");
-    assert!(error.contains("CPU.Usage must be between 0 and 100"));
+    let summary = flush(&state);
+    assert_eq!(summary.discarded_clients, 1);
     assert!(records_for(&state, &client.uuid).is_empty());
+    assert_eq!(state.report_cache.buffered(&client.uuid), 0);
 }
 
 #[tokio::test]
@@ -291,4 +296,128 @@ async fn body_uuid_wins_over_client_token_and_admin_may_target_a_client() {
     );
     let (status, _) = call(&app, api_key_request).await;
     assert_eq!(status, StatusCode::OK);
+}
+
+#[tokio::test]
+async fn one_invalid_client_does_not_block_other_flushes() {
+    let (state, app) = app();
+    let mut normal = Vec::new();
+    for index in 0..10 {
+        normal.push(create_client(&state, &format!("normal-{index}")));
+    }
+    let invalid = create_client(&state, "invalid");
+
+    for client in &normal {
+        let (status, _) = call(
+            &app,
+            post_report(&report_uri(&client.token), &report_body(&client.uuid)),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK);
+    }
+    let mut bad_body = report_body(&invalid.uuid);
+    bad_body["cpu"]["usage"] = json!(140.0);
+    let (status, _) = call(&app, post_report(&report_uri(&invalid.token), &bad_body)).await;
+    assert_eq!(status, StatusCode::OK);
+
+    let summary = flush(&state);
+    assert_eq!(summary.clients, 10);
+    assert_eq!(summary.records, 10);
+    assert_eq!(summary.discarded_clients, 1);
+    assert_eq!(summary.failed_clients, 0);
+    for client in normal {
+        assert_eq!(records_for(&state, &client.uuid).len(), 1);
+    }
+    assert!(records_for(&state, &invalid.uuid).is_empty());
+}
+
+#[tokio::test]
+async fn cache_clamps_each_sample_before_aggregation() {
+    let (state, _app) = app();
+    let client = create_client(&state, "mixed");
+    let usages = [20.0, 15.0, -3.0, -4.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0];
+    for usage in usages {
+        state.report_cache.record(
+            &client.uuid,
+            komari_api::Report {
+                cpu: komari_api::CpuReport {
+                    usage,
+                    ..komari_api::CpuReport::default()
+                },
+                ..komari_api::Report::default()
+            },
+        );
+    }
+    flush(&state);
+    let records = records_for(&state, &client.uuid);
+    assert_eq!(records.len(), 1);
+    // (20 + 15 + 0.01) / 3 == 11.67, matching Go's per-sample clamp.
+    assert!((records[0].cpu - 11.67).abs() < 0.01);
+}
+
+#[tokio::test]
+async fn gpu_aggregation_uses_top_thirty_percent() {
+    let (state, _app) = app();
+    let client = create_client(&state, "gpu");
+    for utilization in [10.0, 20.0, 90.0] {
+        state.report_cache.record(
+            &client.uuid,
+            komari_api::Report {
+                gpu: Some(komari_api::GpuDetailReport {
+                    count: 1,
+                    average_usage: utilization,
+                    detailed_info: vec![komari_api::GpuDeviceInfo {
+                        name: "gpu0".to_owned(),
+                        memory_total: 1024,
+                        memory_used: 512,
+                        utilization,
+                        temperature: 50,
+                    }],
+                }),
+                ..komari_api::Report::default()
+            },
+        );
+    }
+    flush(&state);
+    let records = records_for(&state, &client.uuid);
+    assert_eq!(records.len(), 1);
+    let gpu = state
+        .db
+        .records()
+        .gpu_by_client_and_time_in(
+            komari_db::RecordTable::Live,
+            &client.uuid,
+            records[0].time,
+            records[0].time,
+        )
+        .unwrap();
+    assert_eq!(gpu.len(), 1);
+    assert!((gpu[0].utilization - 90.0).abs() < f32::EPSILON);
+}
+
+#[test]
+fn database_errors_keep_samples_buffered_for_retry() {
+    use komari_api::{ManualClock, ReportCache};
+    use std::sync::Arc;
+    use std::time::Duration;
+
+    let db = common::memory_db();
+    db.execute_batch("DROP TABLE records").unwrap();
+    let cache = ReportCache::new(
+        Arc::new(ManualClock::new(1_000_000)),
+        Duration::from_secs(60),
+        0.3,
+    );
+    cache.record(
+        "client",
+        komari_api::Report {
+            cpu: komari_api::CpuReport {
+                usage: 10.0,
+                ..komari_api::CpuReport::default()
+            },
+            ..komari_api::Report::default()
+        },
+    );
+    assert!(cache.flush(&db).is_err());
+    assert_eq!(cache.buffered("client"), 1);
 }

@@ -339,10 +339,7 @@ async fn browser_websocket_serves_snapshots_and_rejects_foreign_origins() {
         tokio_tungstenite::tungstenite::Error::Http(response) => {
             assert_eq!(response.status(), 403);
             let body = response.body().as_deref().unwrap_or_default();
-            assert_eq!(
-                String::from_utf8_lossy(body),
-                "request origin not allowed by Upgrader.CheckOrigin"
-            );
+            assert_eq!(String::from_utf8_lossy(body), "Forbidden\n");
         }
         other => panic!("unexpected error: {other:?}"),
     }
