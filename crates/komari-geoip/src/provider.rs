@@ -18,8 +18,19 @@ pub trait GeoIpProvider: Send + Sync {
     /// empty [`GeoInfo`] rather than failing.
     async fn get_geo_info(&self, ip: IpAddr) -> Result<GeoInfo, GeoIpError>;
 
-    /// Refresh a local database. Network providers are no-ops.
+    /// Refresh a local database. Network providers are no-ops. This always
+    /// performs the refresh (download for `mmdb`); use
+    /// [`GeoIpProvider::prepare`] during initialization instead.
     async fn update_database(&self) -> Result<(), GeoIpError> {
+        Ok(())
+    }
+
+    /// Prepare local storage before the provider is installed.
+    ///
+    /// Network providers do nothing. `mmdb` loads an existing database or
+    /// downloads a missing one, without forcing a refresh when the file is
+    /// already present.
+    async fn prepare(&self) -> Result<(), GeoIpError> {
         Ok(())
     }
 

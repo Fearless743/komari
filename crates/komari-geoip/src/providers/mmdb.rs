@@ -123,6 +123,18 @@ impl MaxMindProvider {
         *self.reader.write().expect("maxmind reader poisoned") = Some(reader);
         Ok(())
     }
+
+    /// Load the database without forcing a download: reuse an already loaded
+    /// reader, reload an existing file, or download when the file is missing.
+    pub async fn ensure_loaded(&self) -> Result<(), GeoIpError> {
+        if self.is_loaded() {
+            return Ok(());
+        }
+        if self.path.exists() {
+            return self.reload();
+        }
+        self.download().await
+    }
 }
 
 impl Default for MaxMindProvider {
@@ -171,12 +183,13 @@ impl GeoIpProvider for MaxMindProvider {
     }
 
     /// Go's initialization path: load an existing file, otherwise download it.
-    /// An already loaded provider forces a fresh download, matching the admin
-    /// "update GeoIP database" action.
+    async fn prepare(&self) -> Result<(), GeoIpError> {
+        self.ensure_loaded().await
+    }
+
+    /// Admin "update GeoIP database" action: Go's `UpdateDatabase` always
+    /// downloads, even when a database is already loaded.
     async fn update_database(&self) -> Result<(), GeoIpError> {
-        if !self.is_loaded() && self.path.exists() {
-            return self.reload();
-        }
         self.download().await
     }
 }

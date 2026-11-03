@@ -116,8 +116,8 @@ impl GeoIpService {
 
     /// Port of `geoip.InitGeoIp`. Configuration failures leave the service on
     /// the empty provider and never propagate as a panic. Local providers
-    /// (currently `mmdb`) are prepared here, which may download a missing
-    /// database before the provider is installed.
+    /// (currently `mmdb`) are prepared here via [`GeoIpProvider::prepare`],
+    /// which loads an existing database or downloads a missing one.
     pub async fn initialize(&self) -> Result<(), GeoIpError> {
         let Some(db) = self.db.as_ref() else {
             return Ok(());
@@ -138,7 +138,7 @@ impl GeoIpService {
 
         match self.factory.create(&provider_key) {
             Ok(provider) => {
-                if let Err(error) = provider.update_database().await {
+                if let Err(error) = provider.prepare().await {
                     tracing::error!("failed to initialize GeoIP provider {provider_key}: {error}");
                     self.clear_provider();
                     return Ok(());
@@ -221,11 +221,18 @@ impl GeoIpService {
     /// counting.
     pub fn cache_len(&self) -> usize {
         let mut cache = self.cache.lock();
+        if self.cache_ttl.is_zero() {
+            cache.clear();
+            return 0;
+        }
         cache.retain(|_, entry| entry.stored_at.elapsed() <= self.cache_ttl);
         cache.len()
     }
 
     fn cached(&self, key: &str) -> Option<GeoInfo> {
+        if self.cache_ttl.is_zero() {
+            return None;
+        }
         let mut cache = self.cache.lock();
         if let Some(entry) = cache.get(key) {
             if entry.stored_at.elapsed() <= self.cache_ttl {
@@ -237,7 +244,7 @@ impl GeoIpService {
     }
 
     fn store(&self, key: String, info: GeoInfo) {
-        if self.cache_capacity == 0 {
+        if self.cache_capacity == 0 || self.cache_ttl.is_zero() {
             return;
         }
         let mut cache = self.cache.lock();
