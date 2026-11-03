@@ -399,6 +399,11 @@ fn create_pre_restore_archive(options: &BackupOptions) -> Option<PathBuf> {
 
     let db = Db::open_read_only(&database).ok()?;
     let mut export_options = options.clone();
+    // The pre-restore snapshot must contain the whole old data directory even
+    // when the caller requested a database-only backup; otherwise the swap
+    // would delete data that was never archived.
+    export_options.include_data = true;
+    export_options.exclude.clear();
     export_options.pre_restore_backup_dir = None;
     db.export_backup_to(&export_options, &archive).ok()?;
     Some(archive)
