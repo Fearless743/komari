@@ -258,6 +258,50 @@ fn hybrid_configs_from_a_previous_migration_are_converted() {
 }
 
 #[test]
+fn legacy_row_with_null_sitename_is_converted() {
+    let dir = TempDir::new("null-sitename");
+    let path = dir.join("komari.db");
+    let db = Db::open(&path).unwrap();
+
+    db.with_connection(|conn| {
+        conn.execute_batch(
+            "CREATE TABLE configs (\
+                 `id` integer PRIMARY KEY AUTOINCREMENT, \
+                 `sitename` varchar(100), \
+                 `description` text, \
+                 `key` text, \
+                 `value` text\
+             );\
+             INSERT INTO configs (id, sitename, description, key, value) \
+             VALUES (1, NULL, 'desc-from-legacy', '', '');\
+             INSERT INTO configs (id, sitename, key, value) \
+             VALUES (2, NULL, 'theme', '\"dark\"');",
+        )?;
+        Ok(())
+    })
+    .unwrap();
+
+    db.migrate().unwrap();
+
+    let config = db.config();
+    assert_eq!(
+        config.get_as::<String>("description").unwrap().as_deref(),
+        Some("desc-from-legacy")
+    );
+    assert_eq!(
+        config.get_as::<String>("theme").unwrap().as_deref(),
+        Some("dark")
+    );
+    assert!(
+        config
+            .get_as::<String>("sitename")
+            .unwrap()
+            .unwrap_or_default()
+            .is_empty()
+    );
+}
+
+#[test]
 fn unsupported_configs_schema_returns_a_clear_error() {
     let dir = TempDir::new("bad-configs");
     let path = dir.join("komari.db");

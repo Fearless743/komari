@@ -535,6 +535,26 @@ enum LegacyCell {
     Blob,
 }
 
+fn legacy_cells(
+    row: &rusqlite::Row<'_>,
+    columns: &[String],
+) -> rusqlite::Result<Vec<(String, LegacyCell)>> {
+    let mut values = Vec::with_capacity(columns.len());
+    for (index, name) in columns.iter().enumerate() {
+        let cell = match row.get_ref(index)? {
+            rusqlite::types::ValueRef::Null => LegacyCell::Null,
+            rusqlite::types::ValueRef::Integer(value) => LegacyCell::Integer(value),
+            rusqlite::types::ValueRef::Real(value) => LegacyCell::Real(value),
+            rusqlite::types::ValueRef::Text(value) => {
+                LegacyCell::Text(String::from_utf8_lossy(value).into_owned())
+            }
+            rusqlite::types::ValueRef::Blob(_) => LegacyCell::Blob,
+        };
+        values.push((name.clone(), cell));
+    }
+    Ok(values)
+}
+
 fn read_legacy_config(
     tx: &rusqlite::Transaction<'_>,
     table: &str,
@@ -548,37 +568,49 @@ fn read_legacy_config(
     } else {
         "ORDER BY rowid DESC"
     };
-    // A hybrid table produced by an older version of this migration has both
-    // legacy columns and an (empty) key/value pair. Pick the newest row that
-    // actually carries legacy configuration.
-    let filter = if columns
+
+    // Skip rows that only contain key/value data; a genuine legacy row can
+    // still have a NULL sitename while other legacy columns are populated.
+    let legacy_columns: Vec<&String> = columns
         .iter()
-        .any(|column| column.eq_ignore_ascii_case("sitename"))
-    {
-        "WHERE `sitename` IS NOT NULL"
+        .filter(|column| {
+            !matches!(
+                column.to_ascii_lowercase().as_str(),
+                "id" | "key" | "value" | "created_at" | "updated_at"
+            )
+        })
+        .collect();
+    let filter = if legacy_columns.is_empty() {
+        String::new()
     } else {
-        ""
-    };
-    let mut stmt = tx.prepare(&format!("SELECT * FROM `{table}` {filter} {order} LIMIT 1"))?;
-    let mut rows = stmt.query([])?;
-    let Some(row) = rows.next()? else {
-        return Ok(Vec::new());
+        format!(
+            "WHERE {}",
+            legacy_columns
+                .iter()
+                .map(|column| format!("`{column}` IS NOT NULL"))
+                .collect::<Vec<_>>()
+                .join(" OR ")
+        )
     };
 
-    let mut values = Vec::with_capacity(columns.len());
-    for (index, name) in columns.into_iter().enumerate() {
-        let cell = match row.get_ref(index)? {
-            rusqlite::types::ValueRef::Null => LegacyCell::Null,
-            rusqlite::types::ValueRef::Integer(value) => LegacyCell::Integer(value),
-            rusqlite::types::ValueRef::Real(value) => LegacyCell::Real(value),
-            rusqlite::types::ValueRef::Text(value) => {
-                LegacyCell::Text(String::from_utf8_lossy(value).into_owned())
-            }
-            rusqlite::types::ValueRef::Blob(_) => LegacyCell::Blob,
-        };
-        values.push((name, cell));
+    let mut values = None;
+    {
+        let mut stmt = tx.prepare(&format!("SELECT * FROM `{table}` {filter} {order} LIMIT 1"))?;
+        let mut rows = stmt.query([])?;
+        if let Some(row) = rows.next()? {
+            values = Some(legacy_cells(row, &columns)?);
+        }
     }
-    Ok(values)
+    if values.is_none() && !filter.is_empty() {
+        // All rows were pure key/value rows; fall back to the latest row so the
+        // caller still sees the original table contents.
+        let mut stmt = tx.prepare(&format!("SELECT * FROM `{table}` {order} LIMIT 1"))?;
+        let mut rows = stmt.query([])?;
+        if let Some(row) = rows.next()? {
+            values = Some(legacy_cells(row, &columns)?);
+        }
+    }
+    Ok(values.unwrap_or_default())
 }
 
 fn legacy_bool(cell: &LegacyCell) -> bool {
