@@ -10,7 +10,9 @@
 //! * unknown non-`/api` routes return `dist/index.html` (SPA fallback), with
 //!   site name/description/custom head/custom body replacements;
 //! * static responses carry `Content-Type`, `Cache-Control`, `ETag` and support
-//!   conditional requests and optional pre-compressed `.gz`/`.br` siblings.
+//!   conditional requests and optional pre-compressed `.gz`/`.br` siblings;
+//! * a valid `?temp_key=` share token sets the `temp_key` cookie before the
+//!   fallback response is produced.
 //!
 //! # Integration
 //!
@@ -36,12 +38,16 @@ mod layout;
 mod server;
 mod theme;
 
-pub use asset::{Asset, CachePolicy, accepts_encoding, content_type_for, etag_for, etag_matches};
+pub use asset::{
+    Asset, CachePolicy, accepted_encodings, accepts_encoding, content_type_for, encoding_quality,
+    etag_for, etag_matches, preferred_encoding,
+};
 pub use html::{DEFAULT_DESCRIPTION, DEFAULT_TITLE, apply_site_replacements};
 pub use layout::{ThemeLayout, ThemeLayoutError, validate_theme_layout};
 pub use server::{
-    SiteMeta, WebAssets, WebConfig, is_safe_theme_id, router, router_for, routes, routes_for,
-    sanitize_relative, serve_fallback, serve_favicon, serve_theme_asset,
+    SiteMeta, TempShareToken, ThemeSwitchError, WebAssets, WebConfig, is_safe_theme_id, router,
+    router_for, routes, routes_for, sanitize_relative, serve_fallback, serve_favicon,
+    serve_theme_asset,
 };
 pub use theme::{ThemeError, ThemeInfo};
 

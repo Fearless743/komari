@@ -92,11 +92,10 @@ impl Asset {
                 let mut builder = Response::builder()
                     .status(StatusCode::NOT_MODIFIED)
                     .header(header::ETAG, self.etag.as_str())
-                    .header(header::CACHE_CONTROL, self.cache_control.as_str());
+                    .header(header::CACHE_CONTROL, self.cache_control.as_str())
+                    .header(header::VARY, "Accept-Encoding");
                 if let Some(encoding) = self.encoding {
-                    builder = builder
-                        .header(header::CONTENT_ENCODING, encoding)
-                        .header(header::VARY, "Accept-Encoding");
+                    builder = builder.header(header::CONTENT_ENCODING, encoding);
                 }
                 return builder.body(Body::empty()).expect("valid 304 response");
             }
@@ -107,12 +106,11 @@ impl Asset {
             .header(header::CONTENT_TYPE, self.content_type.as_str())
             .header(header::CONTENT_LENGTH, self.bytes.len())
             .header(header::CACHE_CONTROL, self.cache_control.as_str())
-            .header(header::ETAG, self.etag.as_str());
+            .header(header::ETAG, self.etag.as_str())
+            .header(header::VARY, "Accept-Encoding");
 
         if let Some(encoding) = self.encoding {
-            builder = builder
-                .header(header::CONTENT_ENCODING, encoding)
-                .header(header::VARY, "Accept-Encoding");
+            builder = builder.header(header::CONTENT_ENCODING, encoding);
         }
         if let Some(last_modified) = self.last_modified {
             builder = builder.header(
@@ -142,17 +140,17 @@ pub fn content_type_for(path: &str) -> String {
         "html" | "htm" => ("text/html", true),
         "js" | "mjs" => ("text/javascript", true),
         "css" => ("text/css", true),
-        "json" | "map" => ("application/json", true),
-        "webmanifest" => ("application/manifest+json", true),
+        "json" | "map" => ("application/json", false),
+        "webmanifest" => ("application/manifest+json", false),
         "txt" => ("text/plain", true),
-        "xml" => ("application/xml", true),
+        "xml" => ("text/xml", true),
         "svg" => ("image/svg+xml", false),
         "png" => ("image/png", false),
         "jpg" | "jpeg" => ("image/jpeg", false),
         "gif" => ("image/gif", false),
         "webp" => ("image/webp", false),
         "avif" => ("image/avif", false),
-        "ico" => ("image/x-icon", false),
+        "ico" => ("image/vnd.microsoft.icon", false),
         "woff" => ("font/woff", false),
         "woff2" => ("font/woff2", false),
         "ttf" => ("font/ttf", false),
@@ -197,34 +195,98 @@ pub fn etag_matches(header_value: &str, etag: &str) -> bool {
     })
 }
 
-/// Whether the request accepts `coding` (`gzip`, `br`, ...).
-pub fn accepts_encoding(headers: &HeaderMap, coding: &str) -> bool {
-    let Some(value) = headers
+/// Quality value for `coding` in `Accept-Encoding`.
+///
+/// An explicit entry wins over `*`; a missing header (or no matching entry and
+/// no wildcard) returns `None`. Invalid `q` values are treated as `0`.
+pub fn encoding_quality(headers: &HeaderMap, coding: &str) -> Option<f32> {
+    let value = headers
         .get(header::ACCEPT_ENCODING)
-        .and_then(|value| value.to_str().ok())
-    else {
-        return false;
-    };
+        .and_then(|value| value.to_str().ok())?;
 
+    let mut wildcard = None;
     for entry in value.split(',') {
         let mut parts = entry.split(';');
         let name = parts.next().unwrap_or_default().trim();
-        if !name.eq_ignore_ascii_case(coding) {
+        if name.is_empty() {
             continue;
         }
+
         let quality = parts
             .find_map(|parameter| {
                 let (key, value) = parameter.split_once('=')?;
                 key.trim()
                     .eq_ignore_ascii_case("q")
-                    .then(|| value.trim().parse::<f32>().ok())
-                    .flatten()
+                    .then(|| parse_quality(value))
             })
             .unwrap_or(1.0);
-        return quality > 0.0;
+
+        if name.eq_ignore_ascii_case(coding) {
+            return Some(quality);
+        }
+        if name == "*" {
+            wildcard = Some(quality);
+        }
     }
 
-    false
+    wildcard
+}
+
+/// Pick the highest-quality coding from `codings`, preserving the order of
+/// `codings` as the tie-breaker.
+pub fn preferred_encoding<'a>(headers: &HeaderMap, codings: &[&'a str]) -> Option<&'a str> {
+    let mut best: Option<(&'a str, f32)> = None;
+
+    for &coding in codings {
+        let Some(quality) = encoding_quality(headers, coding) else {
+            continue;
+        };
+        if quality <= 0.0 {
+            continue;
+        }
+        if best.is_none_or(|(_, best_quality)| quality > best_quality) {
+            best = Some((coding, quality));
+        }
+    }
+
+    best.map(|(coding, _)| coding)
+}
+
+/// All acceptable codings ordered by descending quality, preserving the input
+/// order for ties. Codings with `q=0` are omitted.
+pub fn accepted_encodings<'a>(headers: &HeaderMap, codings: &[&'a str]) -> Vec<&'a str> {
+    let mut candidates: Vec<(&'a str, f32)> = codings
+        .iter()
+        .filter_map(|&coding| {
+            encoding_quality(headers, coding)
+                .filter(|quality| *quality > 0.0)
+                .map(|quality| (coding, quality))
+        })
+        .collect();
+
+    // `sort_by` is stable, so equal qualities keep the caller's preference
+    // order (br before gzip for us).
+    candidates.sort_by(|left, right| {
+        right
+            .1
+            .partial_cmp(&left.1)
+            .unwrap_or(std::cmp::Ordering::Equal)
+    });
+
+    candidates.into_iter().map(|(coding, _)| coding).collect()
+}
+
+/// Whether the request accepts `coding` (`gzip`, `br`, ...).
+pub fn accepts_encoding(headers: &HeaderMap, coding: &str) -> bool {
+    encoding_quality(headers, coding).is_some_and(|quality| quality > 0.0)
+}
+
+fn parse_quality(value: &str) -> f32 {
+    value
+        .trim()
+        .parse::<f32>()
+        .map(|quality| quality.clamp(0.0, 1.0))
+        .unwrap_or(0.0)
 }
 
 /// `SystemTime` for a rust-embed last-modified timestamp.

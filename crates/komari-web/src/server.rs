@@ -14,25 +14,26 @@ use std::{
     fs, io,
     path::{Path, PathBuf},
     sync::{Arc, RwLock},
-    time::SystemTime,
+    time::{SystemTime, UNIX_EPOCH},
 };
 
 use axum::{
     Router,
     body::Body,
     extract::{Path as AxumPath, Request},
-    http::{HeaderMap, Method, StatusCode, header},
+    http::{HeaderMap, HeaderValue, Method, StatusCode, header},
     response::Response,
-    routing::get,
+    routing::any,
 };
 use bytes::Bytes;
 use percent_encoding::percent_decode_str;
+use thiserror::Error;
 use tracing::warn;
 
 use crate::{
     DEFAULT_THEME, DIST_DIR, DefaultThemeAssets, FAVICON_FILE, INDEX_FILE, THEME_CONFIG_FILE,
     THEMES_DIR,
-    asset::{Asset, CachePolicy, accepts_encoding, system_time_from_unix},
+    asset::{Asset, CachePolicy, accepted_encodings, system_time_from_unix},
     html::apply_site_replacements,
     theme::ThemeInfo,
 };
@@ -84,16 +85,37 @@ impl Default for SiteMeta {
     }
 }
 
+/// Temporary share token from the `tempory_share_token` config keys.
+///
+/// The server layer loads these values from the database and calls
+/// [`WebAssets::set_temp_share_token`]. The fallback then mirrors the Go
+/// `temp_key` cookie behaviour.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct TempShareToken {
+    pub token: String,
+    /// Unix timestamp in seconds.
+    pub expires_at: i64,
+}
+
+#[derive(Debug, Error, PartialEq, Eq)]
+pub enum ThemeSwitchError {
+    #[error("invalid theme id: {0}")]
+    InvalidId(String),
+    #[error("theme is not installed or has no readable dist/index.html: {0}")]
+    NotInstalled(String),
+}
+
 /// Shared static-asset service.
 ///
 /// Clone the `Arc` into Axum state. The embedded theme is immutable; the
-/// configured theme and site metadata can be updated at runtime, matching the
-/// Go backend's live configuration reads.
+/// configured theme, site metadata and temporary share token can be updated at
+/// runtime, matching the Go backend's live configuration reads.
 #[derive(Debug)]
 pub struct WebAssets {
     config: WebConfig,
     theme: RwLock<String>,
     site: RwLock<SiteMeta>,
+    temp_share: RwLock<Option<TempShareToken>>,
 }
 
 impl WebAssets {
@@ -103,6 +125,7 @@ impl WebAssets {
             config,
             theme: RwLock::new(theme),
             site: RwLock::new(SiteMeta::default()),
+            temp_share: RwLock::new(None),
         }
     }
 
@@ -124,11 +147,75 @@ impl WebAssets {
             .clone()
     }
 
+    /// Set the active theme without validating it.
+    ///
+    /// Prefer [`WebAssets::try_set_theme`] for user-facing theme switches. This
+    /// unchecked setter remains useful when restoring configuration before the
+    /// theme directory is mounted.
     pub fn set_theme(&self, theme: impl Into<String>) {
         *self
             .theme
             .write()
             .unwrap_or_else(|poisoned| poisoned.into_inner()) = theme.into();
+    }
+
+    /// Validate and switch the active theme.
+    ///
+    /// `default` is always available (it is embedded). Other themes must have a
+    /// readable `dist/index.html` below `data/theme/<id>`.
+    pub fn try_set_theme(&self, theme: impl Into<String>) -> Result<(), ThemeSwitchError> {
+        let theme = theme.into();
+        self.validate_theme(&theme)?;
+        self.set_theme(theme);
+        Ok(())
+    }
+
+    /// Check whether a theme can serve requests without switching to it.
+    pub fn validate_theme(&self, theme: &str) -> Result<(), ThemeSwitchError> {
+        if !is_safe_theme_id(theme) {
+            return Err(ThemeSwitchError::InvalidId(theme.to_owned()));
+        }
+        if !self.is_theme_available(theme) {
+            return Err(ThemeSwitchError::NotInstalled(theme.to_owned()));
+        }
+        Ok(())
+    }
+
+    /// Whether `theme` has a readable SPA entry point.
+    ///
+    /// This intentionally checks the directory contents, not
+    /// `komari-theme.json`: Go serves any theme file that exists, and the
+    /// metadata file is only needed for listings and theme settings.
+    pub fn is_theme_available(&self, theme: &str) -> bool {
+        if theme == DEFAULT_THEME {
+            return true;
+        }
+        self.theme_root(theme)
+            .is_some_and(|root| root.join(DIST_DIR).join(INDEX_FILE).is_file())
+    }
+
+    pub fn temp_share_token(&self) -> Option<TempShareToken> {
+        self.temp_share
+            .read()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .clone()
+    }
+
+    pub fn set_temp_share_token(&self, token: impl Into<String>, expires_at: i64) {
+        *self
+            .temp_share
+            .write()
+            .unwrap_or_else(|poisoned| poisoned.into_inner()) = Some(TempShareToken {
+            token: token.into(),
+            expires_at,
+        });
+    }
+
+    pub fn clear_temp_share_token(&self) {
+        *self
+            .temp_share
+            .write()
+            .unwrap_or_else(|poisoned| poisoned.into_inner()) = None;
     }
 
     pub fn site_meta(&self) -> SiteMeta {
@@ -147,12 +234,12 @@ impl WebAssets {
 
     /// The theme that will actually serve requests.
     ///
-    /// A configured theme without a readable `komari-theme.json` is ignored and
-    /// `default` is used, which is the same net result as the Go per-file
-    /// fallback but makes the fallback observable to callers.
+    /// A configured theme without a readable `dist/index.html` is ignored and
+    /// `default` is used. This mirrors Go's directory-based serving: a theme
+    /// does not need a valid `komari-theme.json` to be served, only its files.
     pub fn effective_theme(&self) -> String {
         let theme = self.theme();
-        if theme == DEFAULT_THEME || self.theme_info(&theme).is_some() {
+        if self.is_theme_available(&theme) {
             theme
         } else {
             DEFAULT_THEME.to_owned()
@@ -162,8 +249,20 @@ impl WebAssets {
     /// List the embedded default theme followed by valid themes in
     /// `data/theme/*`.
     pub fn list_themes(&self) -> Vec<ThemeInfo> {
-        let mut themes = Vec::new();
+        let themes_dir = self.config.data_dir.join(THEMES_DIR);
+        let entries = match fs::read_dir(&themes_dir) {
+            Ok(entries) => entries,
+            // Go's ListThemes returns an empty list when data/theme is absent
+            // (its init hook normally creates it). Match that observable
+            // behaviour instead of advertising the embedded theme.
+            Err(err) if err.kind() == io::ErrorKind::NotFound => return Vec::new(),
+            Err(err) => {
+                warn!(path = %themes_dir.display(), error = %err, "cannot read theme directory");
+                return Vec::new();
+            }
+        };
 
+        let mut themes = Vec::new();
         match DefaultThemeAssets::get(THEME_CONFIG_FILE) {
             Some(file) => match ThemeInfo::from_slice(&file.data) {
                 Ok(info) => themes.push(info),
@@ -171,16 +270,6 @@ impl WebAssets {
             },
             None => warn!("embedded default theme has no komari-theme.json"),
         }
-
-        let themes_dir = self.config.data_dir.join(THEMES_DIR);
-        let entries = match fs::read_dir(&themes_dir) {
-            Ok(entries) => entries,
-            Err(err) if err.kind() == io::ErrorKind::NotFound => return themes,
-            Err(err) => {
-                warn!(path = %themes_dir.display(), error = %err, "cannot read theme directory");
-                return themes;
-            }
-        };
 
         let mut directories: Vec<_> = entries.filter_map(Result::ok).collect();
         directories.sort_by_key(|entry| entry.file_name());
@@ -231,9 +320,36 @@ impl WebAssets {
     /// `preview.png` / `perview.png` spellings.
     pub fn theme_preview(&self, theme: &str) -> Option<Asset> {
         let info = self.theme_info(theme)?;
-        for candidate in info.preview_candidates() {
-            if let Some(asset) = self.resolve(theme, &candidate) {
-                return Some(asset);
+        let candidates = info.preview_candidates();
+
+        if theme == DEFAULT_THEME {
+            for candidate in candidates {
+                if let Some(asset) = self.resolve(theme, &candidate) {
+                    return Some(asset);
+                }
+            }
+            return None;
+        }
+
+        // Prefer files that belong to the theme itself. Falling back to the
+        // embedded `preview.png` before trying a theme's `perview.png` would
+        // show the default theme's preview for legacy packages.
+        let root = self.theme_root(theme)?;
+        let cache_control = CachePolicy::Asset.header_value(
+            self.config.immutable_max_age,
+            self.config.index_max_age,
+            self.config.asset_max_age,
+        );
+
+        for candidate in candidates {
+            if let Some(resolved) = read_disk_file(&root, &candidate) {
+                return Some(Asset::new(
+                    resolved.bytes,
+                    &candidate,
+                    cache_control,
+                    None,
+                    resolved.last_modified,
+                ));
             }
         }
         None
@@ -262,11 +378,8 @@ impl WebAssets {
 
         if self.config.precompressed {
             if let Some(headers) = headers {
-                let encodings: [(&str, &str); 2] = [("br", "br"), ("gzip", "gz")];
-                for (coding, extension) in encodings {
-                    if !accepts_encoding(headers, coding) {
-                        continue;
-                    }
+                for coding in accepted_encodings(headers, &["br", "gzip"]) {
+                    let extension = if coding == "br" { "br" } else { "gz" };
                     let variant_path = format!("{relative_path}.{extension}");
                     if let Some((bytes, last_modified)) =
                         self.read_from_source(&resolved.source, &variant_path)
@@ -407,8 +520,8 @@ where
     };
 
     Router::new()
-        .route("/favicon.ico", get(favicon))
-        .route("/themes/{id}/{*path}", get(theme_asset))
+        .route("/favicon.ico", any(favicon))
+        .route("/themes/{id}/{*path}", any(theme_asset))
 }
 
 /// Like [`routes_for`], but also installs the SPA fallback.
@@ -428,6 +541,10 @@ where
 /// Serve `data/favicon.ico`, then the active theme's `dist/favicon.ico`, then
 /// the embedded default. Returns 404 when neither exists.
 pub fn serve_favicon(assets: &WebAssets, method: &Method, headers: &HeaderMap) -> Response {
+    if method != Method::GET && method != Method::HEAD {
+        return not_found();
+    }
+
     let local_path = assets.config().data_dir.join(FAVICON_FILE);
     if let Ok(metadata) = fs::metadata(&local_path) {
         if metadata.is_file() {
@@ -467,6 +584,9 @@ pub fn serve_theme_asset(
     method: &Method,
     headers: &HeaderMap,
 ) -> Response {
+    if method != Method::GET && method != Method::HEAD {
+        return not_found();
+    }
     if !is_safe_theme_id(theme) || has_traversal(path) {
         return not_found();
     }
@@ -483,6 +603,17 @@ pub fn serve_theme_asset(
 /// other unknown path the active theme's `dist` directory is tried first and
 /// `index.html` is returned last.
 pub async fn serve_fallback(assets: &WebAssets, request: Request) -> Response {
+    // Go's noRoute sets the temporary-share cookie before dispatching to the
+    // SPA/static handler, including for paths that end up as 404.
+    let cookie = temp_key_cookie(assets, request.uri().query());
+    let mut response = fallback_response(assets, request).await;
+    if let Some(cookie) = cookie {
+        response.headers_mut().insert(header::SET_COOKIE, cookie);
+    }
+    response
+}
+
+async fn fallback_response(assets: &WebAssets, request: Request) -> Response {
     let method = request.method().clone();
     if method != Method::GET && method != Method::HEAD {
         return not_found();
@@ -603,6 +734,40 @@ pub fn is_safe_theme_id(theme: &str) -> bool {
         && !theme.contains('\\')
         && !theme.contains('\0')
         && theme.chars().all(|character| !character.is_control())
+}
+
+fn temp_key_cookie(assets: &WebAssets, query: Option<&str>) -> Option<HeaderValue> {
+    let query = query?;
+    let temp_key = form_urlencoded::parse(query.as_bytes())
+        .find_map(|(key, value)| (key == "temp_key").then(|| value.into_owned()))?;
+    if temp_key.is_empty() {
+        return None;
+    }
+
+    let share = assets.temp_share_token()?;
+    if share.token.is_empty() || temp_key != share.token {
+        return None;
+    }
+
+    let now = SystemTime::now().duration_since(UNIX_EPOCH).ok()?.as_secs() as i64;
+    let max_age = share.expires_at - now;
+    if max_age <= 0 {
+        return None;
+    }
+
+    // Keep the cookie header valid without silently dropping characters the
+    // way Go's net/http sanitizer does.
+    if !share.token.chars().all(|character| {
+        character.is_ascii_alphanumeric() || matches!(character, '-' | '_' | '.' | '~')
+    }) {
+        return None;
+    }
+
+    HeaderValue::from_str(&format!(
+        "temp_key={}; Path=/; Max-Age={max_age}",
+        share.token
+    ))
+    .ok()
 }
 
 fn has_traversal(path: &str) -> bool {
