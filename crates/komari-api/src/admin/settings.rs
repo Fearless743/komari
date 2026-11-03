@@ -85,11 +85,12 @@ async fn apply_side_effects(state: &ApiState, values: &HashMap<String, Value>) {
             provider
         };
         match state.db.oauth().get(name) {
-            Ok(Some(row)) => {
-                if let Err(error) = komari_oauth::load_provider_global(name, &row.addition).await {
+            Ok(Some(row)) => match komari_oauth::load_provider_global(name, &row.addition).await {
+                Ok(provider) => state.set_oauth_provider(Some(provider)),
+                Err(error) => {
                     tracing::warn!(%error, "failed to reload OAuth provider after settings update");
                 }
-            }
+            },
             Ok(None) => {
                 tracing::warn!(provider = name, "OAuth provider row not found");
             }

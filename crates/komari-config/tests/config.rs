@@ -37,6 +37,7 @@ fn defaults_match_the_go_backend() {
     assert!(!config.allow_cors);
     assert!(!config.enable_cloudflared);
     assert!(!config.ws_disable_origin);
+    assert_eq!(config.body_limit, None);
 }
 
 #[test]
@@ -57,6 +58,7 @@ fn environment_overrides_defaults() {
             (keys::ENV_ENABLE_CLOUDFLARED, "1"),
             (keys::ENV_CLOUDFLARED_TOKEN, "token"),
             (keys::ENV_WS_DISABLE_ORIGIN, "yes"),
+            (keys::ENV_BODY_LIMIT, "1048576"),
         ],
         &ConfigOverrides::default(),
     )
@@ -76,6 +78,7 @@ fn environment_overrides_defaults() {
     assert!(config.enable_cloudflared);
     assert_eq!(config.cloudflared_token.as_deref(), Some("token"));
     assert!(config.ws_disable_origin);
+    assert_eq!(config.body_limit, Some(1_048_576));
 }
 
 #[test]
@@ -167,4 +170,11 @@ fn site_config_defaults_match_the_go_legacy_struct() {
     assert_eq!(site.expire_notification_lead_days, 7);
     assert_eq!(site.traffic_limit_percentage, 80.0);
     assert_eq!(site.record_preserve_time, 720);
+}
+
+#[test]
+fn rejects_a_non_positive_body_limit() {
+    let error = load(&[(keys::ENV_BODY_LIMIT, "0")], &ConfigOverrides::default())
+        .expect_err("zero body limit must be rejected");
+    assert!(matches!(error, ConfigError::InvalidValue { .. }));
 }

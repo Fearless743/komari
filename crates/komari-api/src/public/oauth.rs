@@ -117,7 +117,7 @@ pub(crate) async fn callback(
             ));
         }
         if AccountLinker::new(&state.db)
-            .bind(&user.uuid, &identity)
+            .rebind(&user.uuid, &identity)
             .is_err()
         {
             return clear_oauth_cookies(respond_error(

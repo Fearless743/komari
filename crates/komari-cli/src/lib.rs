@@ -57,17 +57,29 @@ fn run_server(global: &GlobalArgs, args: ServerArgs) -> Result<()> {
         db_port = config.db.port,
         theme = %config.theme,
         allow_cors = config.allow_cors,
+        body_limit = config
+            .body_limit
+            .unwrap_or(komari_api::server::DEFAULT_BODY_LIMIT),
         log_level = %config.log_level,
         enable_cloudflared = config.enable_cloudflared,
         ws_disable_origin = config.ws_disable_origin,
         "startup configuration"
     );
-    info!(
-        "Starting server on {} ... (HTTP runtime is provided by a follow-up task)",
-        config.listen
-    );
+    if !config.db.is_sqlite() {
+        anyhow::bail!(
+            "database type {:?} is not supported yet; only sqlite is implemented",
+            config.db.db_type
+        );
+    }
 
-    Ok(())
+    let server_config = komari_api::server::ServerConfig::from_app_config(&config);
+    let runtime = tokio::runtime::Builder::new_multi_thread()
+        .enable_all()
+        .build()
+        .context("failed to create the Tokio runtime")?;
+    runtime
+        .block_on(komari_api::server::run(server_config))
+        .context("HTTP server failed")
 }
 
 fn run_chpasswd(global: &GlobalArgs, args: ChpasswdArgs) -> Result<()> {
@@ -238,6 +250,7 @@ impl GlobalArgs {
             allow_cors: self.allow_cors,
             enable_cloudflared: self.enable_cloudflared,
             ws_disable_origin: self.ws_disable_origin,
+            body_limit: self.body_limit,
         })
     }
 }

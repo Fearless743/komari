@@ -25,9 +25,11 @@ pub mod public;
 mod report;
 mod response;
 pub mod rpc;
+pub mod server;
 mod state;
 pub mod ws;
 
+pub use admin::{admin_router, admin_router_with_state};
 pub use cache::{FlushSummary, ReportCache};
 pub use clock::{Clock, ManualClock, SystemClock};
 pub use presence::{PresenceExpiry, PresenceTracker, PresenceUpdate};
@@ -35,6 +37,10 @@ pub use public::{initialize_oauth, public_router, public_router_with_state};
 pub use report::{
     ConnectionsReport, CpuReport, DiskReport, GpuDetailReport, GpuDeviceInfo, LoadReport,
     NetworkReport, RamReport, Report, aggregate_reports, save_report, verify_report,
+};
+pub use rpc::{rpc_router, rpc_router_with_state};
+pub use server::{
+    BackgroundConfig, BackgroundTasks, OAuthRuntime, Server, ServerBuilder, ServerConfig,
 };
 pub use state::{ApiConfig, ApiState};
 pub use ws::{ClientEvent, ClientEventKind, ConnectionHandle, PresenceSource, WsHub, check_origin};

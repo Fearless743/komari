@@ -8,24 +8,30 @@ Rust reimplementation of the Komari backend. The Go implementation in
 The merged baseline provides the CLI/configuration, the SQLite persistence
 layer, authentication, notifications, GeoIP, DDNS, scheduled record maintenance,
 the B14 static web assets (`komari-web`) and the B13 OAuth/OIDC crate
-(`komari-oauth`). The HTTP server, public/admin API and agent WebSocket assembly
-remain B04/B05/B06; OAuth HTTP login/binding routes and B14 static routes still
-need server assembly. `komari server` currently resolves configuration and
-prints it without binding a port.
+(`komari-oauth`). B09 adds the HTTP server assembly: `komari server` binds
+`KOMARI_LISTEN` (default `0.0.0.0:25774`), mounts the agent/browser WebSocket
+routes, OAuth login/callback, static assets and SPA fallback, restores a pending
+`data/backup.zip`, and starts the background jobs. The public API/RPC2 (B04)
+and admin API (B06) are mounted by default through the same router assembly.
+At startup GeoIP, DDNS, notification and OAuth providers are initialized; the
+browser WebSocket filters `hidden` clients for guests and honours private-site
+mode. `ApiState.web` / `ApiState.ddns` share the live `WebAssets` and
+`DdnsService` handles with B06, backup uploads use a separate body limit, and
+the listener installs `ConnectInfo<SocketAddr>` so peer-IP fallbacks work.
 
 | Crate | Responsibility | Status |
 | --- | --- | --- |
-| `komari-cli` | `komari` binary, flags, logging, version | merged (B01) |
+| `komari-cli` | `komari` binary, flags, logging, version | merged (B01); server binds in B09 |
 | `komari-config` | Environment/flag configuration and site defaults | merged (B01) |
 | `komari-db` | SQLite database layer | merged (B02) |
 | `komari-auth` | Authentication, sessions, TOTP, roles | merged (B03) |
-| `komari-api` | HTTP/JSON-RPC API | placeholder; B04/B05/B06 |
-| `komari-notify` | Notification delivery | merged (B07) |
+| `komari-api` | Agent/browser, public, admin, RPC and HTTP server assembly | merged (B04/B05/B06/B09) |
+| `komari-notify` | Notification delivery and auto-renewal | merged (B07) |
 | `komari-jobs` | Scheduled record maintenance | merged |
 | `komari-ddns` | DDNS integrations | merged |
 | `komari-geoip` | GeoIP lookups | merged (B08) |
-| `komari-oauth` | OAuth/OIDC | merged (B13); HTTP routes pending assembly |
-| `komari-web` | Static themes and web assets | merged (B14); server assembly pending |
+| `komari-oauth` | OAuth/OIDC | merged (B13); HTTP routes assembled by B09 |
+| `komari-web` | Static themes and web assets | merged (B14); routes assembled by B09 |
 
 ## Documentation
 

@@ -95,14 +95,11 @@ D 条目、不占号**；若后续需要正式登记，使用 `D-012` / `D-013`�
 
 | 缺口 | 责任 | 影响 |
 | --- | --- | --- |
-| HTTP server / `/ping` / public API / RPC2 / MJPEG | B04 | Rust 不能接收 HTTP 请求。 |
-| Agent API / agent WS / browser WS | B05 | agent 不能上报，页面不能实时刷新；截至 B11 基线未合并。 |
-| Admin API / 备份 / 设置 / 主题管理 | B06 | 管理端不可用；GET/list 需接入 D-009/D-011 脱敏。 |
-| OAuth HTTP 登录/绑定路由装配 | B13/B06 | B13 crate 已提供 provider/绑定能力，但 HTTP 端点尚未装配。 |
-| 静态路由服务器装配 / 隐藏节点过滤 | B06/B09 | B14 crate 已提供路由，但 HTTP server 尚未装配；页面仍不可用。 |
+| MJPEG | B04 | `/api/mjpeg_live` 返回明确的未实现响应；其余公开端点已可用。 |
 
-在这些模块合并前，生产流量应继续由 Go 版承载。参见
-[MIGRATION.md](MIGRATION.md) 和 [DEPLOYMENT.md](DEPLOYMENT.md)。
+Public/Agent/Admin/RPC/OAuth/静态路由与浏览器 WS 均已由 B04/B05/B06/B09 装配。
+生产切换仍建议先按 [MIGRATION.md](MIGRATION.md) 验证；参见
+[DEPLOYMENT.md](DEPLOYMENT.md)。
 
 ## 4. 兼容性验证
 
@@ -168,3 +165,16 @@ cargo test -p komari-jobs
 5. B04/B05/B06 合并并完成 B13 OAuth HTTP/B14 静态路由装配后，按 [API.md](API.md)
    的路由清单做端到端回归。
 6. 按 [DEPLOYMENT.md](DEPLOYMENT.md) 验证 systemd/Docker、反代 WS、备份和健康检查。
+
+## 5. B09 跨 crate 变更说明
+
+B09 的服务器装配需要少量跨 crate 改动，均为验收项所需的最小改动：
+
+- `komari-auth`：新增 `BufferedBodyLimit` / `SkipBodyBuffering`，让普通请求的
+  chunked 超限返回 413，并让 `/api/admin/upload/backup` 跳过 AuthLayer 的整包缓冲，
+  保持 B06 的流式上传。
+- `komari-config` / `komari-cli`：新增 `KOMARI_BODY_LIMIT` / `--body-limit`，用于
+  配置普通请求体上限。
+- `komari-notify`：新增 `renewal` 模块，供上线事件和每日 09:00 调度复用。
+- `komari-oauth`：仅随 main 的 B04/B06 合并同步，B09 未改变 provider 语义。
+- `docs`：更新服务器装配、OAuth、静态资源、浏览器 WS 与 body limit 状态。

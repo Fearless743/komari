@@ -10,6 +10,7 @@ use komari_config::keys;
 use komari_db::{Db, DbError};
 use komari_ddns::DdnsService;
 use komari_geoip::GeoIpService;
+use komari_jobs::CancelToken;
 use komari_oauth::OAuthProvider;
 use komari_web::{WebAssets, WebConfig};
 
@@ -89,6 +90,9 @@ pub struct ApiState {
     /// configured provider (see `komari_api::public::initialize_oauth`).
     oauth_provider: Arc<RwLock<Option<Arc<dyn OAuthProvider>>>>,
     config: Arc<ApiConfig>,
+    /// Cancels the presence sweeper and report flusher started by
+    /// [`ApiState::with_clock`].
+    background_cancel: CancelToken,
 }
 
 impl FromRef<ApiState> for AuthState {
@@ -138,10 +142,24 @@ impl ApiState {
             ddns,
             oauth_provider: Arc::new(RwLock::new(None)),
             config: Arc::new(config),
+            background_cancel: CancelToken::new(),
         };
         state.spawn_presence_sweeper();
         state.spawn_report_flusher();
         state
+    }
+
+    /// Stop the presence sweeper and report flusher.
+    ///
+    /// The server assembly calls this during graceful shutdown. The tasks are
+    /// also stopped when the Tokio runtime is dropped.
+    pub fn shutdown_background(&self) {
+        self.background_cancel.cancel();
+    }
+
+    /// Whether [`ApiState::shutdown_background`] has been called.
+    pub fn background_cancelled(&self) -> bool {
+        self.background_cancel.is_cancelled()
     }
 
     pub fn config(&self) -> &ApiConfig {
@@ -192,7 +210,6 @@ impl ApiState {
         self.set_oauth_provider(Some(provider));
         self
     }
-
     fn spawn_presence_sweeper(&self) {
         let interval = self.config.presence_sweep_interval;
         if interval.is_zero() {
@@ -205,12 +222,18 @@ impl ApiState {
             return;
         };
         let presence = Arc::clone(&self.presence);
+        let cancel = self.background_cancel.clone();
         handle.spawn(async move {
             let mut ticker = tokio::time::interval(interval);
             ticker.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
             loop {
-                ticker.tick().await;
-                presence.expire_due();
+                tokio::select! {
+                    biased;
+                    () = cancel.cancelled() => break,
+                    _ = ticker.tick() => {
+                        presence.expire_due();
+                    }
+                }
             }
         });
     }
@@ -228,18 +251,22 @@ impl ApiState {
         };
         let cache = Arc::clone(&self.report_cache);
         let db = Arc::clone(&self.db);
+        let cancel = self.background_cancel.clone();
         handle.spawn(async move {
             let mut ticker = tokio::time::interval(interval);
             ticker.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
             loop {
-                ticker.tick().await;
-                match cache.flush(&db) {
-                    Ok(summary) => {
-                        tracing::debug!(?summary, "flushed client reports");
-                    }
-                    Err((summary, error)) => {
-                        tracing::error!(?summary, %error, "failed to flush client reports");
-                    }
+                tokio::select! {
+                    biased;
+                    () = cancel.cancelled() => break,
+                    _ = ticker.tick() => match cache.flush(&db) {
+                        Ok(summary) => {
+                            tracing::debug!(?summary, "flushed client reports");
+                        }
+                        Err((summary, error)) => {
+                            tracing::error!(?summary, %error, "failed to flush client reports");
+                        }
+                    },
                 }
             }
         });

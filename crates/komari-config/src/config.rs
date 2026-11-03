@@ -102,6 +102,9 @@ pub struct Config {
     pub enable_cloudflared: bool,
     pub cloudflared_token: Option<String>,
     pub ws_disable_origin: bool,
+    /// Normal HTTP request-body limit in bytes (`KOMARI_BODY_LIMIT`).
+    /// `None` lets the server use its default.
+    pub body_limit: Option<usize>,
 }
 
 impl Default for Config {
@@ -115,6 +118,7 @@ impl Default for Config {
             enable_cloudflared: false,
             cloudflared_token: None,
             ws_disable_origin: false,
+            body_limit: None,
         }
     }
 }
@@ -136,6 +140,7 @@ pub struct ConfigOverrides {
     pub allow_cors: Option<bool>,
     pub enable_cloudflared: Option<bool>,
     pub ws_disable_origin: Option<bool>,
+    pub body_limit: Option<usize>,
 }
 
 #[derive(Debug, Error, PartialEq, Eq)]
@@ -247,6 +252,13 @@ impl Config {
                 None => false,
             },
         };
+        let body_limit = match overrides.body_limit {
+            Some(value) => Some(value),
+            None => match read(keys::ENV_BODY_LIMIT) {
+                Some(value) => Some(parse_body_limit(keys::ENV_BODY_LIMIT, &value)?),
+                None => None,
+            },
+        };
 
         Ok(Self {
             listen,
@@ -265,6 +277,7 @@ impl Config {
             enable_cloudflared,
             cloudflared_token,
             ws_disable_origin,
+            body_limit,
         })
     }
 }
@@ -289,6 +302,25 @@ fn parse_log_level(key: &str, value: &str) -> Result<LogLevel, ConfigError> {
             value: value.to_owned(),
             expected: "trace, debug, info, warn, error, or off",
         })
+}
+
+fn parse_body_limit(key: &str, value: &str) -> Result<usize, ConfigError> {
+    let limit = value
+        .trim()
+        .parse::<usize>()
+        .map_err(|_| ConfigError::InvalidValue {
+            key: key.to_owned(),
+            value: value.to_owned(),
+            expected: "a positive integer number of bytes",
+        })?;
+    if limit == 0 {
+        return Err(ConfigError::InvalidValue {
+            key: key.to_owned(),
+            value: value.to_owned(),
+            expected: "a positive integer number of bytes",
+        });
+    }
+    Ok(limit)
 }
 
 fn parse_bool(key: &str, value: &str) -> Result<bool, ConfigError> {

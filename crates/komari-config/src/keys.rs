@@ -22,6 +22,7 @@ pub const ENV_ALLOW_CORS: &str = "KOMARI_ALLOW_CORS";
 pub const ENV_ENABLE_CLOUDFLARED: &str = "KOMARI_ENABLE_CLOUDFLARED";
 pub const ENV_CLOUDFLARED_TOKEN: &str = "KOMARI_CLOUDFLARED_TOKEN";
 pub const ENV_WS_DISABLE_ORIGIN: &str = "KOMARI_WS_DISABLE_ORIGIN";
+pub const ENV_BODY_LIMIT: &str = "KOMARI_BODY_LIMIT";
 
 // ---------------------------------------------------------------------------
 // Persisted keys (`configs` table, JSON representation)

@@ -382,8 +382,11 @@ pub(crate) async fn set_oidc(
         .flatten()
         .unwrap_or_else(|| "github".to_owned());
     if current == config.name {
-        if let Err(error) = komari_oauth::load_provider(&config.name, &config.addition).await {
-            return internal(format!("Failed to load OIDC provider: {error}"));
+        match komari_oauth::load_provider_global(&config.name, &config.addition).await {
+            Ok(provider) => state.set_oauth_provider(Some(provider)),
+            Err(error) => {
+                return internal(format!("Failed to load OIDC provider: {error}"));
+            }
         }
     }
 

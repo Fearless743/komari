@@ -67,6 +67,21 @@ pub const PUBLIC_PATH_PREFIXES: &[&str] = &[
     "/api/clients/",
 ];
 
+/// Per-request limit used by [`AuthLayer`] when buffering a non-GET body.
+///
+/// The server assembly inserts this extension before `AuthLayer` so a chunked
+/// body larger than the configured limit is rejected with `413` instead of
+/// being fully buffered.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct BufferedBodyLimit(pub usize);
+
+/// Request extension that tells [`AuthLayer`] not to buffer the body.
+///
+/// Streaming uploads (admin backup upload) authenticate from headers/session;
+/// buffering a multi-GiB multipart body would defeat the streaming handler.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct SkipBodyBuffering;
+
 /// Shared state needed to authenticate a request.
 #[derive(Clone, Debug)]
 pub struct AuthState {
@@ -271,23 +286,33 @@ pub fn extract_client_token(
 async fn resolve_request_context(
     state: &AuthState,
     request: axum::extract::Request,
-) -> (AuthContext, axum::extract::Request) {
+) -> Result<(AuthContext, axum::extract::Request), Box<Response>> {
     if let Some(context) = request.extensions().get::<AuthContext>().cloned() {
-        return (context, request);
+        return Ok((context, request));
     }
 
     let (mut parts, body) = request.into_parts();
-    let (auth_body, body): (Option<axum::body::Bytes>, Body) = if parts.method == Method::GET {
-        (None, body)
-    } else {
-        match axum::body::to_bytes(body, usize::MAX).await {
-            Ok(bytes) => {
-                let restored = Body::from(bytes.clone());
-                (Some(bytes), restored)
+    let limit = parts
+        .extensions
+        .get::<BufferedBodyLimit>()
+        .map(|limit| limit.0)
+        .unwrap_or(usize::MAX);
+    let skip_buffering = parts.extensions.get::<SkipBodyBuffering>().is_some();
+    let (auth_body, body): (Option<axum::body::Bytes>, Body) =
+        if parts.method == Method::GET || skip_buffering {
+            (None, body)
+        } else {
+            match axum::body::to_bytes(body, limit).await {
+                Ok(bytes) => {
+                    let restored = Body::from(bytes.clone());
+                    (Some(bytes), restored)
+                }
+                // `to_bytes` returns an error when the body exceeds the limit.
+                // Propagate it as 413 instead of silently treating the request as
+                // unauthenticated (which used to produce a misleading 401/403).
+                Err(_) => return Err(Box::new(payload_too_large_response())),
             }
-            Err(_) => (None, Body::empty()),
-        }
-    };
+        };
 
     let context = authenticate_request_with(
         state,
@@ -298,7 +323,7 @@ async fn resolve_request_context(
     )
     .await;
     parts.extensions.insert(context.clone());
-    (context, axum::extract::Request::from_parts(parts, body))
+    Ok((context, axum::extract::Request::from_parts(parts, body)))
 }
 
 /// The extractor resolves API keys, sessions and query tokens on its own, but
@@ -379,8 +404,10 @@ where
         let mut inner = self.inner.clone();
 
         Box::pin(async move {
-            let (_, request) = resolve_request_context(&state, request).await;
-            inner.call(request).await
+            match resolve_request_context(&state, request).await {
+                Ok((_, request)) => inner.call(request).await,
+                Err(response) => Ok(*response),
+            }
         })
     }
 }
@@ -452,7 +479,10 @@ where
         let mut inner = self.inner.clone();
 
         Box::pin(async move {
-            let (context, request) = resolve_request_context(&state, request).await;
+            let (context, request) = match resolve_request_context(&state, request).await {
+                Ok(result) => result,
+                Err(response) => return Ok(*response),
+            };
             if context.permits(&allowed) {
                 inner.call(request).await
             } else {
@@ -515,7 +545,10 @@ where
         let mut inner = self.inner.clone();
 
         Box::pin(async move {
-            let (context, request) = resolve_request_context(&state, request).await;
+            let (context, request) = match resolve_request_context(&state, request).await {
+                Ok(result) => result,
+                Err(response) => return Ok(*response),
+            };
             if !context.is_guest() {
                 return inner.call(request).await;
             }
@@ -598,6 +631,15 @@ impl IntoResponse for Unauthorized {
     fn into_response(self) -> Response {
         unauthorized_response()
     }
+}
+
+/// `413 Payload Too Large` used when a buffered body exceeds its limit.
+pub fn payload_too_large_response() -> Response {
+    Response::builder()
+        .status(StatusCode::PAYLOAD_TOO_LARGE)
+        .header("content-type", "text/plain; charset=utf-8")
+        .body(Body::from("length limit exceeded"))
+        .expect("static 413 response is valid")
 }
 
 /// The exact error body used by Go `api.RespondError(..., "Unauthorized.")`.
@@ -939,6 +981,24 @@ mod tests {
             Some("  spaced  ".to_owned())
         );
         assert_eq!(extract_client_token(None, &method, Some(b"not-json")), None);
+    }
+
+    #[tokio::test]
+    async fn skip_body_buffering_leaves_the_request_body_intact() {
+        let fixture = fixture();
+        let mut request = axum::http::Request::builder()
+            .method(Method::POST)
+            .uri("/api/admin/upload/backup")
+            .body(Body::from("streamed-payload"))
+            .unwrap();
+        request.extensions_mut().insert(SkipBodyBuffering);
+        let (_, request) = resolve_request_context(&fixture.state, request)
+            .await
+            .expect("context");
+        let body = axum::body::to_bytes(request.into_body(), usize::MAX)
+            .await
+            .expect("body");
+        assert_eq!(&body[..], b"streamed-payload");
     }
 
     #[tokio::test]

@@ -1,4 +1,7 @@
-use std::process::Command;
+use std::io::{BufRead, BufReader};
+use std::process::{Command, Stdio};
+use std::sync::mpsc;
+use std::time::Duration;
 
 use komari_cli::version;
 
@@ -71,25 +74,57 @@ fn version_comes_from_the_build_time_version() {
 
 #[test]
 fn server_prints_the_resolved_startup_configuration() {
-    let output = bin()
-        .args(["server", "--listen", "127.0.0.1:34567"])
-        .args(["--db-type", "sqlite", "--database", "test-data/test.db"])
+    let data_dir = std::env::temp_dir().join(format!("komari-cli-server-{}", std::process::id()));
+    std::fs::create_dir_all(&data_dir).expect("create temp data dir");
+
+    let mut child = bin()
+        .current_dir(&data_dir)
+        .args(["server", "--listen", "127.0.0.1:0"])
+        .args(["--db-type", "sqlite", "--database", "test.db"])
         .args(["--log-level", "debug", "--theme", "test-theme"])
         .arg("--allow-cors")
-        .output()
+        .stdout(Stdio::null())
+        .stderr(Stdio::piped())
+        .spawn()
         .expect("run server");
 
+    // Wait for the real bind log instead of sleeping, then exercise graceful
+    // SIGTERM shutdown.
+    let stderr = child.stderr.take().expect("stderr pipe");
+    let (started_tx, started_rx) = mpsc::channel();
+    let reader = std::thread::spawn(move || {
+        let reader = BufReader::new(stderr);
+        let mut all = String::new();
+        for line in reader.lines() {
+            let Ok(line) = line else { break };
+            all.push_str(&line);
+            all.push('\n');
+            if line.contains("Starting server on") {
+                let _ = started_tx.send(());
+            }
+        }
+        all
+    });
+    started_rx
+        .recv_timeout(Duration::from_secs(10))
+        .expect("server did not log its listen address");
+    let kill = Command::new("kill")
+        .arg("-TERM")
+        .arg(child.id().to_string())
+        .status()
+        .expect("send SIGTERM");
+    assert!(kill.success());
+    let status = child.wait().expect("wait for server");
+    let stderr = reader.join().expect("stderr reader");
     assert!(
-        output.status.success(),
-        "server exited with {:?}\nstderr:\n{}",
-        output.status.code(),
-        String::from_utf8_lossy(&output.stderr)
+        status.success(),
+        "server exited with {:?}\nstderr:\n{stderr}",
+        status.code()
     );
 
-    let stderr = String::from_utf8_lossy(&output.stderr);
     for expected in [
-        "127.0.0.1:34567",
-        "test-data/test.db",
+        "127.0.0.1:0",
+        "test.db",
         "test-theme",
         "allow_cors=true",
         "hash",
@@ -99,6 +134,8 @@ fn server_prints_the_resolved_startup_configuration() {
             "startup output did not contain {expected:?}:\n{stderr}"
         );
     }
+
+    let _ = std::fs::remove_dir_all(&data_dir);
 }
 
 #[test]
