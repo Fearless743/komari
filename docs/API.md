@@ -52,23 +52,23 @@ B04/B05/B06 合并并完成 B13 OAuth HTTP/B14 静态路由装配。
 
 | 路由组 | 代表端点 | Rust 状态 | 责任 |
 | --- | --- | --- | --- |
-| 健康检查 | `GET /ping`（Go 用 `Any`） | 未实现 | B04 |
+| 健康检查 | `GET /ping`（Go 用 `Any`） | 已实现（B09；提供 public router 时由 B04 接管） | B09/B04 |
 | 公开 API | `/api/login`、`/api/public`、`/api/nodes`、`/api/version` 等 | 未实现 | B04 |
 | Agent API | `/api/clients/register`、`/api/clients/report`、`/api/clients/uploadBasicInfo` | 见 PARITY | B05 |
-| 浏览器 WebSocket | `GET /api/clients` | 见 PARITY | B05 |
+| 浏览器 WebSocket | `GET /api/clients` | 已实现（B05/B09） | B05/B09 |
 | 管理 API | `/api/admin/*` | 未实现 | B06 |
 | JSON-RPC | `GET/POST /api/rpc2` | 未实现 | B04 |
-| OAuth | `/api/oauth`、`/api/oauth_callback` | crate 已合并（B13）；HTTP 路由待装配 | B13 |
-| 静态资源 | `/`、`/themes/:id/*path`、`/favicon.ico` | 已实现（komari-web，B14）；待服务器装配 | B14 |
+| OAuth | `/api/oauth`、`/api/oauth_callback` | 已实现（B09 装配） | B09 |
+| 静态资源 | `/`、`/themes/:id/*path`、`/favicon.ico` | 已实现（komari-web + B09 装配） | B09 |
 | MJPEG | `/api/mjpeg_live` | 未实现 | B04 |
 
-## 4. 公开路由（Go 参考，Rust 待 B04/B05/B09）
+## 4. 公开路由（Go 参考，Rust 状态）
 
-> 这里的 B09 是 umbrella：**B09 = B13 OAuth + B14 Web**；B13/B14 crate 均已合并，
-> 但 OAuth HTTP 端点和静态路由仍需服务器装配。具体状态以 [PARITY.md](PARITY.md)
-> 为准。
+> B09 已装配 `/ping`、`/api/oauth*`、浏览器 WS 与静态资源。提供 B04 的
+> `public_router` 时，`/ping` 和 OAuth 路由由 B04 接管以避免重复路由；具体状态以
+> [PARITY.md](PARITY.md) 为准。
 
-以下端点来自 `komari/cmd/server.go`，当前 Rust 均未实现：
+以下端点来自 `komari/cmd/server.go`：
 
 | 方法 | 路径 | 说明 | Rust 责任 |
 | --- | --- | --- | --- |
@@ -88,7 +88,7 @@ B04/B05/B06 合并并完成 B13 OAuth HTTP/B14 静态路由装配。
 
 `/api/clients` 是 WebSocket：客户端发送 `get` 或 `get <uuid>`，服务端返回
 `{"status":"success","data":{"online":[...],"data":{...}}}`。未登录时过滤
-`hidden` 节点的逻辑属于 B14。
+`hidden` 节点、private-site 校验与 `session_token` 独立校验由 B09 实现。
 
 ## 5. Agent 路由
 

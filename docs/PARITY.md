@@ -95,11 +95,11 @@ D 条目、不占号**；若后续需要正式登记，使用 `D-012` / `D-013`�
 
 | 缺口 | 责任 | 影响 |
 | --- | --- | --- |
-| HTTP server / `/ping` / public API / RPC2 / MJPEG | B04 | Rust 不能接收 HTTP 请求。 |
-| Agent API / agent WS / browser WS | B05 | agent 不能上报，页面不能实时刷新；截至 B11 基线未合并。 |
+| Public API / RPC2 / MJPEG | B04 | `/ping`、OAuth 登录/回调与静态路由已由 B09 装配；其余公开端点待 B04。 |
 | Admin API / 备份 / 设置 / 主题管理 | B06 | 管理端不可用；GET/list 需接入 D-009/D-011 脱敏。 |
-| OAuth HTTP 登录/绑定路由装配 | B13/B06 | B13 crate 已提供 provider/绑定能力，但 HTTP 端点尚未装配。 |
-| 静态路由服务器装配 / 隐藏节点过滤 | B06/B09 | B14 crate 已提供路由，但 HTTP server 尚未装配；页面仍不可用。 |
+| Agent API / browser WS | B05/B09 | 已装配；浏览器 WS 支持登录态、hidden 与 private-site 过滤。 |
+| OAuth HTTP 登录/绑定路由装配 | B09 | 已完成，未绑定用户按 Go 返回 401。 |
+| 静态路由服务器装配 / 隐藏节点过滤 | B09 | 已完成；`/admin` 强制 default 主题，`/api` 不 fallback。 |
 
 在这些模块合并前，生产流量应继续由 Go 版承载。参见
 [MIGRATION.md](MIGRATION.md) 和 [DEPLOYMENT.md](DEPLOYMENT.md)。
