@@ -60,7 +60,10 @@ pub use manager::{
 };
 pub use provider::OAuthProvider;
 pub use providers::{CloudflareConfig, GenericConfig, GithubConfig, QqConfig};
-pub use redirect::{checked_redirect_uri, validate_redirect_uri};
+pub use redirect::{
+    RedirectPolicy, checked_redirect_uri, checked_redirect_uri_for_base, validate_redirect_uri,
+    validate_redirect_uri_for_base,
+};
 pub use state::{Pkce, StateEntry, StateStore, random_string};
 pub use types::{
     AuthorizationRequest, CallbackQuery, CallbackRequest, ExchangeRequest, OAuthUser, TokenSet,

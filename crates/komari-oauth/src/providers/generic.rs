@@ -18,7 +18,9 @@ use crate::jwt::{JwtVerifier, VerifiedJwt};
 use crate::provider::OAuthProvider;
 use crate::redirect::checked_redirect_uri;
 use crate::state::{Pkce, StateStore, random_string};
-use crate::types::{AuthorizationRequest, CallbackQuery, ExchangeRequest, TokenSet, UserInfo};
+use crate::types::{
+    AuthorizationRequest, CallbackQuery, ExchangeRequest, TokenSet, UserInfo, sanitize_raw,
+};
 
 /// Configuration for the `generic` provider. The first seven fields are the
 /// exact Go `generic.Addition` fields; the remaining fields are optional
@@ -154,6 +156,23 @@ impl GenericProvider {
             .filter(|issuer| !issuer.is_empty())
     }
 
+    /// Validate an `id_token` only when the operator opted into OIDC
+    /// validation (issuer/JWKS configured) or explicitly required it.
+    fn should_validate_id_token(&self) -> bool {
+        self.config.id_token_required
+            || !self.config.issuer.is_empty()
+            || !self.config.jwks_url.is_empty()
+    }
+
+    /// All discovery-provided values are already configured explicitly.
+    fn has_explicit_oidc_config(&self) -> bool {
+        !self.config.issuer.is_empty()
+            && !self.config.auth_url.is_empty()
+            && !self.config.token_url.is_empty()
+            && !self.config.user_info_url.is_empty()
+            && !self.config.jwks_url.is_empty()
+    }
+
     fn verifier(&self) -> Result<Arc<JwtVerifier>> {
         let jwks_url = self.jwks_url().ok_or_else(|| {
             OAuthError::InvalidConfig("jwks_url is required for id_token validation".to_owned())
@@ -188,24 +207,23 @@ impl GenericProvider {
     }
 
     fn subject_from(&self, value: &Value) -> Result<String> {
-        if !self.config.user_id_field.is_empty() {
-            let field = value.get(&self.config.user_id_field).ok_or_else(|| {
-                OAuthError::UserInfo(format!(
-                    "user id field '{}' not found in user info response",
-                    self.config.user_id_field
-                ))
-            })?;
-            return value_to_string(field).ok_or_else(|| {
-                OAuthError::UserInfo(format!(
-                    "user id field '{}' is null",
-                    self.config.user_id_field
-                ))
-            });
+        if self.config.user_id_field.trim().is_empty() {
+            return Err(OAuthError::InvalidConfig(
+                "user_id_field is required".to_owned(),
+            ));
         }
-        value
-            .get("sub")
-            .and_then(value_to_string)
-            .ok_or_else(|| OAuthError::UserInfo("user info response has no sub".to_owned()))
+        let field = value.get(&self.config.user_id_field).ok_or_else(|| {
+            OAuthError::UserInfo(format!(
+                "user id field '{}' not found in user info response",
+                self.config.user_id_field
+            ))
+        })?;
+        value_to_string(field).ok_or_else(|| {
+            OAuthError::UserInfo(format!(
+                "user id field '{}' is null",
+                self.config.user_id_field
+            ))
+        })
     }
 }
 
@@ -224,12 +242,28 @@ impl OAuthProvider for GenericProvider {
     }
 
     async fn init(&self) -> Result<()> {
+        if self.config.user_id_field.trim().is_empty() {
+            return Err(OAuthError::InvalidConfig(
+                "user_id_field is required".to_owned(),
+            ));
+        }
+        if self.config.use_nonce && !self.should_validate_id_token() {
+            return Err(OAuthError::InvalidConfig(
+                "use_nonce requires issuer, jwks_url or id_token_required".to_owned(),
+            ));
+        }
         if self.config.issuer.is_empty() {
             if self.config.id_token_required && self.jwks_url().is_none() {
                 return Err(OAuthError::InvalidConfig(
                     "jwks_url is required when id_token_required is enabled".to_owned(),
                 ));
             }
+            return Ok(());
+        }
+
+        // Explicit endpoints and JWKS mean discovery is unnecessary. This is
+        // important for providers that do not expose a well-known document.
+        if self.has_explicit_oidc_config() {
             return Ok(());
         }
 
@@ -340,10 +374,15 @@ impl OAuthProvider for GenericProvider {
         let mut tokens = parse_token_set(&value, &self.secrets())?;
 
         let id_token = tokens.id_token.clone();
-        match id_token.as_deref() {
-            Some(id_token) => {
-                let verified = self.validate_id_token(id_token, request.nonce).await?;
+        match id_token {
+            Some(id_token) if self.should_validate_id_token() => {
+                let verified = self.validate_id_token(&id_token, request.nonce).await?;
                 tokens.id_token_claims = Some(verified.payload);
+            }
+            Some(_) => {
+                // Go's generic provider ignores id_token. Do not retain an
+                // unverified token in memory.
+                tokens.id_token = None;
             }
             None if self.config.id_token_required => {
                 return Err(OAuthError::InvalidToken(
@@ -385,7 +424,7 @@ impl OAuthProvider for GenericProvider {
             avatar: first_string(&value, &["picture", "avatar_url", "avatar"]),
             union_id: string_field(&value, "union_id"),
             open_id: string_field(&value, "open_id"),
-            raw: Some(value),
+            raw: Some(sanitize_raw(value)),
         })
     }
 

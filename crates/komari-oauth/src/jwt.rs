@@ -13,11 +13,12 @@
 //! TLS stack.
 
 use std::sync::Arc;
+use std::time::{Duration, Instant};
 
 use base64::Engine;
 use base64::engine::general_purpose::URL_SAFE_NO_PAD;
 use chrono::Utc;
-use parking_lot::RwLock;
+use parking_lot::{Mutex, RwLock};
 use ring::signature;
 use serde::Deserialize;
 use serde_json::{Map, Value};
@@ -328,11 +329,15 @@ fn rsa_public_key_der(modulus: &[u8], exponent: &[u8]) -> Vec<u8> {
     der_tlv(0x30, &rsa_key)
 }
 
-/// A cached JWKS document that refreshes once when a token does not match.
+/// Minimum interval between two JWKS refreshes caused by an unknown `kid`.
+const KEY_MISS_REFRESH_INTERVAL: Duration = Duration::from_secs(30);
+
+/// A cached JWKS document that refreshes once when a token's `kid` is unknown.
 pub struct JwksCache {
     url: String,
     client: reqwest::Client,
     keys: RwLock<Option<Arc<JwkSet>>>,
+    last_key_miss_refresh: Mutex<Option<Instant>>,
 }
 
 impl JwksCache {
@@ -341,6 +346,7 @@ impl JwksCache {
             url: url.into(),
             client,
             keys: RwLock::new(None),
+            last_key_miss_refresh: Mutex::new(None),
         }
     }
 
@@ -359,6 +365,26 @@ impl JwksCache {
         let keys = Arc::new(fetch_jwks(&self.client, &self.url).await?);
         *self.keys.write() = Some(Arc::clone(&keys));
         Ok(keys)
+    }
+
+    /// Refresh after an unknown `kid`, at most once per interval.
+    ///
+    /// This prevents a stream of invalid tokens from turning into a JWKS
+    /// request storm while still allowing a rotated key to be picked up.
+    async fn refresh_after_key_miss(&self) -> Result<Arc<JwkSet>> {
+        {
+            let mut last = self.last_key_miss_refresh.lock();
+            let now = Instant::now();
+            if let Some(previous) = *last {
+                if now.duration_since(previous) < KEY_MISS_REFRESH_INTERVAL {
+                    if let Some(keys) = self.keys.read().clone() {
+                        return Ok(keys);
+                    }
+                }
+            }
+            *last = Some(now);
+        }
+        self.refresh().await
     }
 }
 
@@ -387,7 +413,11 @@ impl JwtVerifier {
         self.cache.url()
     }
 
-    /// Verify a token, refreshing the JWKS once if the first attempt fails.
+    /// Verify a token.
+    ///
+    /// The JWKS is refreshed only when the token references a key that is not
+    /// in the cached set. Invalid signatures, expired tokens and issuer or
+    /// audience mismatches do not trigger a network request.
     pub async fn verify(&self, token: &str) -> Result<VerifiedJwt> {
         let keys = self.cache.get().await?;
         match verify_jwt(
@@ -397,18 +427,29 @@ impl JwtVerifier {
             self.audience.as_deref(),
         ) {
             Ok(verified) => Ok(verified),
-            Err(first_error) => {
-                let keys = self.cache.refresh().await?;
+            Err(error) if is_key_miss(&error) => {
+                let keys = match self.cache.refresh_after_key_miss().await {
+                    Ok(keys) => keys,
+                    Err(_) => return Err(error),
+                };
                 verify_jwt(
                     &keys,
                     token,
                     self.issuer.as_deref(),
                     self.audience.as_deref(),
                 )
-                .map_err(|_| first_error)
+                .map_err(|_| error)
             }
+            Err(error) => Err(error),
         }
     }
+}
+
+fn is_key_miss(error: &OAuthError) -> bool {
+    matches!(
+        error,
+        OAuthError::InvalidToken(message) if message.contains("no matching RSA key")
+    )
 }
 
 #[cfg(test)]
