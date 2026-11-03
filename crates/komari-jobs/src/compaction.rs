@@ -300,13 +300,14 @@ pub fn compact(db: &Db, options: &CompactionOptions) -> Result<CompactionReport>
         write_records(db, &compressed_records, &compressed_gpus, five_hours_ago)?;
 
     if options.vacuum {
-        // Go runs this for SQLite and ignores the checkpoint result.
-        let _ = db.execute_batch("PRAGMA wal_checkpoint(TRUNCATE);");
         // Go only logs a VACUUM failure; maintenance must not abort because of
         // an unavailable compaction step (for example a locked database).
         if let Err(error) = db.vacuum() {
             tracing::warn!(%error, "record compaction VACUUM failed");
         }
+        // VACUUM can produce new WAL frames, so checkpoint after it and ignore
+        // the result, exactly like Go's `db.Exec("PRAGMA wal_checkpoint...")`.
+        let _ = db.execute_batch("PRAGMA wal_checkpoint(TRUNCATE);");
     }
 
     Ok(CompactionReport {

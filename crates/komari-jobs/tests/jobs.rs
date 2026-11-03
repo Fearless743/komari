@@ -188,6 +188,43 @@ fn run_once_honours_explicit_preserve_hours_and_batch_size() {
     assert_eq!(report.cleanup.deleted, 5);
 }
 
+#[test]
+fn compaction_vacuums_then_truncates_the_wal() {
+    use std::fs;
+    use std::path::PathBuf;
+
+    let dir = std::env::temp_dir().join(format!(
+        "komari-jobs-wal-{}-{}",
+        std::process::id(),
+        Utc::now().timestamp_nanos_opt().unwrap_or_default()
+    ));
+    fs::create_dir_all(&dir).unwrap();
+    let path = dir.join("komari.db");
+
+    let db = Db::open(&path).unwrap();
+    db.migrate().unwrap();
+    let mode: String = db
+        .with_connection(|conn| Ok(conn.query_row("PRAGMA journal_mode", [], |row| row.get(0))?))
+        .unwrap();
+    assert_eq!(mode.to_ascii_lowercase(), "wal");
+
+    let mut record = Record::new("c1");
+    record.time = LocalTime::from_instant(now() - TimeDelta::hours(6));
+    record.cpu = 10.0;
+    db.records().insert(&record).unwrap();
+
+    compact(&db, &CompactionOptions::at(now())).unwrap();
+
+    let wal = PathBuf::from(format!("{}-wal", path.display()));
+    let wal_len = fs::metadata(&wal)
+        .map(|metadata| metadata.len())
+        .unwrap_or(0);
+    assert_eq!(wal_len, 0, "WAL should be truncated after VACUUM");
+
+    drop(db);
+    fs::remove_dir_all(&dir).unwrap();
+}
+
 #[tokio::test]
 async fn spawn_runs_and_stops_on_cancellation() {
     let db = Arc::new(db());

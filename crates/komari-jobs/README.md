@@ -8,9 +8,10 @@ Rust port of the Go scheduled maintenance in `cmd/server.go` and
   `gpu_records_long_term`.
 * `records.CompactRecord`: live rows older than four hours are grouped per
   client (and GPU device name/index) into 15-minute buckets in the long-term
-  tables, then raw rows older than `now - 5h` are removed, SQLite is
-  checkpointed (`PRAGMA wal_checkpoint(TRUNCATE)`) and vacuumed. A VACUUM
-  failure is logged, not propagated, matching Go.
+  tables, then raw rows older than `now - 5h` are removed. SQLite is vacuumed
+  first (failure logged, not propagated), then checkpointed with
+  `PRAGMA wal_checkpoint(TRUNCATE)`; the checkpoint result is ignored, matching
+  Go's order and error handling.
 * `run_once` / `spawn(db, interval, cancel)` provide a one-shot pass and a
   cancellable background loop. The crate never starts a loop implicitly.
 
