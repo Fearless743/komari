@@ -5,11 +5,12 @@ use thiserror::Error;
 
 /// Log verbosity accepted by `KOMARI_LOG_LEVEL`, `--log-level`, and the
 /// persisted configuration.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
 pub enum LogLevel {
     Trace,
     Debug,
+    #[default]
     Info,
     Warn,
     Error,
@@ -31,12 +32,6 @@ impl LogLevel {
     /// Filter directive understood by `tracing-subscriber`.
     pub const fn as_filter(self) -> &'static str {
         self.as_str()
-    }
-}
-
-impl Default for LogLevel {
-    fn default() -> Self {
-        Self::Info
     }
 }
 
