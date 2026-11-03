@@ -151,6 +151,62 @@ fn legacy_configs_are_converted_to_key_value() {
 }
 
 #[test]
+fn migration_backfills_identifiers_with_random_values() {
+    let dir = TempDir::new("random-backfill");
+    let path = dir.join("komari.db");
+    let db = Db::open(&path).unwrap();
+
+    // Columns missing entirely (or present but empty) in old schemas.
+    db.with_connection(|conn| {
+        conn.execute_batch(
+            "CREATE TABLE clients (`uuid` varchar(36) PRIMARY KEY, `name` varchar(100));\
+             INSERT INTO clients VALUES ('c1', 'one');\
+             INSERT INTO clients VALUES ('c2', 'two');\
+             CREATE TABLE users (`uuid` varchar(36) PRIMARY KEY, `passwd` varchar(255));\
+             INSERT INTO users VALUES ('u1', 'hash');\
+             INSERT INTO users VALUES ('u2', 'hash');\
+             CREATE TABLE sessions (`uuid` varchar(36), `user_agent` text);\
+             INSERT INTO sessions VALUES ('u1', 'agent');\
+             INSERT INTO sessions VALUES ('u1', 'agent');",
+        )?;
+        Ok(())
+    })
+    .unwrap();
+
+    db.migrate().unwrap();
+
+    let clients = db.clients().list().unwrap();
+    assert_eq!(clients.len(), 2);
+    let tokens: std::collections::HashSet<&str> =
+        clients.iter().map(|client| client.token.as_str()).collect();
+    assert_eq!(tokens.len(), 2);
+    for client in &clients {
+        assert_eq!(client.token.len(), 22);
+        assert!(!client.token.starts_with("legacy-"));
+    }
+
+    let users = db.accounts().list().unwrap();
+    assert_eq!(users.len(), 2);
+    let usernames: std::collections::HashSet<&str> =
+        users.iter().map(|user| user.username.as_str()).collect();
+    assert_eq!(usernames.len(), 2);
+    for user in &users {
+        assert!(user.username.starts_with("legacy-"));
+    }
+
+    let sessions = db.sessions().list().unwrap();
+    assert_eq!(sessions.len(), 2);
+    let session_ids: std::collections::HashSet<&str> = sessions
+        .iter()
+        .map(|session| session.session.as_str())
+        .collect();
+    assert_eq!(session_ids.len(), 2);
+    for session in &sessions {
+        assert_eq!(session.session.len(), 32);
+    }
+}
+
+#[test]
 fn hybrid_configs_from_a_previous_migration_are_converted() {
     let dir = TempDir::new("hybrid-configs");
     let path = dir.join("komari.db");

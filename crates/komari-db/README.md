@@ -45,10 +45,12 @@ variables. MySQL is not implemented yet and returns
 `migrate()` creates the tables from `database/models/**` in the Go backend and
 adds missing columns to older tables with `ALTER TABLE ... ADD COLUMN` (never
 dropping or rewriting existing data). Missing unique constraints are restored
-with unique indexes when the existing data has no duplicates, and the legacy
-single-row `configs` schema (including hybrid tables that already received
-empty `key`/`value` columns from an older additive migration) is converted into
-key/value form with the original table kept as `configs_legacy_backup`.
+with unique indexes when the existing data has no duplicates (empty
+client tokens/user names/session ids are first backfilled with random values),
+and the legacy single-row `configs` schema (including hybrid tables that already
+received empty `key`/`value` columns from an older additive migration) is
+converted into key/value form with the original table kept as
+`configs_legacy_backup`.
 
 `clients`, `users`, `sessions`, `records`, `gpu_records`, `logs`, `clipboards`,
 `offline_notifications`, `load_notifications`, `oidc_providers`,

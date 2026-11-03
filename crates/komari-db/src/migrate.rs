@@ -7,6 +7,7 @@
 
 use crate::db::Db;
 use crate::error::Result;
+use crate::util::{generate_random_string, generate_token};
 
 /// Tables created by the Go backend's `AutoMigrate` call.
 pub const TABLES: &[&str] = &[
@@ -442,27 +443,45 @@ fn ensure_no_duplicates(
     Ok(())
 }
 
+/// Backfill one identifier column row by row with unpredictable values.
+fn backfill_column(
+    tx: &rusqlite::Transaction<'_>,
+    table: &str,
+    column: &str,
+    mut generate: impl FnMut() -> String,
+) -> crate::error::Result<()> {
+    if !table_exists_tx(tx, table)? {
+        return Ok(());
+    }
+    let rowids: Vec<i64> = {
+        let mut stmt = tx.prepare(&format!(
+            "SELECT rowid FROM `{table}` WHERE `{column}` IS NULL OR `{column}` = ''"
+        ))?;
+        let rows = stmt.query_map([], |row| row.get::<_, i64>(0))?;
+        rows.collect::<rusqlite::Result<Vec<_>>>()?
+    };
+    for rowid in rowids {
+        tx.execute(
+            &format!("UPDATE `{table}` SET `{column}` = ?1 WHERE rowid = ?2"),
+            rusqlite::params![generate(), rowid],
+        )?;
+    }
+    Ok(())
+}
+
 /// Old tables often predate unique constraints. Restore them with a unique
 /// index (functionally identical to a `UNIQUE` constraint) when the data has
-/// no duplicates. Empty identifiers get a synthetic rowid-based value first so
-/// additive migrations remain usable.
+/// no duplicates. Empty identifiers are filled with cryptographically random
+/// tokens first, so a legacy session can never become a guessable valid login.
 fn ensure_unique_columns(tx: &rusqlite::Transaction<'_>) -> crate::error::Result<()> {
-    // Backfill identifiers that were added as empty columns by the migration.
-    for (table, column) in [
-        ("clients", "token"),
-        ("users", "username"),
-        ("sessions", "session"),
-    ] {
-        if table_exists_tx(tx, table)? {
-            tx.execute(
-                &format!(
-                    "UPDATE `{table}` SET `{column}` = 'legacy-' || rowid \
-                     WHERE `{column}` IS NULL OR `{column}` = ''"
-                ),
-                [],
-            )?;
-        }
-    }
+    backfill_column(tx, "clients", "token", generate_token)?;
+    backfill_column(tx, "users", "username", || {
+        format!(
+            "legacy-{}",
+            &uuid::Uuid::new_v4().simple().to_string()[..12]
+        )
+    })?;
+    backfill_column(tx, "sessions", "session", || generate_random_string(32))?;
 
     // The canonical schema keeps both the primary key and this explicit index.
     if table_exists_tx(tx, "sessions")? && !has_unique_column(tx, "sessions", "session")? {
