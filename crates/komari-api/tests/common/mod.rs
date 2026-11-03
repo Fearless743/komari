@@ -28,10 +28,10 @@ pub fn default_config() -> ApiConfig {
     ApiConfig {
         presence_ttl: Duration::from_secs(11),
         socket_read_timeout: Duration::from_secs(11),
-        max_report_body: 1024 * 1024,
-        // Keep the background sweeper out of deterministic tests; presence
-        // tests drive expiry explicitly.
+        // Keep background work out of deterministic tests; tests drive
+        // presence expiry and report flushing explicitly.
         presence_sweep_interval: Duration::ZERO,
+        report_flush_interval: Duration::ZERO,
         ..ApiConfig::default()
     }
 }
@@ -63,6 +63,28 @@ pub fn set_auto_key(state: &ApiState, key: &str) {
         .config()
         .set(komari_config::keys::AUTO_DISCOVERY_KEY_KEY, &key)
         .expect("store auto discovery key");
+}
+
+pub fn flush(state: &ApiState) -> komari_api::FlushSummary {
+    state.flush_reports().expect("flush reports")
+}
+
+pub fn create_admin_session(state: &ApiState) -> String {
+    let user = state
+        .db
+        .accounts()
+        .create("admin", "password")
+        .expect("create admin");
+    komari_auth::create_session(&state.db, &user.uuid, "test-agent", "127.0.0.1", "password")
+        .expect("create session")
+}
+
+pub fn set_api_key(state: &ApiState, key: &str) {
+    state
+        .db
+        .config()
+        .set("api_key", &key)
+        .expect("store api key");
 }
 
 pub fn create_client(state: &ApiState, name: &str) -> Client {
