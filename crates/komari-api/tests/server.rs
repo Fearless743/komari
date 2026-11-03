@@ -1071,6 +1071,68 @@ async fn graceful_shutdown_completes_and_cancels_background_tasks() {
 }
 
 #[tokio::test]
+async fn connect_info_provides_a_peer_ip_fallback() {
+    let dir = TempDir::new().expect("temp dir");
+    let db = memory_db();
+    db.accounts()
+        .create("peer", "password")
+        .expect("create user");
+    let server = build(server_config(&dir), db).await;
+    let state = server.state().clone();
+    let running = start(server).await;
+    let client = http_client();
+
+    let response = client
+        .post(format!("{}/api/login", running.base))
+        .json(&serde_json::json!({"username": "peer", "password": "password"}))
+        .send()
+        .await
+        .expect("login");
+    assert_eq!(response.status(), reqwest::StatusCode::OK);
+
+    let sessions = state.db.sessions().list().expect("sessions");
+    assert_eq!(sessions.len(), 1);
+    assert_eq!(sessions[0].ip, "127.0.0.1");
+
+    running.stop().await;
+}
+
+#[tokio::test]
+async fn server_survives_longer_than_the_shutdown_timeout() {
+    let dir = TempDir::new().expect("temp dir");
+    let config = ServerConfig {
+        shutdown_timeout: Duration::from_millis(100),
+        ..server_config(&dir)
+    };
+    let server = build(config, memory_db()).await;
+    let listener = TcpListener::bind("127.0.0.1:0")
+        .await
+        .expect("bind random port");
+    let address = listener.local_addr().expect("address");
+    let base = format!("http://{address}");
+    let (shutdown, receiver) = oneshot::channel();
+    let handle = tokio::spawn(server.serve_with_shutdown(listener, async {
+        let _ = receiver.await;
+    }));
+
+    // More than twice the shutdown timeout: the server must still be alive.
+    tokio::time::sleep(Duration::from_millis(300)).await;
+    let response = http_client()
+        .get(format!("{base}/ping"))
+        .send()
+        .await
+        .expect("server still running");
+    assert_eq!(response.status(), reqwest::StatusCode::OK);
+
+    let _ = shutdown.send(());
+    let result = tokio::time::timeout(Duration::from_secs(2), handle)
+        .await
+        .expect("shutdown timeout")
+        .expect("server task");
+    assert!(result.is_ok(), "{result:?}");
+}
+
+#[tokio::test]
 async fn graceful_shutdown_times_out_half_open_connections() {
     let dir = TempDir::new().expect("temp dir");
     let config = ServerConfig {

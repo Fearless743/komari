@@ -36,7 +36,8 @@ pub use assets::{
 pub use background::{BackgroundConfig, BackgroundTasks};
 pub use oauth::{BINDING_COOKIE, OAUTH_STATE_COOKIE, OAuthRuntime, SESSION_COOKIE};
 
-use std::future::Future;
+use std::future::{Future, IntoFuture};
+use std::net::SocketAddr;
 use std::path::PathBuf;
 use std::sync::Arc;
 use std::time::Duration;
@@ -489,15 +490,33 @@ impl Server {
         // `Server` implements `Drop`, so the router is moved out instead of
         // destructuring `self`.
         let router = std::mem::replace(&mut self.router, Router::new());
-        let serve = axum::serve(listener, router).with_graceful_shutdown(shutdown);
-        let result = match tokio::time::timeout(self.config.shutdown_timeout, serve).await {
-            Ok(result) => result.context("HTTP server failed"),
-            Err(_) => {
-                warn!(
-                    timeout = ?self.config.shutdown_timeout,
-                    "graceful shutdown timed out; forcing shutdown"
-                );
-                Ok(())
+        // Signal the select branch only after the caller's shutdown future
+        // completes. The timeout must not start when the server starts.
+        let (shutdown_tx, shutdown_rx) = tokio::sync::oneshot::channel();
+        let shutdown = async move {
+            shutdown.await;
+            let _ = shutdown_tx.send(());
+        };
+        let serve = axum::serve(
+            listener,
+            router.into_make_service_with_connect_info::<SocketAddr>(),
+        )
+        .with_graceful_shutdown(shutdown)
+        .into_future();
+        tokio::pin!(serve);
+        let result = tokio::select! {
+            result = &mut serve => result.context("HTTP server failed"),
+            _ = shutdown_rx => {
+                match tokio::time::timeout(self.config.shutdown_timeout, &mut serve).await {
+                    Ok(result) => result.context("HTTP server failed"),
+                    Err(_) => {
+                        warn!(
+                            timeout = ?self.config.shutdown_timeout,
+                            "graceful shutdown timed out; forcing shutdown"
+                        );
+                        Ok(())
+                    }
+                }
             }
         };
         let _ = self
