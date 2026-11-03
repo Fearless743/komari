@@ -5,6 +5,7 @@ use crate::time::LocalTime;
 
 /// A single key/value entry in the `configs` table (Komari >= 1.1.4).
 #[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(default)]
 pub struct ConfigItem {
     pub key: String,
     /// JSON-encoded value, exactly as Go's `ConfigItem.Value` stores it.
@@ -26,8 +27,9 @@ impl FromRow for ConfigItem {
 /// the key/value [`ConfigItem`] table, which is what current Komari versions
 /// (including the bundled `data/komari.db`) use.
 #[derive(Clone, Debug, Serialize, Deserialize)]
-#[serde(rename_all = "snake_case")]
+#[serde(rename_all = "snake_case", default)]
 pub struct Config {
+    #[serde(skip_serializing_if = "crate::models::is_zero_i64")]
     pub id: i64,
     pub sitename: String,
     pub description: String,

@@ -6,6 +6,7 @@ use crate::time::LocalTime;
 
 /// Offline-alert settings for one client (`offline_notifications`).
 #[derive(Clone, Debug, Default, Serialize, Deserialize)]
+#[serde(default)]
 pub struct OfflineNotification {
     pub client: String,
     /// Joined client information. Not a column on `offline_notifications`.
@@ -42,7 +43,9 @@ impl FromRow for OfflineNotification {
 
 /// A load-based notification rule (`load_notifications`).
 #[derive(Clone, Debug, Default, Serialize, Deserialize)]
+#[serde(default)]
 pub struct LoadNotification {
+    #[serde(skip_serializing_if = "crate::models::is_zero_i64")]
     pub id: i64,
     pub name: String,
     pub clients: StringArray,

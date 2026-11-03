@@ -5,15 +5,18 @@ use crate::time::LocalTime;
 
 /// An authenticated user (`users` table).
 #[derive(Clone, Debug, Default, Serialize, Deserialize)]
-#[serde(rename_all = "snake_case")]
+#[serde(rename_all = "snake_case", default)]
 pub struct User {
+    #[serde(skip_serializing_if = "String::is_empty")]
     pub uuid: String,
     pub username: String,
+    #[serde(skip_serializing_if = "String::is_empty")]
     pub passwd: String,
     #[serde(rename = "sso_type")]
     pub sso_type: String,
     #[serde(rename = "sso_id")]
     pub sso_id: String,
+    #[serde(skip_serializing_if = "String::is_empty")]
     pub two_factor: String,
     /// Relationship loaded by GORM; it is not a column on `users`.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]

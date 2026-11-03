@@ -7,9 +7,11 @@ use crate::util::generate_token;
 
 /// A registered client device (`clients` table).
 #[derive(Clone, Debug, Default, Serialize, Deserialize)]
-#[serde(rename_all = "snake_case")]
+#[serde(rename_all = "snake_case", default)]
 pub struct Client {
+    #[serde(skip_serializing_if = "String::is_empty")]
     pub uuid: String,
+    #[serde(skip_serializing_if = "String::is_empty")]
     pub token: String,
     pub name: String,
     pub cpu_name: String,
@@ -19,16 +21,19 @@ pub struct Client {
     pub os: String,
     pub kernel_version: String,
     pub gpu_name: String,
-    #[serde(rename = "ipv4")]
+    #[serde(rename = "ipv4", skip_serializing_if = "String::is_empty")]
     pub ipv4: String,
-    #[serde(rename = "ipv6")]
+    #[serde(rename = "ipv6", skip_serializing_if = "String::is_empty")]
     pub ipv6: String,
     pub region: String,
+    #[serde(skip_serializing_if = "String::is_empty")]
     pub remark: String,
+    #[serde(skip_serializing_if = "String::is_empty")]
     pub public_remark: String,
     pub mem_total: i64,
     pub swap_total: i64,
     pub disk_total: i64,
+    #[serde(skip_serializing_if = "String::is_empty")]
     pub version: String,
     pub weight: i64,
     pub price: f64,

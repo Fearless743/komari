@@ -6,6 +6,7 @@ use crate::util::generate_random_string;
 
 /// A user login session (`sessions` table).
 #[derive(Clone, Debug, Default, Serialize, Deserialize)]
+#[serde(default)]
 pub struct Session {
     pub uuid: String,
     pub session: String,

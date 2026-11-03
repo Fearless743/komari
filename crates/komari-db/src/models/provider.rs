@@ -5,6 +5,7 @@ use super::FromRow;
 /// Shared shape of `oidc_providers`, `message_sender_providers` and
 /// `ddns_providers`: a primary-key name plus a JSON `addition` blob.
 #[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(default)]
 pub struct Provider {
     pub name: String,
     pub addition: String,

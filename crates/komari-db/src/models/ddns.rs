@@ -8,6 +8,7 @@ use crate::time::LocalTime;
 /// Note the column names `ip_v4` and `ip_v6`: GORM derives them from the Go
 /// fields `IPV4` / `IPV6`, not from their JSON tags.
 #[derive(Clone, Debug, Default, Serialize, Deserialize)]
+#[serde(default)]
 pub struct DdnsSyncHistory {
     pub id: i64,
     pub client_uuid: String,

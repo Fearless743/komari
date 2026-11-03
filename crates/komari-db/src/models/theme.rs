@@ -6,6 +6,7 @@ use super::FromRow;
 /// Theme metadata (`komari-theme.json`). This is not a database table; it is
 /// included because the Go `models.Theme` type participates in the model set.
 #[derive(Clone, Debug, Default, Serialize, Deserialize)]
+#[serde(default)]
 pub struct Theme {
     pub name: String,
     pub short: String,
@@ -18,6 +19,7 @@ pub struct Theme {
 }
 
 #[derive(Clone, Debug, Default, Serialize, Deserialize)]
+#[serde(default)]
 pub struct Configuration {
     #[serde(rename = "type", default)]
     pub configuration_type: String,
@@ -27,6 +29,7 @@ pub struct Configuration {
 }
 
 #[derive(Clone, Debug, Default, Serialize, Deserialize)]
+#[serde(default)]
 pub struct ManagedThemeConfigurationItem {
     pub key: String,
     pub name: Value,
@@ -40,6 +43,7 @@ pub struct ManagedThemeConfigurationItem {
 
 /// Stored per-theme configuration (`theme_configurations`).
 #[derive(Clone, Debug, Default, Serialize, Deserialize)]
+#[serde(default)]
 pub struct ThemeConfiguration {
     pub short: String,
     /// JSON-encoded configuration object.

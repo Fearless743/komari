@@ -17,6 +17,7 @@ pub mod message_event {
 
 /// An event delivered to a notification sender. Not a database table.
 #[derive(Clone, Debug, Default, Serialize, Deserialize)]
+#[serde(default)]
 pub struct EventMessage {
     pub event: String,
     pub clients: Vec<Client>,

@@ -5,6 +5,7 @@ use crate::time::LocalTime;
 
 /// A client metric sample (`records` / `records_long_term`).
 #[derive(Clone, Debug, Default, Serialize, Deserialize)]
+#[serde(default)]
 pub struct Record {
     pub client: String,
     pub time: LocalTime,
@@ -65,6 +66,7 @@ impl FromRow for Record {
 
 /// A per-device GPU metric sample (`gpu_records` / `gpu_records_long_term`).
 #[derive(Clone, Debug, Default, Serialize, Deserialize)]
+#[serde(default)]
 pub struct GPURecord {
     pub client: String,
     pub time: LocalTime,

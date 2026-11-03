@@ -36,3 +36,8 @@ pub use client::Client;
 pub trait FromRow: Sized {
     fn from_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<Self>;
 }
+
+/// Serde helper matching Go's `omitempty` on integer ids.
+pub(crate) fn is_zero_i64(value: &i64) -> bool {
+    *value == 0
+}

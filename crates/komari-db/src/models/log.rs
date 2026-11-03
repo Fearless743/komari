@@ -5,7 +5,9 @@ use crate::time::LocalTime;
 
 /// An audit log entry (`logs`).
 #[derive(Clone, Debug, Default, Serialize, Deserialize)]
+#[serde(default)]
 pub struct Log {
+    #[serde(skip_serializing_if = "crate::models::is_zero_i64")]
     pub id: i64,
     #[serde(rename = "ip")]
     pub ip: String,

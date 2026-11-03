@@ -636,9 +636,6 @@ fn json_field_names_match_the_go_models() {
         "name",
         "cpu_name",
         "cpu_cores",
-        "ipv4",
-        "ipv6",
-        "public_remark",
         "mem_total",
         "swap_total",
         "billing_cycle",
@@ -655,13 +652,26 @@ fn json_field_names_match_the_go_models() {
     ] {
         assert!(object.contains_key(key), "missing JSON key {key}");
     }
+    // Go marks these `omitempty`, and a fresh client has empty values.
+    assert!(object.get("ipv4").is_none());
+    assert!(object.get("ipv6").is_none());
+    assert!(object.get("public_remark").is_none());
 
     let user = User::new("admin", "pw");
     let user = serde_json::to_value(&user).unwrap();
     assert!(user.get("sso_type").is_some());
     assert!(user.get("sso_id").is_some());
-    assert!(user.get("two_factor").is_some());
+    // `two_factor` has `omitempty` in Go and is empty for a new user.
+    assert!(user.get("two_factor").is_none());
     assert!(user.get("sessions").is_none());
+
+    let empty_client = serde_json::to_value(Client::default()).unwrap();
+    assert!(empty_client.get("uuid").is_none());
+    assert!(empty_client.get("ipv4").is_none());
+    assert!(empty_client.get("created_at").is_some());
+    let partial: Client = serde_json::from_str(r#"{"uuid":"u","token":"t","name":"n"}"#).unwrap();
+    assert_eq!(partial.uuid, "u");
+    assert_eq!(partial.cpu_cores, 0);
 
     let legacy = komari_db::models::Config::default();
     let legacy = serde_json::to_value(&legacy).unwrap();

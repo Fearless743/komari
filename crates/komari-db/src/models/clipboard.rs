@@ -5,6 +5,7 @@ use crate::time::LocalTime;
 
 /// A clipboard entry (`clipboards`).
 #[derive(Clone, Debug, Default, Serialize, Deserialize)]
+#[serde(default)]
 pub struct Clipboard {
     pub id: i64,
     pub text: String,
