@@ -368,6 +368,13 @@ impl Server {
         &self.background
     }
 
+    /// Stop every background loop owned by the server, including the presence
+    /// sweeper and report flusher owned by [`ApiState`].
+    pub fn cancel_background(&self) {
+        self.state.shutdown_background();
+        self.background.cancel();
+    }
+
     /// A clone of the assembled router (state already applied).
     pub fn router(&self) -> Router {
         self.router.clone()
@@ -409,6 +416,7 @@ impl Server {
             .db
             .logs()
             .log("", "", "server is shutting down", "info");
+        state.shutdown_background();
         background.shutdown().await;
         info!(%address, "server stopped");
         result.context("HTTP server failed")

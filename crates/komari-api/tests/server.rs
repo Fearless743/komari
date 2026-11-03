@@ -595,6 +595,7 @@ async fn graceful_shutdown_completes_and_cancels_background_tasks() {
     };
     let server = build(config, memory_db()).await;
     let background = server.background().cancel_token();
+    let state = server.state().clone();
     let running = start(server).await;
     let client = http_client();
 
@@ -618,6 +619,7 @@ async fn graceful_shutdown_completes_and_cancels_background_tasks() {
         .expect("server task");
     assert!(result.is_ok(), "{result:?}");
     assert!(background.is_cancelled());
+    assert!(state.background_cancelled());
 }
 
 #[tokio::test]

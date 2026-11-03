@@ -8,6 +8,7 @@ use komari_auth::AuthState;
 use komari_config::keys;
 use komari_db::{Db, DbError};
 use komari_geoip::GeoIpService;
+use komari_jobs::CancelToken;
 
 use crate::cache::ReportCache;
 use crate::clock::{Clock, SystemClock};
@@ -73,6 +74,9 @@ pub struct ApiState {
     /// [`ApiState::with_geoip_service`].
     pub geoip: Option<Arc<GeoIpService>>,
     config: Arc<ApiConfig>,
+    /// Cancels the presence sweeper and report flusher started by
+    /// [`ApiState::with_clock`].
+    background_cancel: CancelToken,
 }
 
 impl FromRef<ApiState> for AuthState {
@@ -117,10 +121,24 @@ impl ApiState {
             report_cache,
             geoip,
             config: Arc::new(config),
+            background_cancel: CancelToken::new(),
         };
         state.spawn_presence_sweeper();
         state.spawn_report_flusher();
         state
+    }
+
+    /// Stop the presence sweeper and report flusher.
+    ///
+    /// The server assembly calls this during graceful shutdown. The tasks are
+    /// also stopped when the Tokio runtime is dropped.
+    pub fn shutdown_background(&self) {
+        self.background_cancel.cancel();
+    }
+
+    /// Whether [`ApiState::shutdown_background`] has been called.
+    pub fn background_cancelled(&self) -> bool {
+        self.background_cancel.is_cancelled()
     }
 
     pub fn config(&self) -> &ApiConfig {
@@ -145,12 +163,18 @@ impl ApiState {
             return;
         };
         let presence = Arc::clone(&self.presence);
+        let cancel = self.background_cancel.clone();
         handle.spawn(async move {
             let mut ticker = tokio::time::interval(interval);
             ticker.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
             loop {
-                ticker.tick().await;
-                presence.expire_due();
+                tokio::select! {
+                    biased;
+                    () = cancel.cancelled() => break,
+                    _ = ticker.tick() => {
+                        presence.expire_due();
+                    }
+                }
             }
         });
     }
@@ -168,18 +192,22 @@ impl ApiState {
         };
         let cache = Arc::clone(&self.report_cache);
         let db = Arc::clone(&self.db);
+        let cancel = self.background_cancel.clone();
         handle.spawn(async move {
             let mut ticker = tokio::time::interval(interval);
             ticker.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
             loop {
-                ticker.tick().await;
-                match cache.flush(&db) {
-                    Ok(summary) => {
-                        tracing::debug!(?summary, "flushed client reports");
-                    }
-                    Err((summary, error)) => {
-                        tracing::error!(?summary, %error, "failed to flush client reports");
-                    }
+                tokio::select! {
+                    biased;
+                    () = cancel.cancelled() => break,
+                    _ = ticker.tick() => match cache.flush(&db) {
+                        Ok(summary) => {
+                            tracing::debug!(?summary, "flushed client reports");
+                        }
+                        Err((summary, error)) => {
+                            tracing::error!(?summary, %error, "failed to flush client reports");
+                        }
+                    },
                 }
             }
         });
