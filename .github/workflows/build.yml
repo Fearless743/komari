@@ -160,7 +160,10 @@ jobs:
       # Match the Go build workflow, which used the commit SHA for both values.
       KOMARI_VERSION: ${{ github.sha }}
       KOMARI_VERSION_HASH: ${{ github.sha }}
-      KOMARI_DEFAULT_THEME_DIR: ${{ github.workspace }}/.komari-theme
+      # Relative to crates/komari-web (B14 resolves relative paths there).
+      # This also works inside the cross container, where the repo is mounted
+      # at /project and a host-absolute path would not exist.
+      KOMARI_DEFAULT_THEME_DIR: ../../.komari-theme
       TARGET: ${{ matrix.target }}
       NAME: ${{ matrix.name }}
       EXTENSION: ${{ matrix.extension }}
@@ -198,7 +201,8 @@ jobs:
           else
             cargo build --locked --release --workspace --target "${TARGET}"
           fi
-          if [[ "${EXTENSION}" != ".exe" ]] && command -v strip >/dev/null 2>&1; then
+          if [[ "${{ matrix.use_cross }}" != "true" && "${EXTENSION}" != ".exe" ]] \
+            && command -v strip >/dev/null 2>&1; then
             strip "target/${TARGET}/release/komari"
           fi
 
@@ -211,7 +215,7 @@ jobs:
             exit 0
           fi
           marker="$(grep -oE 'assets/[A-Za-z0-9._-]+\.(js|css)' \
-            "$KOMARI_DEFAULT_THEME_DIR/dist/index.html" | head -n1 || true)"
+            "$GITHUB_WORKSPACE/.komari-theme/dist/index.html" | head -n1 || true)"
           if [[ -z "$marker" ]]; then
             echo "::error::no asset reference found in dist/index.html"
             exit 1

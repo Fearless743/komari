@@ -94,8 +94,8 @@ jobs:
         shell: bash
         run: |
           if [[ ! -f crates/komari-web/build.rs ]]; then
-            echo "::warning::komari-web build.rs not present (B14 not merged); skipping theme byte check"
-            exit 0
+            echo "::error::komari-web build.rs is missing (B14 required for a release)"
+            exit 1
           fi
           cargo build -p komari-web --release --locked
           marker="$(grep -oE 'assets/[A-Za-z0-9._-]+\.(js|css)' \
@@ -160,7 +160,10 @@ jobs:
             use_cross: false
             extension: ".exe"
     env:
-      KOMARI_DEFAULT_THEME_DIR: ${{ github.workspace }}/.komari-theme
+      # Relative to crates/komari-web (B14 resolves relative paths there).
+      # This also works inside the cross container, where the repo is mounted
+      # at /project and a host-absolute path would not exist.
+      KOMARI_DEFAULT_THEME_DIR: ../../.komari-theme
       TARGET: ${{ matrix.target }}
       NAME: ${{ matrix.name }}
       EXTENSION: ${{ matrix.extension }}
@@ -204,7 +207,8 @@ jobs:
           else
             cargo build --locked --release --workspace --target "${TARGET}"
           fi
-          if [[ "${EXTENSION}" != ".exe" ]] && command -v strip >/dev/null 2>&1; then
+          if [[ "${{ matrix.use_cross }}" != "true" && "${EXTENSION}" != ".exe" ]] \
+            && command -v strip >/dev/null 2>&1; then
             strip "target/${TARGET}/release/komari"
           fi
 
@@ -213,11 +217,11 @@ jobs:
         shell: bash
         run: |
           if ! cargo tree -p komari-cli --locked | grep -q 'komari-web'; then
-            echo "::warning::komari-cli does not depend on komari-web yet (B09); skipping binary theme check"
-            exit 0
+            echo "::error::komari-cli does not depend on komari-web; a release would ship without a UI (B09 integration is required)"
+            exit 1
           fi
           marker="$(grep -oE 'assets/[A-Za-z0-9._-]+\.(js|css)' \
-            "$KOMARI_DEFAULT_THEME_DIR/dist/index.html" | head -n1 || true)"
+            "$GITHUB_WORKSPACE/.komari-theme/dist/index.html" | head -n1 || true)"
           if [[ -z "$marker" ]]; then
             echo "::error::no asset reference found in dist/index.html"
             exit 1
@@ -297,6 +301,37 @@ jobs:
 
       - name: Set up Docker Buildx
         uses: docker/setup-buildx-action@v3
+
+      - name: Build amd64 image for verification
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          load: true
+          platforms: linux/amd64
+          tags: komari:verify
+          build-args: |
+            KOMARI_VERSION=${{ needs.version.outputs.tag }}
+            KOMARI_VERSION_HASH=${{ needs.version.outputs.hash }}
+            KOMARI_THEME_SRC=.komari-theme
+            KOMARI_DEFAULT_THEME_DIR=/src/theme
+          cache-from: type=gha
+
+      - name: Verify image contains the embedded theme
+        shell: bash
+        run: |
+          marker="$(grep -oE 'assets/[A-Za-z0-9._-]+\.(js|css)' \
+            .komari-theme/dist/index.html | head -n1 || true)"
+          if [[ -z "$marker" ]]; then
+            echo "::error::no asset reference found in .komari-theme/dist/index.html"
+            exit 1
+          fi
+          cid="$(docker create komari:verify)"
+          trap 'docker rm -f "$cid" >/dev/null 2>&1 || true' EXIT
+          docker cp "$cid:/usr/local/bin/komari" "$RUNNER_TEMP/komari-image"
+          if ! grep -a -q "$marker" "$RUNNER_TEMP/komari-image"; then
+            echo "::error::image binary does not contain theme asset $marker"
+            exit 1
+          fi
 
       - name: Log in to GHCR
         uses: docker/login-action@v3
