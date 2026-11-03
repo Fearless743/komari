@@ -10,6 +10,7 @@ axum = { workspace = true }
 chrono = { workspace = true }
 futures-util = { workspace = true }
 http = { workspace = true }
+image = { version = "0.25", default-features = false, features = ["png"] }
 komari-auth = { workspace = true }
 komari-config = { workspace = true }
 komari-db = { workspace = true }
@@ -18,6 +19,7 @@ komari-geoip = { workspace = true }
 komari-notify = { workspace = true }
 komari-oauth = { workspace = true }
 komari-web = { workspace = true }
+qrcode = { version = "0.14", default-features = false, features = ["image"] }
 reqwest = { workspace = true }
 serde = { workspace = true }
 serde_json = { workspace = true }

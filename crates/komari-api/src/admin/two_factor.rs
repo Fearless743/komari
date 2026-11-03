@@ -6,11 +6,14 @@
 //! same `2fa_secret` cookie. The enable/disable flow is unchanged.
 
 use std::collections::HashMap;
+use std::io::Cursor;
 
 use axum::Router;
+use axum::body::Body;
 use axum::extract::{Query, State};
 use axum::http::HeaderValue;
-use axum::http::header::SET_COOKIE;
+use axum::http::StatusCode;
+use axum::http::header::{CONTENT_TYPE, SET_COOKIE};
 use axum::response::{IntoResponse, Response};
 use axum::routing::{get, post};
 use komari_auth::{RequireAdmin, disable_2fa, enable_2fa_with_code, generate_2fa};
@@ -33,11 +36,26 @@ pub(crate) async fn generate(_admin: RequireAdmin) -> Response {
         Ok(setup) => setup,
         Err(error) => return internal(format!("Failed to generate 2FA: {error}")),
     };
-    let mut response = response::success(json!({
-        "secret": setup.secret,
-        "otpauth_url": setup.otpauth_url,
-    }))
-    .into_response();
+    let code = match qrcode::QrCode::new(setup.otpauth_url.as_bytes()) {
+        Ok(code) => code,
+        Err(error) => return internal(format!("Failed to generate 2FA QR code: {error}")),
+    };
+    let image = code
+        .render::<image::Luma<u8>>()
+        .min_dimensions(256, 256)
+        .build();
+    let mut png = Cursor::new(Vec::new());
+    if let Err(error) =
+        image::DynamicImage::ImageLuma8(image).write_to(&mut png, image::ImageFormat::Png)
+    {
+        return internal(format!("Failed to encode 2FA QR code: {error}"));
+    }
+
+    let mut response = Response::builder()
+        .status(StatusCode::OK)
+        .header(CONTENT_TYPE, "image/png")
+        .body(Body::from(png.into_inner()))
+        .expect("static PNG response is valid");
     if let Ok(value) = HeaderValue::from_str(&set_cookie("2fa_secret", &setup.secret, 1800)) {
         response.headers_mut().insert(SET_COOKIE, value);
     }
