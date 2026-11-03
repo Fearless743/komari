@@ -5,9 +5,12 @@
 //!
 //! 1. `Authorization: Bearer <api_key>` (configured `api_key`), admin
 //! 2. `session_token` cookie, admin
-//! 3. agent token from `Authorization: Bearer <token>` or `?token=<token>`,
-//!    client
+//! 3. agent token from `?token=<token>`, or from a JSON `token` field for
+//!    non-GET requests (the body is buffered and restored), client
 //! 4. everything else, guest
+//!
+//! `Authorization: Bearer` is only ever treated as the configured API key;
+//! it is never used as an agent token, matching Go.
 //!
 //! [`RequireRole`] is a tower middleware that returns the Go-compatible
 //! `401 {"status":"error","message":"Unauthorized."}` body when the resolved
@@ -23,7 +26,7 @@ use axum::body::Body;
 use axum::extract::{FromRef, FromRequestParts};
 use axum::http::header::{AUTHORIZATION, COOKIE, USER_AGENT};
 use axum::http::request::Parts;
-use axum::http::{HeaderMap, StatusCode, Uri};
+use axum::http::{HeaderMap, Method, StatusCode, Uri};
 use axum::response::{IntoResponse, Response};
 use komari_db::Db;
 use tower::{Layer, Service};
@@ -134,12 +137,22 @@ impl AuthContext {
     }
 }
 
-/// Resolve the identity for a request. Returns a guest context on any
-/// authentication/database error, matching the Go middleware's silent fallback.
+/// Resolve the identity for a query-only request.
 pub async fn authenticate_request(
     state: &AuthState,
     headers: &HeaderMap,
     uri: &Uri,
+) -> AuthContext {
+    authenticate_request_with(state, headers, uri, &Method::GET, None).await
+}
+
+/// Resolve the identity for a request, optionally with a buffered body.
+pub async fn authenticate_request_with(
+    state: &AuthState,
+    headers: &HeaderMap,
+    uri: &Uri,
+    method: &Method,
+    body: Option<&[u8]>,
 ) -> AuthContext {
     let authorization = headers
         .get(AUTHORIZATION)
@@ -147,7 +160,7 @@ pub async fn authenticate_request(
         .map(str::trim);
     let bearer = authorization.and_then(|value| value.strip_prefix("Bearer "));
 
-    // 1. API key.
+    // 1. API key (the only use of Authorization in Go).
     if let (Some(configured), Some(token)) = (state.resolved_api_key(), bearer) {
         if token == configured {
             return AuthContext {
@@ -183,12 +196,8 @@ pub async fn authenticate_request(
         }
     }
 
-    // 3. Agent token: Authorization Bearer first, then ?token=.
-    let client_token = bearer
-        .filter(|token| !token.is_empty())
-        .map(str::to_owned)
-        .or_else(|| query_param(uri, "token"));
-    if let Some(token) = client_token {
+    // 3. Agent token: query first, then the JSON body for non-GET requests.
+    if let Some(token) = extract_client_token(uri.query(), method, body) {
         if let Ok(Some(client)) = state.db.clients().get_by_token(&token) {
             return AuthContext {
                 role: Role::Client,
@@ -204,6 +213,67 @@ pub async fn authenticate_request(
     AuthContext::guest()
 }
 
+/// Port of Go `api.extractClientToken`.
+///
+/// Query strings win. For non-GET requests the body is parsed as a JSON object
+/// and its string `token` field is used; no Authorization header is consulted.
+pub fn extract_client_token(
+    query: Option<&str>,
+    method: &Method,
+    body: Option<&[u8]>,
+) -> Option<String> {
+    if let Some(token) = query.and_then(|query| query_param(query, "token")) {
+        return Some(token);
+    }
+    if method == Method::GET || method == Method::HEAD {
+        return None;
+    }
+    let body = body?;
+    let value: serde_json::Value = serde_json::from_slice(body).ok()?;
+    value
+        .get("token")
+        .and_then(serde_json::Value::as_str)
+        .map(str::trim)
+        .filter(|token| !token.is_empty())
+        .map(str::to_owned)
+}
+
+/// Buffer a non-GET body, resolve identity, and restore the request body so
+/// downstream handlers can still read it.
+async fn resolve_request_context(
+    state: &AuthState,
+    request: axum::extract::Request,
+) -> (AuthContext, axum::extract::Request) {
+    if let Some(context) = request.extensions().get::<AuthContext>().cloned() {
+        return (context, request);
+    }
+
+    let (mut parts, body) = request.into_parts();
+    let (auth_body, body): (Option<axum::body::Bytes>, Body) =
+        if parts.method == Method::GET || parts.method == Method::HEAD {
+            (None, body)
+        } else {
+            match axum::body::to_bytes(body, usize::MAX).await {
+                Ok(bytes) => {
+                    let restored = Body::from(bytes.clone());
+                    (Some(bytes), restored)
+                }
+                Err(_) => (None, Body::empty()),
+            }
+        };
+
+    let context = authenticate_request_with(
+        state,
+        &parts.headers,
+        &parts.uri,
+        &parts.method,
+        auth_body.as_deref(),
+    )
+    .await;
+    parts.extensions.insert(context.clone());
+    (context, axum::extract::Request::from_parts(parts, body))
+}
+
 impl<S> FromRequestParts<S> for AuthContext
 where
     S: Send + Sync,
@@ -216,7 +286,10 @@ where
             return Ok(context.clone());
         }
         let state = AuthState::from_ref(state);
-        Ok(authenticate_request(&state, &parts.headers, &parts.uri).await)
+        Ok(
+            authenticate_request_with(&state, &parts.headers, &parts.uri, &parts.method, None)
+                .await,
+        )
     }
 }
 
@@ -287,10 +360,8 @@ where
         let mut inner = self.inner.clone();
 
         Box::pin(async move {
-            let context = authenticate_request(&state, request.headers(), request.uri()).await;
+            let (context, request) = resolve_request_context(&state, request).await;
             if context.permits(&allowed) {
-                let mut request = request;
-                request.extensions_mut().insert(context);
                 inner.call(request).await
             } else {
                 Ok(unauthorized_response())
@@ -402,10 +473,12 @@ fn cookie_value(headers: &HeaderMap, name: &str) -> Option<String> {
         .next()
 }
 
-fn query_param(uri: &Uri, name: &str) -> Option<String> {
-    uri.query()?.split('&').find_map(|pair| {
+fn query_param(query: &str, name: &str) -> Option<String> {
+    query.split('&').find_map(|pair| {
         let (key, value) = pair.split_once('=').unwrap_or((pair, ""));
-        (percent_decode(key) == name).then(|| percent_decode(value))
+        (percent_decode(key) == name)
+            .then(|| percent_decode(value))
+            .filter(|value| !value.is_empty())
     })
 }
 
@@ -462,7 +535,7 @@ fn client_ip(headers: &HeaderMap) -> Option<String> {
 #[cfg(test)]
 mod tests {
     use axum::Router;
-    use axum::routing::get;
+    use axum::routing::{get, post};
     use komari_db::models::Client;
     use tower::ServiceExt;
 
@@ -540,13 +613,12 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn client_token_works_for_agent_routes_but_not_admin_routes() {
+    async fn query_token_works_for_agent_routes_but_not_admin_routes() {
         let fixture = fixture();
         let token = fixture.client_token.clone();
 
         let admin_request = axum::http::Request::builder()
-            .uri("/")
-            .header(AUTHORIZATION, format!("Bearer {token}"))
+            .uri(format!("/?token={token}"))
             .body(Body::empty())
             .unwrap();
         assert_eq!(
@@ -566,6 +638,68 @@ mod tests {
             .await,
             StatusCode::OK
         );
+    }
+
+    #[tokio::test]
+    async fn bearer_client_token_is_a_guest() {
+        let fixture = fixture();
+        let token = fixture.client_token.clone();
+        let request = axum::http::Request::builder()
+            .uri("/")
+            .header(AUTHORIZATION, format!("Bearer {token}"))
+            .body(Body::empty())
+            .unwrap();
+        assert_eq!(
+            status(router(fixture.state, &[Role::Admin, Role::Client]), request).await,
+            StatusCode::UNAUTHORIZED
+        );
+    }
+
+    #[tokio::test]
+    async fn post_body_token_is_accepted_and_the_body_is_restored() {
+        async fn handler(body: String) -> String {
+            body
+        }
+
+        let fixture = fixture();
+        let token = fixture.client_token.clone();
+        let app = Router::new()
+            .route("/", post(handler))
+            .layer(RequireRole::new(
+                fixture.state.clone(),
+                [Role::Admin, Role::Client],
+            ))
+            .with_state(fixture.state);
+        let payload = format!(r#"{{"token":"{token}"}}"#);
+        let request = axum::http::Request::builder()
+            .method("POST")
+            .uri("/")
+            .body(Body::from(payload.clone()))
+            .unwrap();
+        let response = app.oneshot(request).await.unwrap();
+        assert_eq!(response.status(), StatusCode::OK);
+        let body = axum::body::to_bytes(response.into_body(), usize::MAX)
+            .await
+            .unwrap();
+        assert_eq!(String::from_utf8_lossy(&body), payload);
+    }
+
+    #[test]
+    fn extract_client_token_matches_go_precedence() {
+        let method = Method::POST;
+        assert_eq!(
+            extract_client_token(Some("token=query"), &method, Some(br#"{"token":"body"}"#)),
+            Some("query".to_owned())
+        );
+        assert_eq!(
+            extract_client_token(None, &method, Some(br#"{"token":"body"}"#)),
+            Some("body".to_owned())
+        );
+        assert_eq!(
+            extract_client_token(None, &Method::GET, Some(br#"{"token":"body"}"#)),
+            None
+        );
+        assert_eq!(extract_client_token(None, &method, Some(b"not-json")), None);
     }
 
     #[tokio::test]

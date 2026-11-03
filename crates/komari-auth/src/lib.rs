@@ -20,7 +20,7 @@ pub use error::{AuthError, Result};
 pub use middleware::{
     API_KEY_UUID, AuthContext, AuthState, RequireAdmin, RequireAuthenticated, RequireClient,
     RequireRole, RequireRoleService, SESSION_COOKIE_NAME, Unauthorized, authenticate_request,
-    unauthorized_response,
+    authenticate_request_with, extract_client_token, unauthorized_response,
 };
 pub use password::{
     DEFAULT_BCRYPT_COST, authenticate, change_password, change_password_by_uuid,
