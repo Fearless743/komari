@@ -46,7 +46,7 @@ impl ServerChan3Sender {
     }
 
     pub fn from_value(value: Value) -> Result<Self> {
-        let config: ServerChan3Config = serde_json::from_value(value)?;
+        let config: ServerChan3Config = crate::provider::deserialize_config("Server酱³", value)?;
         Ok(Self::new(config))
     }
 
@@ -54,7 +54,7 @@ impl ServerChan3Sender {
         value: Value,
         transport: Arc<dyn HttpTransport>,
     ) -> Result<Self> {
-        let config: ServerChan3Config = serde_json::from_value(value)?;
+        let config: ServerChan3Config = crate::provider::deserialize_config("Server酱³", value)?;
         Ok(Self::with_transport(config, transport))
     }
 

@@ -7,10 +7,11 @@
 //! all go through the text template in [`crate::event`].
 
 use async_trait::async_trait;
+use serde::de::{DeserializeOwned, IntoDeserializer};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
-use crate::error::Result;
+use crate::error::{NotifyError, Result};
 
 /// Asynchronous text-message provider.
 #[async_trait]
@@ -41,6 +42,46 @@ pub trait MessageSender: Send + Sync {
     async fn destroy(&self) -> Result<()> {
         Ok(())
     }
+}
+
+/// Deserialize a provider configuration with a field path in the error.
+///
+/// serde_json's own error only names the expected type; `serde_path_to_error`
+/// adds the offending field (for example `port`) without echoing its value.
+pub(crate) fn deserialize_config<T: DeserializeOwned>(provider: &str, value: Value) -> Result<T> {
+    let deserializer = value.into_deserializer();
+    serde_path_to_error::deserialize(deserializer).map_err(|error| {
+        let path = error.path().to_string();
+        let path = if path.is_empty() {
+            "<root>"
+        } else {
+            path.as_str()
+        };
+        NotifyError::InvalidConfig(format!(
+            "failed to load config for provider {provider}: field {path}: {}",
+            sanitize_serde_message(&error.inner().to_string())
+        ))
+    })
+}
+
+/// Replace quoted/backticked values in a serde diagnostic with `<redacted>`.
+pub(crate) fn sanitize_serde_message(message: &str) -> String {
+    let mut result = String::with_capacity(message.len());
+    let mut delimiter = None;
+    for character in message.chars() {
+        match delimiter {
+            Some(open) if character == open => delimiter = None,
+            Some(_) => {}
+            None if character == '"' || character == '`' => {
+                result.push(character);
+                result.push_str("<redacted>");
+                result.push(character);
+                delimiter = Some(character);
+            }
+            None => result.push(character),
+        }
+    }
+    result
 }
 
 /// Optional capability matching Go's `IEventMessageSender`.

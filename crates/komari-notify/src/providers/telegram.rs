@@ -48,7 +48,7 @@ impl TelegramSender {
     }
 
     pub fn from_value(value: Value) -> Result<Self> {
-        let config: TelegramConfig = serde_json::from_value(value)?;
+        let config: TelegramConfig = crate::provider::deserialize_config("telegram", value)?;
         Ok(Self::new(config))
     }
 
@@ -56,7 +56,7 @@ impl TelegramSender {
         value: Value,
         transport: Arc<dyn HttpTransport>,
     ) -> Result<Self> {
-        let config: TelegramConfig = serde_json::from_value(value)?;
+        let config: TelegramConfig = crate::provider::deserialize_config("telegram", value)?;
         Ok(Self::with_transport(config, transport))
     }
 

@@ -55,7 +55,7 @@ impl WebhookSender {
     }
 
     pub fn from_value(value: Value) -> Result<Self> {
-        let config: WebhookConfig = serde_json::from_value(value)?;
+        let config: WebhookConfig = crate::provider::deserialize_config("webhook", value)?;
         Ok(Self::new(config))
     }
 
@@ -63,7 +63,7 @@ impl WebhookSender {
         value: Value,
         transport: Arc<dyn HttpTransport>,
     ) -> Result<Self> {
-        let config: WebhookConfig = serde_json::from_value(value)?;
+        let config: WebhookConfig = crate::provider::deserialize_config("webhook", value)?;
         Ok(Self::with_transport(config, transport))
     }
 

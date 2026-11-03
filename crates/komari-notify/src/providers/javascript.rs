@@ -43,7 +43,7 @@ impl JavaScriptSender {
     }
 
     pub fn from_value(value: Value) -> Result<Self> {
-        let config: JavaScriptConfig = serde_json::from_value(value)?;
+        let config: JavaScriptConfig = crate::provider::deserialize_config("Javascript", value)?;
         Ok(Self::new(config))
     }
 

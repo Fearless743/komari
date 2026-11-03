@@ -174,7 +174,7 @@ impl EmailSender {
     }
 
     pub fn from_value(value: Value) -> Result<Self> {
-        let config: EmailConfig = serde_json::from_value(value)?;
+        let config: EmailConfig = crate::provider::deserialize_config("email", value)?;
         Ok(Self::new(config))
     }
 
@@ -182,7 +182,7 @@ impl EmailSender {
         value: Value,
         transport: Arc<dyn EmailTransport>,
     ) -> Result<Self> {
-        let config: EmailConfig = serde_json::from_value(value)?;
+        let config: EmailConfig = crate::provider::deserialize_config("email", value)?;
         Ok(Self::with_transport(config, transport))
     }
 

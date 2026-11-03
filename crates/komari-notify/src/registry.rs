@@ -100,29 +100,8 @@ impl Default for ProviderRegistry {
 fn invalid_config(provider: &str, message: &str) -> NotifyError {
     NotifyError::InvalidConfig(format!(
         "failed to load config for provider {provider}: {}",
-        redact_quoted_values(message)
+        crate::provider::sanitize_serde_message(message)
     ))
-}
-
-fn redact_quoted_values(message: &str) -> String {
-    let mut result = String::with_capacity(message.len());
-    let mut delimiter = None;
-    for character in message.chars() {
-        match delimiter {
-            Some(open) if character == open => {
-                delimiter = None;
-            }
-            Some(_) => {}
-            None if character == '"' || character == '`' => {
-                result.push(character);
-                result.push_str("<redacted>");
-                result.push(character);
-                delimiter = Some(character);
-            }
-            None => result.push(character),
-        }
-    }
-    result
 }
 
 /// Match Go's `json.Unmarshal` into a struct: a top-level `null` leaves every

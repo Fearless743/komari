@@ -398,6 +398,7 @@ async fn registry_type_errors_do_not_echo_values() {
     };
     let text = error.to_string();
     assert!(text.contains("email"), "{text}");
+    assert!(text.contains("port"), "{text}");
     assert!(!text.contains("PORT_SECRET"), "{text}");
 }
 

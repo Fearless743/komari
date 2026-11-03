@@ -48,7 +48,7 @@ impl BarkSender {
     }
 
     pub fn from_value(value: Value) -> Result<Self> {
-        let config: BarkConfig = serde_json::from_value(value)?;
+        let config: BarkConfig = crate::provider::deserialize_config("bark", value)?;
         let sender = Self::new(config);
         sender.init_sync()?;
         Ok(sender)
@@ -58,7 +58,7 @@ impl BarkSender {
         value: Value,
         transport: Arc<dyn HttpTransport>,
     ) -> Result<Self> {
-        let config: BarkConfig = serde_json::from_value(value)?;
+        let config: BarkConfig = crate::provider::deserialize_config("bark", value)?;
         let sender = Self::with_transport(config, transport);
         sender.init_sync()?;
         Ok(sender)

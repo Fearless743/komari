@@ -51,7 +51,8 @@ impl ServerChanTurboSender {
     }
 
     pub fn from_value(value: Value) -> Result<Self> {
-        let config: ServerChanTurboConfig = serde_json::from_value(value)?;
+        let config: ServerChanTurboConfig =
+            crate::provider::deserialize_config("Server酱Turbo", value)?;
         Ok(Self::new(config))
     }
 
@@ -59,7 +60,8 @@ impl ServerChanTurboSender {
         value: Value,
         transport: Arc<dyn HttpTransport>,
     ) -> Result<Self> {
-        let config: ServerChanTurboConfig = serde_json::from_value(value)?;
+        let config: ServerChanTurboConfig =
+            crate::provider::deserialize_config("Server酱Turbo", value)?;
         Ok(Self::with_transport(config, transport))
     }
 
