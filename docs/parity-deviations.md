@@ -19,7 +19,7 @@ or `komari_ddns::redact_provider_configuration(&provider)` for a live provider.
 | Provider | Fields removed from API responses | Fields kept |
 | --- | --- | --- |
 | `cloudflare` | `api_token`, `zone_id` | `record_id`, `record_type`, `ttl`, `proxied` |
-| `webhook` | `headers`, `body`; `url` when it embeds a username/password | `method`, `content_type`, `response_json_path`, credential-free `url` |
+| `webhook` | `url`, `headers`, `body` | `method`, `content_type`, `response_json_path` |
 | `empty` | none | all fields |
 
 Rules:
@@ -27,8 +27,12 @@ Rules:
 - Sensitive fields are removed, not masked.
 - Invalid JSON, `null`, arrays and other non-object values produce `{}`.
 - Unknown providers produce `{}` because their sensitive fields are unknown.
+- Webhook URLs are always removed: Slack/Discord-style paths and query
+  strings may carry tokens even without username/password credentials.
 - The original `addition` string and the database row are not modified.
 - `Debug` output for Cloudflare and Webhook configurations redacts secrets.
+- Sensitive parsing failures use fixed error messages; HTTP client errors
+  strip the request URL before being logged or written to sync history.
 
 **Impact:** an API client cannot read credentials back from the admin API. It
 must send a replacement value when changing a sensitive field. Internal DDNS

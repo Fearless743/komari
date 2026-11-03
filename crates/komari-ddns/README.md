@@ -50,7 +50,7 @@ Sensitive fields are declared by each provider through
 | Provider | Removed from API responses | Kept |
 | --- | --- | --- |
 | `cloudflare` | `api_token`, `zone_id` | `record_id`, `record_type`, `ttl`, `proxied` |
-| `webhook` | `headers`, `body`; `url` is also removed when it embeds a username/password | `method`, `content_type`, `response_json_path`, credential-free `url` |
+| `webhook` | `url`, `headers`, `body` | `method`, `content_type`, `response_json_path` |
 | `empty` | none | all fields |
 
 Behavior:
@@ -61,10 +61,17 @@ Behavior:
   `{}`; the original text is never echoed.
 - Unknown providers return `{}` because their sensitive fields cannot be
   classified.
+- Webhook URLs are always removed because Slack/Discord-style webhook paths
+  and query strings commonly contain provider-specific tokens, not just
+  username/password credentials.
 - The input string and the database row are never modified, so internal
   provider use still sees the full configuration.
 - `Debug` implementations for Cloudflare and Webhook configurations redact
-  their sensitive fields, so logs cannot print tokens, headers or bodies.
+  their sensitive fields, so logs cannot print tokens, URLs, headers or
+  bodies.
+- Configuration/header parsing errors use fixed messages that never echo the
+  input value, and `reqwest` errors strip the request URL before they reach
+  tracing, audit logs or `ddns_sync_history.error`.
 
 This redaction is an intentional deviation from the Go backend, which returns
 the raw `addition` from its admin API.
