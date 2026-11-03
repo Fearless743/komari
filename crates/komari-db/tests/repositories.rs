@@ -567,6 +567,20 @@ fn config_get_as_uses_go_style_loose_conversions() {
 
     // `get_as_or` also uses the loose conversion for existing values.
     assert_eq!(config.get_as_or("float_as_int", 0_i64).unwrap(), 80_i64);
+
+    // Go's JSON decoder turns a base64 string into []byte.
+    config.set("bytes", "aGk=").unwrap();
+    assert_eq!(
+        config.get_as::<Vec<u8>>("bytes").unwrap(),
+        Some(b"hi".to_vec())
+    );
+
+    // Out-of-range narrow integers / unsigned targets are documented as errors
+    // rather than Go's reflect-level truncation.
+    config.set_raw("too_big", "300.0").unwrap();
+    assert!(config.get_as::<i8>("too_big").is_err());
+    config.set_raw("negative", "-1.0").unwrap();
+    assert!(config.get_as::<u64>("negative").is_err());
 }
 
 #[test]

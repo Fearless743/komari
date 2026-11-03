@@ -149,5 +149,7 @@ real configuration values.
   old `configs` columns are not re-run; databases from that era should be
   opened once with the Go backend first.
 - `ConfigRepo::get_as<T>` applies the same fallbacks as Go `config.GetAs`:
-  `null` becomes the type's zero value and integers/floats are converted
-  between numeric target types (for example a stored `80.0` reads as `i64`).
+  `null` becomes the type's zero value, integers/floats are converted between
+  numeric target types, and base64 strings decode to `Vec<u8>`. Out-of-range
+  narrow integer targets and negative values converted to unsigned targets
+  return an error instead of Go's reflect-level truncation/wrapping.

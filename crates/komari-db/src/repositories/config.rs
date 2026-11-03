@@ -207,6 +207,17 @@ fn decode_loose<T: DeserializeOwned + Default>(value: &JsonValue) -> Result<T> {
         }
     }
 
+    // Go's `encoding/json` decodes a JSON string into `[]byte` using base64.
+    if let Some(text) = value.as_str() {
+        use base64::Engine;
+        if let Ok(bytes) = base64::engine::general_purpose::STANDARD.decode(text) {
+            let array = JsonValue::Array(bytes.iter().copied().map(JsonValue::from).collect());
+            if let Ok(decoded) = serde_json::from_value(array) {
+                return Ok(decoded);
+            }
+        }
+    }
+
     // Surface serde's original error for incompatible values.
     Ok(serde_json::from_value(value.clone())?)
 }
