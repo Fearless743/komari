@@ -902,10 +902,17 @@ fn walk_data_dir(
             DbError::InvalidData(format!("{} escaped the data dir", path.display()))
         })?;
         let Some(zip_name) = path_to_zip_name(relative)? else {
-            eprintln!(
-                "komari-db backup: skipping non-UTF-8 path {}",
-                path.display()
-            );
+            if file_type.is_dir() {
+                eprintln!(
+                    "komari-db backup: skipping non-UTF-8 directory and its subtree {}",
+                    path.display()
+                );
+            } else {
+                eprintln!(
+                    "komari-db backup: skipping non-UTF-8 file {}",
+                    path.display()
+                );
+            }
             continue;
         };
 
