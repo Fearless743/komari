@@ -2,7 +2,7 @@
 
 use std::collections::HashMap;
 
-use chrono::{DateTime, Utc};
+use chrono::{DateTime, TimeDelta, Utc};
 use komari_db::models::{Client, EventMessage, message_event};
 use komari_db::{Db, LocalTime};
 
@@ -15,13 +15,23 @@ pub struct TrafficUsage {
     pub total_down: i64,
 }
 
+/// Go caches traffic steps for 30 days.
+pub const TRAFFIC_CACHE_TTL: TimeDelta = TimeDelta::days(30);
+
+#[derive(Clone, Copy, Debug)]
+struct TrafficEntry {
+    step: i64,
+    updated_at: DateTime<Utc>,
+}
+
 /// In-memory threshold history, keyed by client UUID.
 ///
-/// Go keeps this in a 30-day `go-cache`; the state is intentionally not stored
-/// in SQLite, so a restart can re-send the current step once.
+/// Matches Go's `go-cache` configured with a 30-day expiration: entries are
+/// dropped lazily once they are 30 days old, so a client can be alerted again
+/// after the cache entry expires.
 #[derive(Default)]
 pub struct TrafficTracker {
-    steps: HashMap<String, i64>,
+    steps: HashMap<String, TrafficEntry>,
 }
 
 impl TrafficTracker {
@@ -30,20 +40,42 @@ impl TrafficTracker {
     }
 
     pub fn last_step(&self, client_id: &str) -> Option<i64> {
-        self.steps.get(client_id).copied()
+        self.steps.get(client_id).map(|entry| entry.step)
+    }
+
+    /// Drop entries whose 30-day TTL elapsed.
+    pub fn purge_expired(&mut self, now: DateTime<Utc>) {
+        self.steps
+            .retain(|_, entry| now.signed_duration_since(entry.updated_at) < TRAFFIC_CACHE_TTL);
     }
 
     /// Return `true` when this step should be announced.
     ///
     /// A step lower than the recorded one means the traffic counter was reset,
     /// so the baseline drops to zero before the comparison.
-    pub fn should_notify(&mut self, client_id: &str, current_step: i64) -> bool {
-        let mut last_step = self.steps.get(client_id).copied().unwrap_or_default();
+    pub fn should_notify(
+        &mut self,
+        client_id: &str,
+        current_step: i64,
+        now: DateTime<Utc>,
+    ) -> bool {
+        self.purge_expired(now);
+        let mut last_step = self
+            .steps
+            .get(client_id)
+            .map(|entry| entry.step)
+            .unwrap_or_default();
         if current_step < last_step {
             last_step = 0;
         }
         if current_step > last_step {
-            self.steps.insert(client_id.to_owned(), current_step);
+            self.steps.insert(
+                client_id.to_owned(),
+                TrafficEntry {
+                    step: current_step,
+                    updated_at: now,
+                },
+            );
             true
         } else {
             false
@@ -148,7 +180,7 @@ pub fn check_traffic(
         if current_step < base_step {
             current_step = base_step;
         }
-        if !tracker.should_notify(&client.uuid, current_step) {
+        if !tracker.should_notify(&client.uuid, current_step, now) {
             continue;
         }
 
@@ -196,6 +228,15 @@ mod tests {
         db.clients().create(&client).unwrap();
         db.config().set("traffic_limit_percentage", &80.0).unwrap();
         (db, client.uuid)
+    }
+
+    #[test]
+    fn steps_expire_after_thirty_days() {
+        let (_, uuid) = db_with_client(1000, "sum");
+        let mut tracker = TrafficTracker::new();
+        assert!(tracker.should_notify(&uuid, 80, now()));
+        assert!(!tracker.should_notify(&uuid, 80, now() + TimeDelta::days(29)));
+        assert!(tracker.should_notify(&uuid, 80, now() + TimeDelta::days(31)));
     }
 
     #[test]
