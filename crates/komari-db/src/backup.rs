@@ -402,6 +402,11 @@ fn validate_common_options(options: &BackupOptions) -> Result<()> {
             "backup data_dir must not be empty".to_owned(),
         ));
     }
+    if options.data_dir.parent().is_none() {
+        return Err(DbError::InvalidData(
+            "backup data_dir must not be a filesystem root".to_owned(),
+        ));
+    }
     Ok(())
 }
 
@@ -415,11 +420,19 @@ fn validate_import_paths(options: &BackupOptions) -> Result<()> {
             configured.display()
         )));
     }
-    if options.data_dir.exists() && !options.data_dir.is_dir() {
-        return Err(DbError::InvalidData(format!(
-            "{} is not a directory",
-            options.data_dir.display()
-        )));
+    if let Ok(metadata) = options.data_dir.symlink_metadata() {
+        if metadata.file_type().is_symlink() {
+            return Err(DbError::InvalidData(format!(
+                "{} is a symbolic link; restore into a real directory",
+                options.data_dir.display()
+            )));
+        }
+        if !metadata.is_dir() {
+            return Err(DbError::InvalidData(format!(
+                "{} is not a directory",
+                options.data_dir.display()
+            )));
+        }
     }
     Ok(())
 }
