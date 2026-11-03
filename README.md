@@ -13,6 +13,11 @@ the B14 static web assets (`komari-web`) and the B13 OAuth/OIDC crate
 routes, OAuth login/callback, static assets and SPA fallback, restores a pending
 `data/backup.zip`, and starts the background jobs. The public API/RPC2 (B04)
 and admin API (B06) are mounted by default through the same router assembly.
+At startup GeoIP, DDNS, notification and OAuth providers are initialized; the
+browser WebSocket filters `hidden` clients for guests and honours private-site
+mode. `ApiState.web` / `ApiState.ddns` share the live `WebAssets` and
+`DdnsService` handles with B06, backup uploads use a separate body limit, and
+the listener installs `ConnectInfo<SocketAddr>` so peer-IP fallbacks work.
 
 | Crate | Responsibility | Status |
 | --- | --- | --- |
