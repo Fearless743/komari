@@ -4,5 +4,24 @@ version.workspace = true
 edition.workspace = true
 rust-version.workspace = true
 license.workspace = true
+description = "Embedded default theme and static asset serving for Komari"
+build = "build.rs"
 
 [dependencies]
+axum.workspace = true
+bytes.workspace = true
+http.workspace = true
+httpdate = "1.0.3"
+mime_guess = "2.0.5"
+percent-encoding = "2"
+rust-embed = { version = "8.13.0", features = ["debug-embed", "interpolate-folder-path"] }
+serde.workspace = true
+serde_json.workspace = true
+thiserror.workspace = true
+tower.workspace = true
+tracing.workspace = true
+
+[dev-dependencies]
+http-body-util = "0.1"
+tempfile = "3"
+tokio.workspace = true
