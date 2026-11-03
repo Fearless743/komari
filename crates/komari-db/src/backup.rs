@@ -542,7 +542,6 @@ fn inspect_archive<R: Read + Seek>(
     }
 
     let mut metas = Vec::with_capacity(archive.len());
-    let mut names = HashSet::with_capacity(archive.len());
     let mut total = 0u64;
     let mut has_markup = false;
     let mut has_database = false;
@@ -563,10 +562,9 @@ fn inspect_archive<R: Read + Seek>(
             }
         }
 
+        // `zip` de-duplicates names while parsing the central directory, so a
+        // separate duplicate check here would be unreachable.
         let path = sanitize_zip_name(&name)?;
-        if !names.insert(path.clone()) {
-            return Err(DbError::InvalidBackup(format!("duplicate entry {name:?}")));
-        }
 
         let is_dir = file.is_dir();
         let size = file.size();
