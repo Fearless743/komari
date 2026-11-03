@@ -277,18 +277,17 @@ async fn resolve_request_context(
     }
 
     let (mut parts, body) = request.into_parts();
-    let (auth_body, body): (Option<axum::body::Bytes>, Body) =
-        if parts.method == Method::GET || parts.method == Method::HEAD {
-            (None, body)
-        } else {
-            match axum::body::to_bytes(body, usize::MAX).await {
-                Ok(bytes) => {
-                    let restored = Body::from(bytes.clone());
-                    (Some(bytes), restored)
-                }
-                Err(_) => (None, Body::empty()),
+    let (auth_body, body): (Option<axum::body::Bytes>, Body) = if parts.method == Method::GET {
+        (None, body)
+    } else {
+        match axum::body::to_bytes(body, usize::MAX).await {
+            Ok(bytes) => {
+                let restored = Body::from(bytes.clone());
+                (Some(bytes), restored)
             }
-        };
+            Err(_) => (None, Body::empty()),
+        }
+    };
 
     let context = authenticate_request_with(
         state,
@@ -754,7 +753,7 @@ fn client_ip(headers: &HeaderMap) -> Option<String> {
 #[cfg(test)]
 mod tests {
     use axum::Router;
-    use axum::routing::{get, post};
+    use axum::routing::{any, get, post};
     use komari_db::models::Client;
     use tower::ServiceExt;
 
@@ -981,6 +980,67 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(&body[..], b"admin:admin");
+    }
+
+    #[tokio::test]
+    async fn head_body_token_passes_through_auth_layer() {
+        async fn handler(context: AuthContext) -> String {
+            context.role.to_string()
+        }
+
+        let fixture = fixture();
+        let token = fixture.client_token.clone();
+        let app = Router::new()
+            .route("/", any(handler))
+            .layer(AuthLayer::new(fixture.state.clone()))
+            .with_state(fixture.state);
+        let request = axum::http::Request::builder()
+            .method("HEAD")
+            .uri("/")
+            .body(Body::from(format!(r#"{{"token":"{token}"}}"#)))
+            .unwrap();
+        assert_eq!(app.oneshot(request).await.unwrap().status(), StatusCode::OK);
+    }
+
+    #[tokio::test]
+    async fn head_body_token_passes_through_require_role() {
+        let fixture = fixture();
+        let token = fixture.client_token.clone();
+        let app = Router::new()
+            .route("/", any(|| async { "ok" }))
+            .layer(RequireRole::new(
+                fixture.state.clone(),
+                [Role::Admin, Role::Client],
+            ))
+            .with_state(fixture.state);
+        let request = axum::http::Request::builder()
+            .method("HEAD")
+            .uri("/")
+            .body(Body::from(format!(r#"{{"token":"{token}"}}"#)))
+            .unwrap();
+        assert_eq!(app.oneshot(request).await.unwrap().status(), StatusCode::OK);
+    }
+
+    #[tokio::test]
+    async fn head_body_token_passes_through_private_site() {
+        let fixture = fixture();
+        fixture
+            .state
+            .db()
+            .config()
+            .set(PRIVATE_SITE_CONFIG_KEY, &true)
+            .unwrap();
+        let token = fixture.client_token.clone();
+        let app = Router::new()
+            .route("/api/secret", any(|| async { "ok" }))
+            .layer(PrivateSite::new(fixture.state.clone()))
+            .with_state(fixture.state);
+        let request = axum::http::Request::builder()
+            .method("HEAD")
+            .uri("/api/secret")
+            .body(Body::from(format!(r#"{{"token":"{token}"}}"#)))
+            .unwrap();
+        assert_eq!(app.oneshot(request).await.unwrap().status(), StatusCode::OK);
     }
 
     #[tokio::test]
