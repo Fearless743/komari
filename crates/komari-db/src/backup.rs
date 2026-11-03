@@ -500,16 +500,40 @@ fn append_suffix(path: &Path, suffix: &str) -> PathBuf {
 /// Restore `<data_dir>/backup.zip` when present, mirroring the Go backend's
 /// startup restore. Returns `None` when no pending archive exists.
 ///
-/// The archive is read into memory before the data directory is swapped, so
-/// the restore does not depend on the old directory (which contains the
-/// archive) surviving the replacement.
+/// The archive is copied to a sibling temporary file outside `data_dir` before
+/// the import, so the restore streams from disk instead of loading the whole
+/// ZIP into memory and does not depend on the old directory (which contains
+/// the pending archive) surviving the replacement. The pending file is removed
+/// after a successful restore, including when the archive itself contained a
+/// `backup.zip` entry.
 pub fn restore_pending_backup(options: &BackupOptions) -> Result<Option<BackupReport>> {
     let pending = options.data_dir.join("backup.zip");
     if !pending.is_file() {
         return Ok(None);
     }
-    let bytes = fs::read(&pending)?;
-    import_backup_bytes(options, &bytes).map(Some)
+
+    let archive_len = fs::metadata(&pending)?.len();
+    if options.max_archive_bytes > 0 && archive_len > options.max_archive_bytes {
+        return Err(DbError::BackupLimit(format!(
+            "pending backup is {archive_len} bytes, limit is {}",
+            options.max_archive_bytes
+        )));
+    }
+
+    let temporary = TempFileGuard::new(unique_path(
+        non_empty_parent(&options.data_dir),
+        ".komari-pending-backup",
+    ));
+    fs::copy(&pending, &temporary.path)?;
+    let report = import_backup_file(options, &temporary.path)?;
+
+    // A `backup.zip` entry inside the archive is now part of the restored data
+    // directory; remove it so the next startup does not restore it again.
+    let restored_pending = options.data_dir.join("backup.zip");
+    if restored_pending.is_file() {
+        fs::remove_file(&restored_pending)?;
+    }
+    Ok(Some(report))
 }
 
 fn import_guard(options: &BackupOptions) -> Result<ArcMutexGuard<RawMutex, ()>> {
