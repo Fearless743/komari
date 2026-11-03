@@ -1,6 +1,7 @@
 //! End-to-end provider tests using local HTTP mocks.
 
 use std::collections::HashMap;
+use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
 
 use axum::Json;
@@ -497,7 +498,8 @@ async fn qq_callback_maps_social_uid_and_nickname() {
                             "nickname": "QQ User",
                             "faceimg": "https://face",
                             "openid": "open-id",
-                            "unionid": "union-id"
+                            "unionid": "union-id",
+                            "access_token": "qq-access-token"
                         }))
                     }
                 },
@@ -539,6 +541,7 @@ async fn qq_callback_maps_social_uid_and_nickname() {
     assert_eq!(user.subject, "qq-uid");
     assert_eq!(user.username.as_deref(), Some("QQ User"));
     assert_eq!(user.union_id.as_deref(), Some("union-id"));
+    assert_eq!(user.raw.as_ref().unwrap()["access_token"], "********");
 
     let calls = captured.lock().unwrap();
     let callback = calls.last().unwrap();
@@ -918,4 +921,370 @@ async fn account_linker_creates_and_binds_without_overwriting_a_password() {
         linker.bind(&other.uuid, &local_identity),
         Err(OAuthError::AlreadyBound)
     ));
+}
+
+#[tokio::test]
+async fn token_error_body_does_not_leak_json_tokens() {
+    let app = Router::new().route(
+        "/token",
+        post(|| async {
+            (
+                axum::http::StatusCode::BAD_REQUEST,
+                Json(json!({
+                    "error": "invalid_grant",
+                    "error_description": "bad authorization code",
+                    "access_token": "leaked-access",
+                    "refresh_token": "leaked-refresh",
+                    "client_secret": "leaked-secret"
+                })),
+            )
+        }),
+    );
+    let base = spawn(app).await;
+    let provider = factory::builtin_registry()
+        .create_and_init(
+            "generic",
+            json!({
+                "client_id": "client-id",
+                "client_secret": "client-secret",
+                "auth_url": "https://idp.example/authorize",
+                "token_url": format!("{base}/token"),
+                "user_info_url": "https://idp.example/userinfo",
+                "scope": "openid",
+                "user_id_field": "sub",
+            }),
+        )
+        .await
+        .unwrap();
+    let query = CallbackQuery::new();
+    let error = provider
+        .exchange_code(ExchangeRequest {
+            code: "code",
+            redirect_uri: "https://monitor.example/api/oauth_callback",
+            pkce_verifier: None,
+            nonce: None,
+            query: &query,
+        })
+        .await
+        .unwrap_err();
+    let message = error.to_string();
+    assert!(message.contains("invalid_grant"));
+    assert!(!message.contains("leaked-access"));
+    assert!(!message.contains("leaked-refresh"));
+    assert!(!message.contains("leaked-secret"));
+}
+
+#[tokio::test]
+async fn generic_ignores_id_token_when_oidc_is_not_configured() {
+    let app = Router::new()
+        .route(
+            "/token",
+            post(|| async {
+                Json(json!({
+                    "access_token": "plain-token",
+                    "token_type": "Bearer",
+                    "id_token": "not-a-jwt"
+                }))
+            }),
+        )
+        .route(
+            "/userinfo",
+            get(|| async { Json(json!({"sub": "plain-user", "name": "Plain"})) }),
+        );
+    let base = spawn(app).await;
+    let provider = factory::builtin_registry()
+        .create_and_init(
+            "generic",
+            json!({
+                "client_id": "client-id",
+                "client_secret": "client-secret",
+                "auth_url": "https://idp.example/authorize",
+                "token_url": format!("{base}/token"),
+                "user_info_url": format!("{base}/userinfo"),
+                "scope": "openid",
+                "user_id_field": "sub",
+            }),
+        )
+        .await
+        .unwrap();
+    let query = CallbackQuery::new();
+    let tokens = provider
+        .exchange_code(ExchangeRequest {
+            code: "code",
+            redirect_uri: "https://monitor.example/api/oauth_callback",
+            pkce_verifier: None,
+            nonce: None,
+            query: &query,
+        })
+        .await
+        .unwrap();
+    assert!(tokens.id_token.is_none());
+    let info = provider.fetch_user_info(&tokens).await.unwrap();
+    assert_eq!(info.subject, "plain-user");
+}
+
+#[tokio::test]
+async fn generic_requires_an_id_token_when_configured() {
+    let app = Router::new().route(
+        "/token",
+        post(|| async { Json(json!({"access_token": "plain-token", "token_type": "Bearer"})) }),
+    );
+    let base = spawn(app).await;
+    let provider = factory::builtin_registry()
+        .create_and_init(
+            "generic",
+            json!({
+                "client_id": "client-id",
+                "client_secret": "client-secret",
+                "auth_url": "https://idp.example/authorize",
+                "token_url": format!("{base}/token"),
+                "user_info_url": "https://idp.example/userinfo",
+                "jwks_url": "https://idp.example/jwks",
+                "scope": "openid",
+                "user_id_field": "sub",
+                "id_token_required": true,
+            }),
+        )
+        .await
+        .unwrap();
+    let query = CallbackQuery::new();
+    let error = provider
+        .exchange_code(ExchangeRequest {
+            code: "code",
+            redirect_uri: "https://monitor.example/api/oauth_callback",
+            pkce_verifier: None,
+            nonce: None,
+            query: &query,
+        })
+        .await
+        .unwrap_err();
+    assert!(matches!(error, OAuthError::InvalidToken(_)));
+}
+
+#[tokio::test]
+async fn generic_nonce_mismatch_is_rejected() {
+    let (base, _key) = oidc_server("client-id").await;
+    let provider = factory::builtin_registry()
+        .create_and_init(
+            "generic",
+            json!({
+                "client_id": "client-id",
+                "client_secret": "client-secret",
+                "issuer": base,
+                "user_id_field": "sub",
+                "id_token_required": true,
+                "use_nonce": true,
+            }),
+        )
+        .await
+        .unwrap();
+    let redirect = "https://monitor.example/api/oauth_callback";
+    let request = provider.authorization_url(redirect).await.unwrap();
+    assert!(request.url.contains("&nonce="));
+    let query = CallbackQuery::new();
+    let headers = HeaderMap::new();
+    let error = provider
+        .callback(callback(
+            &request.state,
+            Some(&request.state),
+            Some("code"),
+            redirect,
+            &query,
+            &headers,
+        ))
+        .await
+        .unwrap_err();
+    assert!(matches!(error, OAuthError::InvalidToken(_)));
+}
+
+#[tokio::test]
+async fn generic_skips_discovery_when_every_endpoint_is_explicit() {
+    let discovery_calls = Arc::new(AtomicUsize::new(0));
+    let counter = Arc::clone(&discovery_calls);
+    let app = Router::new().route(
+        "/.well-known/openid-configuration",
+        get(move || {
+            let counter = Arc::clone(&counter);
+            async move {
+                counter.fetch_add(1, Ordering::SeqCst);
+                Json(json!({"issuer": "https://unexpected.example"}))
+            }
+        }),
+    );
+    let base = spawn(app).await;
+    let provider = factory::builtin_registry()
+        .create_and_init(
+            "generic",
+            json!({
+                "client_id": "client-id",
+                "client_secret": "client-secret",
+                "issuer": base,
+                "auth_url": format!("{base}/authorize"),
+                "token_url": format!("{base}/token"),
+                "user_info_url": format!("{base}/userinfo"),
+                "jwks_url": format!("{base}/jwks"),
+                "scope": "openid",
+                "user_id_field": "sub",
+            }),
+        )
+        .await
+        .unwrap();
+    assert_eq!(discovery_calls.load(Ordering::SeqCst), 0);
+    let request = provider
+        .authorization_url("https://monitor.example/api/oauth_callback")
+        .await
+        .unwrap();
+    assert!(request.url.starts_with(&format!("{base}/authorize?")));
+}
+
+#[tokio::test]
+async fn qq_requires_social_uid_even_when_openid_is_present() {
+    let app = Router::new().route(
+        "/connect.php",
+        get(|Query(query): Query<HashMap<String, String>>| async move {
+            if query.get("act").map(String::as_str) == Some("login") {
+                Json(json!({"code": 0, "msg": "ok", "url": "https://login.example/auth"}))
+            } else {
+                Json(json!({
+                    "code": 0,
+                    "msg": "ok",
+                    "social_uid": "",
+                    "openid": "openid-only",
+                    "unionid": "union-only"
+                }))
+            }
+        }),
+    );
+    let base = spawn(app).await;
+    let provider = factory::builtin_registry()
+        .create_and_init(
+            "qq",
+            json!({
+                "aggregation_url": base,
+                "app_id": "app-id",
+                "app_key": "app-key",
+                "login_type": "qq",
+            }),
+        )
+        .await
+        .unwrap();
+    let redirect = "https://monitor.example/api/oauth_callback";
+    let request = provider.authorization_url(redirect).await.unwrap();
+    let mut query = CallbackQuery::new();
+    query.insert("code".to_owned(), "code".to_owned());
+    let headers = HeaderMap::new();
+    let error = provider
+        .callback(callback(
+            &request.state,
+            None,
+            Some("code"),
+            redirect,
+            &query,
+            &headers,
+        ))
+        .await
+        .unwrap_err();
+    assert!(error.to_string().contains("empty social_uid"));
+}
+
+#[tokio::test]
+async fn cloudflare_rejects_a_callback_without_the_access_header() {
+    let provider = factory::builtin_registry()
+        .create_and_init(
+            "CloudflareAccess",
+            json!({"team_domain": "https://team.example", "policy_aud": "aud"}),
+        )
+        .await
+        .unwrap();
+    let redirect = "https://monitor.example/api/oauth_callback";
+    let request = provider.authorization_url(redirect).await.unwrap();
+    let query = CallbackQuery::new();
+    let headers = HeaderMap::new();
+    let error = provider
+        .callback(callback(
+            &request.state,
+            Some(&request.state),
+            None,
+            redirect,
+            &query,
+            &headers,
+        ))
+        .await
+        .unwrap_err();
+    assert!(error.to_string().contains("no Cloudflare Access JWT"));
+}
+
+#[tokio::test]
+async fn jwks_is_not_refreshed_for_invalid_signatures_but_is_for_unknown_kids() {
+    let jwks_key = RsaPrivateKey::new(&mut rand::thread_rng(), 2048).unwrap();
+    let signing_key = RsaPrivateKey::new(&mut rand::thread_rng(), 2048).unwrap();
+    let key_set = jwks(&jwks_key, "test-key");
+    let fetches = Arc::new(AtomicUsize::new(0));
+    let counter = Arc::clone(&fetches);
+    let app = Router::new().route(
+        "/jwks",
+        get(move || {
+            let key_set = key_set.clone();
+            let counter = Arc::clone(&counter);
+            async move {
+                counter.fetch_add(1, Ordering::SeqCst);
+                Json(key_set)
+            }
+        }),
+    );
+    let base = spawn(app).await;
+    let verifier = komari_oauth::jwt::JwtVerifier::new(
+        reqwest::Client::new(),
+        format!("{base}/jwks"),
+        Some(base.clone()),
+        Some("aud".to_owned()),
+    );
+    let claims = || {
+        json!({
+            "iss": base,
+            "aud": "aud",
+            "sub": "user",
+            "exp": chrono::Utc::now().timestamp() + 600
+        })
+    };
+
+    let wrong_signature = sign_jwt(&signing_key, "test-key", claims());
+    assert!(verifier.verify(&wrong_signature).await.is_err());
+    assert!(verifier.verify(&wrong_signature).await.is_err());
+    assert_eq!(fetches.load(Ordering::SeqCst), 1);
+
+    let unknown_kid = sign_jwt(&signing_key, "rotated-key", claims());
+    assert!(verifier.verify(&unknown_kid).await.is_err());
+    assert_eq!(fetches.load(Ordering::SeqCst), 2);
+    assert!(verifier.verify(&unknown_kid).await.is_err());
+    assert_eq!(fetches.load(Ordering::SeqCst), 2);
+}
+
+#[tokio::test]
+async fn generic_requires_user_id_field_like_go() {
+    let error = match factory::builtin_registry()
+        .create_and_init(
+            "generic",
+            json!({
+                "client_id": "client-id",
+                "client_secret": "client-secret",
+                "auth_url": "https://idp.example/authorize",
+                "token_url": "https://idp.example/token",
+                "user_info_url": "https://idp.example/userinfo",
+                "scope": "openid",
+            }),
+        )
+        .await
+    {
+        Ok(_) => panic!("generic provider without user_id_field should fail"),
+        Err(error) => error,
+    };
+    assert!(error.to_string().contains("user_id_field"));
+}
+
+#[tokio::test]
+async fn qq_default_config_matches_the_go_zero_value() {
+    assert_eq!(factory::default_config("qq")["aggregation_url"], "");
+    let qq_fields = factory::builtin_registry().config_fields("qq").unwrap();
+    assert_eq!(qq_fields[0].default, Some("https://login.qjqq.cn"));
 }
