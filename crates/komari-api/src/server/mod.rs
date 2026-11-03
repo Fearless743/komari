@@ -111,11 +111,9 @@ impl ServerConfig {
     /// Convert the CLI/startup configuration.
     pub fn from_app_config(config: &Config) -> Self {
         let database_path = PathBuf::from(&config.db.file);
-        let data_dir = if config.db.file == ":memory:" {
-            PathBuf::from("data")
-        } else {
-            data_dir_for_database(&database_path)
-        };
+        // The Go backend always uses `./data` for themes, favicon and
+        // `backup.zip`, regardless of `--database`.
+        let data_dir = PathBuf::from("data");
         Self {
             listen: config.listen.clone(),
             database_path,
@@ -495,8 +493,17 @@ pub fn prepare_database(config: &ServerConfig) -> Result<Db> {
             .filter(|parent| !parent.as_os_str().is_empty())
             .unwrap_or_else(|| std::path::Path::new("."))
             .join("backup");
+        // `import_backup` swaps the whole data directory, so the archive's
+        // database always lands at `<data_dir>/komari.db`. Restore through that
+        // path and move it to the configured `--database` name afterwards.
+        let standard_database = config.data_dir.join("komari.db");
+        let restore_database = if config.database_path == standard_database {
+            config.database_path.clone()
+        } else {
+            standard_database.clone()
+        };
         let mut options = BackupOptions::new(&config.data_dir)
-            .with_database_path(&config.database_path)
+            .with_database_path(&restore_database)
             // Startup restore is deliberately more permissive than the admin
             // upload endpoint: an old database may predate the current schema
             // and may not contain the Go marker file.
@@ -504,12 +511,18 @@ pub fn prepare_database(config: &ServerConfig) -> Result<Db> {
             .allow_legacy_schema(true);
         options.pre_restore_backup_dir = Some(backup_dir.clone());
         match restore_pending_backup(&options) {
-            Ok(Some(report)) => info!(
-                database_bytes = report.database_bytes,
-                data_entries = report.data_entries,
-                pre_restore_archive = ?report.pre_restore_archive,
-                "restored pending backup.zip"
-            ),
+            Ok(Some(report)) => {
+                info!(
+                    database_bytes = report.database_bytes,
+                    data_entries = report.data_entries,
+                    pre_restore_archive = ?report.pre_restore_archive,
+                    "restored pending backup.zip"
+                );
+                if restore_database != config.database_path && restore_database.is_file() {
+                    move_database(&restore_database, &config.database_path)
+                        .context("failed to move the restored database to the configured path")?;
+                }
+            }
             Ok(None) => {}
             Err(error) => error!(%error, "failed to restore pending backup.zip; continuing"),
         }
@@ -538,6 +551,29 @@ pub fn prepare_database(config: &ServerConfig) -> Result<Db> {
     }
 
     Ok(db)
+}
+
+/// Move a restored database to a custom `--database` path.
+///
+/// `rename(2)` is atomic but fails across filesystems, so fall back to a copy.
+fn move_database(source: &std::path::Path, target: &std::path::Path) -> Result<()> {
+    if let Some(parent) = target
+        .parent()
+        .filter(|parent| !parent.as_os_str().is_empty())
+    {
+        std::fs::create_dir_all(parent)
+            .with_context(|| format!("failed to create database directory {}", parent.display()))?;
+    }
+    match std::fs::rename(source, target) {
+        Ok(()) => Ok(()),
+        Err(_) => {
+            std::fs::copy(source, target)
+                .with_context(|| format!("failed to copy database to {}", target.display()))?;
+            std::fs::remove_file(source)
+                .with_context(|| format!("failed to remove {}", source.display()))?;
+            Ok(())
+        }
+    }
 }
 
 /// Start a server and listen on [`ServerConfig::listen`].

@@ -74,16 +74,11 @@ fn version_comes_from_the_build_time_version() {
 fn server_prints_the_resolved_startup_configuration() {
     let data_dir = std::env::temp_dir().join(format!("komari-cli-server-{}", std::process::id()));
     std::fs::create_dir_all(&data_dir).expect("create temp data dir");
-    let database = data_dir.join("test.db");
 
     let mut child = bin()
+        .current_dir(&data_dir)
         .args(["server", "--listen", "127.0.0.1:0"])
-        .args([
-            "--db-type",
-            "sqlite",
-            "--database",
-            database.to_str().expect("database path"),
-        ])
+        .args(["--db-type", "sqlite", "--database", "test.db"])
         .args(["--log-level", "debug", "--theme", "test-theme"])
         .arg("--allow-cors")
         .stdout(Stdio::piped())
@@ -100,7 +95,7 @@ fn server_prints_the_resolved_startup_configuration() {
 
     for expected in [
         "127.0.0.1:0",
-        database.to_str().expect("database path"),
+        "test.db",
         "test-theme",
         "allow_cors=true",
         "hash",

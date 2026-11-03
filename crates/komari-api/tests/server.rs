@@ -662,6 +662,48 @@ async fn pending_backup_is_archived_before_restore() {
 }
 
 #[tokio::test]
+async fn pending_backup_restores_a_custom_database_filename() {
+    let root = TempDir::new().expect("temp root");
+    let data_dir = root.path().join("data");
+    std::fs::create_dir_all(&data_dir).expect("data dir");
+    let custom_db = root.path().join("custom.db");
+    let db = Db::open(&custom_db).expect("open db");
+    db.migrate().expect("migrate");
+    db.accounts()
+        .create("custom-admin", "password")
+        .expect("user");
+    let options = BackupOptions::new(&data_dir).with_database_path(&custom_db);
+    let archive = db.export_backup(&options).expect("export backup");
+    drop(db);
+    std::fs::remove_file(&custom_db).expect("remove custom db");
+    std::fs::write(data_dir.join("backup.zip"), archive).expect("pending backup");
+
+    let config = ServerConfig {
+        database_path: custom_db.clone(),
+        data_dir: data_dir.clone(),
+        ..server_config(&root)
+    };
+    let server = ServerBuilder::new(config)
+        .skip_services()
+        .build()
+        .await
+        .expect("restore and build");
+
+    assert!(custom_db.is_file());
+    assert!(!data_dir.join("komari.db").exists());
+    assert_eq!(server.state().db.accounts().count().expect("accounts"), 1);
+    assert!(
+        server
+            .state()
+            .db
+            .accounts()
+            .get_by_username("custom-admin")
+            .expect("lookup")
+            .is_some()
+    );
+}
+
+#[tokio::test]
 async fn graceful_shutdown_completes_and_cancels_background_tasks() {
     let dir = TempDir::new().expect("temp dir");
     let config = ServerConfig {
