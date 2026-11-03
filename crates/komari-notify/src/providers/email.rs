@@ -20,7 +20,7 @@ use crate::error::{NotifyError, Result};
 use crate::provider::{ConfigField, MessageSender};
 
 /// Provider configuration (`email.Addition`).
-#[derive(Clone, Debug, Serialize, Deserialize)]
+#[derive(Clone, Debug, Default, Serialize, Deserialize)]
 #[serde(default)]
 pub struct EmailConfig {
     pub host: String,
@@ -31,21 +31,6 @@ pub struct EmailConfig {
     pub receiver: String,
     pub use_ssl: bool,
     pub use_login_auth: bool,
-}
-
-impl Default for EmailConfig {
-    fn default() -> Self {
-        Self {
-            host: String::new(),
-            port: 587,
-            username: String::new(),
-            password: String::new(),
-            sender: String::new(),
-            receiver: String::new(),
-            use_ssl: false,
-            use_login_auth: false,
-        }
-    }
 }
 
 /// A fully-built SMTP message.
@@ -93,6 +78,29 @@ impl EmailTransport for LettreEmailTransport {
     }
 }
 
+/// TLS policy matching Go's SMTP clients.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum TlsMode {
+    /// `use_ssl=true` with an implicit-TLS port.
+    Wrapper,
+    /// `use_ssl=true` with STARTTLS required.
+    Required,
+    /// `use_ssl=false`: Go's `smtp.SendMail` still upgrades whenever the
+    /// server advertises STARTTLS.
+    Opportunistic,
+}
+
+/// Resolve the TLS policy from the provider configuration.
+pub fn tls_mode(use_ssl: bool, port: u16) -> TlsMode {
+    if !use_ssl {
+        TlsMode::Opportunistic
+    } else if port == 465 {
+        TlsMode::Wrapper
+    } else {
+        TlsMode::Required
+    }
+}
+
 fn send_blocking(envelope: EmailEnvelope) -> Result<()> {
     let mut builder = SmtpTransport::builder_dangerous(&envelope.host)
         .port(envelope.port)
@@ -106,18 +114,14 @@ fn send_blocking(envelope: EmailEnvelope) -> Result<()> {
             Mechanism::Plain
         }]);
 
-    if envelope.use_ssl {
-        let parameters = TlsParameters::new(envelope.host.clone())
-            .map_err(|error| NotifyError::Email(format!("failed to initialise TLS: {error}")))?;
-        let tls = if envelope.port == 465 {
-            Tls::Wrapper(parameters)
-        } else {
-            Tls::Required(parameters)
-        };
-        builder = builder.tls(tls);
-    } else {
-        builder = builder.tls(Tls::None);
-    }
+    let parameters = TlsParameters::new(envelope.host.clone())
+        .map_err(|error| NotifyError::Email(format!("failed to initialise TLS: {error}")))?;
+    let tls = match tls_mode(envelope.use_ssl, envelope.port) {
+        TlsMode::Wrapper => Tls::Wrapper(parameters),
+        TlsMode::Required => Tls::Required(parameters),
+        TlsMode::Opportunistic => Tls::Opportunistic(parameters),
+    };
+    builder = builder.tls(tls);
 
     builder
         .build()

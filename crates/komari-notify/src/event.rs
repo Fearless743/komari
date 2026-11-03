@@ -72,7 +72,8 @@ mod tests {
         assert!(rendered.contains("Event: Offline"));
         assert!(rendered.contains("Clients: alpha, u-2"));
         assert!(rendered.contains("Message: hello"));
-        assert!(rendered.contains("Time: 2026-01-02T03:04:05Z"));
+        let expected_time = event.time.to_rfc3339().unwrap();
+        assert!(rendered.contains(&format!("Time: {expected_time}")));
     }
 
     #[test]

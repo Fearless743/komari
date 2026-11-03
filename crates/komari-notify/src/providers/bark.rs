@@ -11,24 +11,13 @@ use crate::http::{HttpRequest, HttpResponse, HttpTransport, ReqwestTransport};
 use crate::provider::{ConfigField, MessageSender};
 
 /// Provider configuration (`bark.Addition`).
-#[derive(Clone, Debug, Serialize, Deserialize)]
+#[derive(Clone, Debug, Default, Serialize, Deserialize)]
 #[serde(default)]
 pub struct BarkConfig {
     pub server_url: String,
     pub device_key: String,
     pub icon: String,
     pub level: String,
-}
-
-impl Default for BarkConfig {
-    fn default() -> Self {
-        Self {
-            server_url: "https://api.day.app".to_owned(),
-            device_key: String::new(),
-            icon: String::new(),
-            level: "timeSensitive".to_owned(),
-        }
-    }
 }
 
 /// Bark text sender.
@@ -39,7 +28,7 @@ pub struct BarkSender {
 
 impl BarkSender {
     pub fn new(config: BarkConfig) -> Self {
-        Self::with_transport(config, Arc::new(ReqwestTransport::default()))
+        Self::with_transport(config, Arc::new(ReqwestTransport::without_timeout()))
     }
 
     pub fn with_transport(config: BarkConfig, transport: Arc<dyn HttpTransport>) -> Self {
@@ -167,22 +156,38 @@ fn check_response(response: HttpResponse) -> Result<()> {
         )));
     }
 
-    #[derive(Deserialize)]
+    #[derive(serde::Deserialize, Default)]
     struct BarkResponse {
-        code: i64,
+        // `Option` accepts JSON null; any other wrong type is a decode error.
         #[serde(default)]
-        message: String,
+        code: Option<i64>,
+        #[serde(default)]
+        message: Option<String>,
     }
 
-    // Some self-hosted Bark servers return plain text; Go treats a decode
-    // failure as success.
-    let Ok(parsed) = serde_json::from_slice::<BarkResponse>(&response.body) else {
+    // Go decodes into a struct: non-JSON is an error (treated as success for
+    // self-hosted servers), while JSON `null`, `{}` and `{"code":null}` all
+    // leave `code` at zero and therefore fail the `code == 200` check.
+    let Ok(value) = serde_json::from_slice::<Value>(&response.body) else {
         return Ok(());
     };
-    if parsed.code != 200 {
+    let parsed: BarkResponse = match value {
+        Value::Null => BarkResponse::default(),
+        Value::Object(map) => match serde_json::from_value(Value::Object(map)) {
+            Ok(parsed) => parsed,
+            // A type mismatch is Go's decode error path, which Bark returns
+            // as success for compatibility with plain-text servers.
+            Err(_) => return Ok(()),
+        },
+        // Go cannot unmarshal arrays/strings into the response struct.
+        _ => return Ok(()),
+    };
+    let code = parsed.code.unwrap_or(0);
+    let message = parsed.message.unwrap_or_default();
+
+    if code != 200 {
         return Err(NotifyError::Send(format!(
-            "bark API error (code: {}): {}",
-            parsed.code, parsed.message
+            "bark API error (code: {code}): {message}"
         )));
     }
     Ok(())

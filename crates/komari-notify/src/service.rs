@@ -126,13 +126,12 @@ impl<'a> NotificationService<'a> {
                     self.log(&format!("Event message sent: {}", event.event), "info");
                     return Ok(true);
                 }
-                Err(error) => {
-                    if error.to_string() == QQ_SHORT_RESPONSE_ERROR {
-                        self.log(&format!("Event message sent: {}", event.event), "info");
-                        return Ok(true);
-                    }
-                    last_error = Some(error);
+                Err(NotifyError::Send(message)) if message == QQ_SHORT_RESPONSE_ERROR => {
+                    // Go treats this QQ error as a successful delivery.
+                    self.log(&format!("Event message sent: {}", event.event), "info");
+                    return Ok(true);
                 }
+                Err(error) => last_error = Some(error),
             }
         }
 
@@ -183,6 +182,24 @@ mod tests {
         }
     }
 
+    struct QqShortResponse {
+        attempts: AtomicUsize,
+    }
+
+    #[async_trait]
+    impl MessageSender for QqShortResponse {
+        fn name(&self) -> &'static str {
+            "qq-short-response"
+        }
+        fn config(&self) -> serde_json::Value {
+            serde_json::Value::Null
+        }
+        async fn send_text(&self, _message: &str, _title: &str) -> Result<()> {
+            self.attempts.fetch_add(1, Ordering::SeqCst);
+            Err(NotifyError::Send(QQ_SHORT_RESPONSE_ERROR.to_owned()))
+        }
+    }
+
     struct Recorder {
         messages: Mutex<Vec<String>>,
     }
@@ -226,6 +243,26 @@ mod tests {
             NotificationService::with_sender(sender.clone(), NotificationSettings::default());
         assert!(!service.send_text("hello", "title").await.unwrap());
         assert!(sender.messages.lock().is_empty());
+    }
+
+    #[tokio::test]
+    async fn qq_short_response_counts_as_success() {
+        let sender = Arc::new(QqShortResponse {
+            attempts: AtomicUsize::new(0),
+        });
+        let service = NotificationService::with_sender(
+            sender.clone(),
+            NotificationSettings {
+                enabled: true,
+                ..NotificationSettings::default()
+            },
+        );
+        let event = EventMessage {
+            event: "Offline".to_owned(),
+            ..EventMessage::default()
+        };
+        assert!(service.send_event(&event).await.unwrap());
+        assert_eq!(sender.attempts.load(Ordering::SeqCst), 1);
     }
 
     #[tokio::test]

@@ -11,24 +11,13 @@ use crate::http::{HttpRequest, HttpResponse, HttpTransport, ReqwestTransport, fo
 use crate::provider::{ConfigField, MessageSender};
 
 /// Provider configuration (`telegram.Addition`).
-#[derive(Clone, Debug, Serialize, Deserialize)]
+#[derive(Clone, Debug, Default, Serialize, Deserialize)]
 #[serde(default)]
 pub struct TelegramConfig {
     pub bot_token: String,
     pub chat_id: String,
     pub message_thread_id: String,
     pub endpoint: String,
-}
-
-impl Default for TelegramConfig {
-    fn default() -> Self {
-        Self {
-            bot_token: String::new(),
-            chat_id: String::new(),
-            message_thread_id: String::new(),
-            endpoint: "https://api.telegram.org/bot".to_owned(),
-        }
-    }
 }
 
 /// Telegram text sender.
@@ -39,7 +28,7 @@ pub struct TelegramSender {
 
 impl TelegramSender {
     pub fn new(config: TelegramConfig) -> Self {
-        Self::with_transport(config, Arc::new(ReqwestTransport::default()))
+        Self::with_transport(config, Arc::new(ReqwestTransport::without_timeout()))
     }
 
     pub fn with_transport(config: TelegramConfig, transport: Arc<dyn HttpTransport>) -> Self {

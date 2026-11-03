@@ -6,7 +6,9 @@ use std::sync::Arc;
 
 use komari_db::Db;
 use komari_notify::providers::bark::{BarkConfig, BarkSender};
-use komari_notify::providers::email::{EmailConfig, EmailSender};
+use komari_notify::providers::email::{
+    EmailConfig, EmailSender, EmailTransport, LettreEmailTransport, TlsMode, tls_mode,
+};
 use komari_notify::providers::empty::EmptySender;
 use komari_notify::providers::serverchan3::{ServerChan3Config, ServerChan3Sender};
 use komari_notify::providers::serverchanturbo::{ServerChanTurboConfig, ServerChanTurboSender};
@@ -126,6 +128,7 @@ async fn webhook_post_escapes_json_and_sets_headers_and_basic_auth() {
             url: "https://hook.example/path".to_owned(),
             method: "post".to_owned(),
             headers: r#"{"X-Test":"yes"}"#.to_owned(),
+            body: DEFAULT_BODY.to_owned(),
             username: "user".to_owned(),
             password: "pass".to_owned(),
             ..WebhookConfig::default()
@@ -222,7 +225,8 @@ async fn email_builds_mime_message_and_delivers_envelope() {
     assert!(raw.contains("Subject: "));
     assert!(raw.contains("MIME-Version: 1.0"));
     assert!(raw.contains("text/plain; charset=utf-8"));
-    assert!(raw.contains("quoted-printable") || raw.contains("hello"));
+    assert!(raw.contains("Content-Transfer-Encoding: quoted-printable"));
+    assert!(raw.contains("hello"));
 }
 
 #[tokio::test]
@@ -297,10 +301,29 @@ async fn registry_exposes_all_go_providers_and_defaults() {
         assert!(names.contains(&expected), "missing {expected}");
     }
 
+    // Go serialises the zero-value Addition; UI defaults live in fields().
     let webhook = get_provider_configuration("webhook").unwrap();
-    assert_eq!(webhook["body"], DEFAULT_BODY);
+    assert_eq!(webhook["body"], "");
+    assert_eq!(webhook["method"], "");
+    assert_eq!(webhook["content_type"], "");
     let email = get_provider_configuration("email").unwrap();
-    assert_eq!(email["port"], 587);
+    assert_eq!(email["port"], 0);
+    let bark = get_provider_configuration("bark").unwrap();
+    assert_eq!(bark["server_url"], "");
+    assert_eq!(bark["level"], "");
+    let telegram = get_provider_configuration("telegram").unwrap();
+    assert_eq!(telegram["endpoint"], "");
+
+    let fields = registry().config_fields();
+    assert_eq!(field_default(&fields, "webhook", "body"), DEFAULT_BODY);
+    assert_eq!(field_default(&fields, "webhook", "method"), "GET");
+    assert_eq!(field_default(&fields, "email", "port"), "587");
+    assert_eq!(
+        field_default(&fields, "telegram", "endpoint"),
+        "https://api.telegram.org/bot"
+    );
+    assert_eq!(field_default(&fields, "bark", "level"), "timeSensitive");
+
     let unknown = get_provider_configuration("nope").unwrap_err();
     assert!(matches!(unknown, NotifyError::ProviderNotFound(_)));
 }
@@ -321,6 +344,170 @@ async fn initialize_defaults_inserts_missing_rows_only() {
 
     let inserted = initialize_defaults(&db).unwrap();
     assert_eq!(inserted, registry().names().len());
-    assert!(db.message_senders().get("bark").unwrap().is_some());
+    let bark = db.message_senders().get("bark").unwrap().unwrap();
+    let bark_config: serde_json::Value = serde_json::from_str(&bark.addition).unwrap();
+    assert_eq!(bark_config["server_url"], "");
+    assert_eq!(bark_config["level"], "");
+    let webhook = db.message_senders().get("webhook").unwrap().unwrap();
+    let webhook_config: serde_json::Value = serde_json::from_str(&webhook.addition).unwrap();
+    assert_eq!(webhook_config["body"], "");
+    let email = db.message_senders().get("email").unwrap().unwrap();
+    let email_config: serde_json::Value = serde_json::from_str(&email.addition).unwrap();
+    assert_eq!(email_config["port"], 0);
     assert_eq!(initialize_defaults(&db).unwrap(), 0);
+}
+
+fn field_default(
+    fields: &std::collections::HashMap<&'static str, Vec<komari_notify::ConfigField>>,
+    provider: &str,
+    key: &str,
+) -> String {
+    fields[provider]
+        .iter()
+        .find(|field| field.name == key)
+        .expect("field exists")
+        .default
+        .clone()
+}
+
+#[tokio::test]
+async fn registry_accepts_go_null_addition_forms() {
+    let top_level_null = load_provider("telegram", "null").await.unwrap();
+    assert_eq!(top_level_null.config()["endpoint"], "");
+
+    let missing_fields = load_provider("telegram", "{}").await.unwrap();
+    assert_eq!(missing_fields.config()["endpoint"], "");
+
+    let field_null = load_provider(
+        "telegram",
+        r#"{"bot_token":"x","chat_id":null,"endpoint":null}"#,
+    )
+    .await
+    .unwrap();
+    assert_eq!(field_null.config()["bot_token"], "x");
+    assert_eq!(field_null.config()["chat_id"], "");
+    assert_eq!(field_null.config()["endpoint"], "");
+}
+
+#[tokio::test]
+async fn registry_rejects_empty_addition_like_go() {
+    let error = match load_provider("telegram", "").await {
+        Ok(_) => panic!("empty addition must fail"),
+        Err(error) => error,
+    };
+    assert!(matches!(error, NotifyError::InvalidConfig(_)));
+    assert!(error.to_string().contains("unexpected end of JSON"));
+}
+
+fn bark_sender(response: HttpResponse) -> BarkSender {
+    BarkSender::with_transport(
+        BarkConfig {
+            device_key: "device".to_owned(),
+            ..BarkConfig::default()
+        },
+        Arc::new(MockHttp::new(vec![response])),
+    )
+}
+
+#[tokio::test]
+async fn bark_decodes_null_and_missing_code_as_zero() {
+    for body in ["{}", "null", r#"{"code":null}"#, r#"{"message":"no code"}"#] {
+        let sender = bark_sender(HttpResponse::new(200, body.as_bytes().to_vec()));
+        let error = sender.send_text("body", "title").await.unwrap_err();
+        assert!(error.to_string().contains("code: 0"), "{body}");
+    }
+
+    bark_sender(HttpResponse::new(200, br#"{"code":200}"#.to_vec()))
+        .send_text("body", "title")
+        .await
+        .unwrap();
+    // Non-JSON remains a success for self-hosted Bark servers.
+    bark_sender(HttpResponse::new(200, b"ok".to_vec()))
+        .send_text("body", "title")
+        .await
+        .unwrap();
+}
+
+#[test]
+fn email_tls_mode_matches_go() {
+    assert_eq!(tls_mode(false, 587), TlsMode::Opportunistic);
+    assert_eq!(tls_mode(true, 465), TlsMode::Wrapper);
+    assert_eq!(tls_mode(true, 587), TlsMode::Required);
+}
+
+#[tokio::test]
+async fn email_body_is_quoted_printable_and_subject_is_rfc2047() {
+    let sender = EmailSender::with_transport(
+        EmailConfig {
+            host: "smtp.example".to_owned(),
+            port: 587,
+            username: "user".to_owned(),
+            password: "pass".to_owned(),
+            sender: "bot@example.com".to_owned(),
+            receiver: "a@example.com".to_owned(),
+            ..EmailConfig::default()
+        },
+        Arc::new(MockEmail::new()),
+    );
+    let envelope = sender.build_envelope("a=b 中文", "状态提醒").unwrap();
+    let raw = envelope.raw_text();
+    assert!(raw.contains("Content-Transfer-Encoding: quoted-printable"));
+    assert!(raw.contains("=3D"), "body should be QP encoded: {raw}");
+    assert!(raw.contains("=?utf-8?"), "subject should be RFC2047: {raw}");
+}
+
+#[tokio::test]
+async fn email_without_ssl_attempts_starttls_when_advertised() {
+    use std::io::{BufRead, BufReader, Write};
+    use std::net::TcpListener;
+
+    let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+    let port = listener.local_addr().unwrap().port();
+    let server = std::thread::spawn(move || {
+        let (stream, _) = listener.accept().unwrap();
+        let mut writer = stream.try_clone().unwrap();
+        let mut reader = BufReader::new(stream);
+        writer.write_all(b"220 mock smtp\r\n").unwrap();
+        let mut saw_starttls = false;
+        let mut line = String::new();
+        loop {
+            line.clear();
+            if reader.read_line(&mut line).unwrap() == 0 {
+                break;
+            }
+            let command = line.trim().to_ascii_uppercase();
+            if command.starts_with("EHLO") {
+                writer
+                    .write_all(b"250-mock\r\n250-STARTTLS\r\n250 OK\r\n")
+                    .unwrap();
+            } else if command.starts_with("STARTTLS") {
+                saw_starttls = true;
+                let _ = writer.write_all(b"220 go ahead\r\n");
+                break;
+            } else if command.starts_with("QUIT") {
+                break;
+            } else {
+                let _ = writer.write_all(b"250 OK\r\n");
+            }
+        }
+        saw_starttls
+    });
+
+    let sender = EmailSender::with_transport(
+        EmailConfig {
+            host: "127.0.0.1".to_owned(),
+            port: i64::from(port),
+            username: "user".to_owned(),
+            password: "pass".to_owned(),
+            sender: "bot@example.com".to_owned(),
+            receiver: "a@example.com".to_owned(),
+            ..EmailConfig::default()
+        },
+        Arc::new(LettreEmailTransport),
+    );
+    let envelope = sender.build_envelope("hello", "title").unwrap();
+    // The handshake cannot complete against the mock, but the client must
+    // have issued STARTTLS rather than continuing in plaintext.
+    let _ = LettreEmailTransport.send(envelope).await;
+    assert!(server.join().unwrap(), "STARTTLS was not attempted");
 }

@@ -107,11 +107,14 @@ pub trait HttpTransport: Send + Sync {
 #[derive(Clone)]
 pub struct ReqwestTransport {
     client: reqwest::Client,
+    timeout: Option<Duration>,
 }
 
 impl std::fmt::Debug for ReqwestTransport {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.debug_struct("ReqwestTransport").finish_non_exhaustive()
+        f.debug_struct("ReqwestTransport")
+            .field("timeout", &self.timeout)
+            .finish_non_exhaustive()
     }
 }
 
@@ -128,7 +131,24 @@ impl ReqwestTransport {
             .timeout(timeout)
             .build()
             .unwrap_or_default();
-        Self { client }
+        Self {
+            client,
+            timeout: Some(timeout),
+        }
+    }
+
+    /// Build a transport with no client-side timeout, like Go's
+    /// `http.DefaultClient` used by the telegram and bark providers.
+    pub fn without_timeout() -> Self {
+        let client = reqwest::Client::builder().build().unwrap_or_default();
+        Self {
+            client,
+            timeout: None,
+        }
+    }
+
+    pub fn timeout(&self) -> Option<Duration> {
+        self.timeout
     }
 }
 
@@ -198,6 +218,15 @@ mod tests {
         assert_eq!(query_escape("a~b"), "a~b");
         assert_eq!(query_escape("中文"), "%E4%B8%AD%E6%96%87");
         assert_eq!(query_escape("line\nbreak"), "line%0Abreak");
+    }
+
+    #[test]
+    fn timeout_matches_go_default_clients() {
+        assert_eq!(
+            ReqwestTransport::default().timeout(),
+            Some(Duration::from_secs(30))
+        );
+        assert_eq!(ReqwestTransport::without_timeout().timeout(), None);
     }
 
     #[test]

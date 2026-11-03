@@ -51,17 +51,21 @@ impl ProviderRegistration {
     }
 
     pub fn create(&self, addition: &str) -> Result<Box<dyn MessageSender>> {
-        let value: Value = if addition.trim().is_empty() {
-            Value::Object(Map::new())
-        } else {
-            serde_json::from_str(addition).map_err(|error| {
-                NotifyError::InvalidConfig(format!(
-                    "failed to load config for provider {}: {error}",
-                    self.name
-                ))
-            })?
-        };
-        (self.constructor)(value)
+        if addition.trim().is_empty() {
+            // Go `json.Unmarshal("")` returns "unexpected end of JSON input".
+            return Err(NotifyError::InvalidConfig(format!(
+                "failed to load config for provider {}: unexpected end of JSON input",
+                self.name
+            )));
+        }
+
+        let value: Value = serde_json::from_str(addition).map_err(|error| {
+            NotifyError::InvalidConfig(format!(
+                "failed to load config for provider {}: {error}",
+                self.name
+            ))
+        })?;
+        (self.constructor)(normalize_addition(value))
     }
 }
 
@@ -73,6 +77,21 @@ pub struct ProviderRegistry {
 impl Default for ProviderRegistry {
     fn default() -> Self {
         Self::builtin()
+    }
+}
+
+/// Match Go's `json.Unmarshal` into a struct: a top-level `null` leaves every
+/// field at its zero value, and a `null` field value does the same. Removing
+/// those keys lets serde defaults produce the Go zero value.
+fn normalize_addition(value: Value) -> Value {
+    match value {
+        Value::Null => Value::Object(Map::new()),
+        Value::Object(map) => Value::Object(
+            map.into_iter()
+                .filter(|(_, value)| !value.is_null())
+                .collect(),
+        ),
+        other => other,
     }
 }
 

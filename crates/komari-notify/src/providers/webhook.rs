@@ -15,7 +15,7 @@ use crate::provider::{ConfigField, MessageSender};
 pub const DEFAULT_BODY: &str = r#"{"message":"{{message}}","title":"{{title}}"}"#;
 
 /// Provider configuration (`webhook.Addition`).
-#[derive(Clone, Debug, Serialize, Deserialize)]
+#[derive(Clone, Debug, Default, Serialize, Deserialize)]
 #[serde(default)]
 pub struct WebhookConfig {
     pub url: String,
@@ -25,20 +25,6 @@ pub struct WebhookConfig {
     pub body: String,
     pub username: String,
     pub password: String,
-}
-
-impl Default for WebhookConfig {
-    fn default() -> Self {
-        Self {
-            url: String::new(),
-            method: "GET".to_owned(),
-            content_type: "application/json".to_owned(),
-            headers: String::new(),
-            body: DEFAULT_BODY.to_owned(),
-            username: String::new(),
-            password: String::new(),
-        }
-    }
 }
 
 /// Webhook sender.
