@@ -95,7 +95,7 @@ impl DdnsProvider for CloudflareProvider {
             return Ok(());
         }
         self.config = serde_json::from_value(configuration)
-            .map_err(|error| DdnsError::InvalidConfig(error.to_string()))?;
+            .map_err(|_| DdnsError::InvalidConfig("invalid cloudflare configuration".to_owned()))?;
         Ok(())
     }
 

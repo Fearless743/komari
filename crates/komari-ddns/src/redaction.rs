@@ -31,21 +31,18 @@ pub fn redact_addition(provider_name: &str, addition: &str) -> Value {
 
 /// Redact a configuration using an explicit sensitive-field list.
 ///
-/// This is useful for custom registries and tests. `webhook` URLs that embed
-/// credentials are removed in addition to the supplied fields.
+/// This is useful for custom registries and tests.
 pub fn redact_addition_with_fields(
     provider_name: &str,
     addition: &str,
     sensitive_fields: &[&str],
 ) -> Value {
+    let _ = provider_name;
     let Ok(Value::Object(mut configuration)) = serde_json::from_str::<Value>(addition) else {
         return Value::Object(Map::new());
     };
     for field in sensitive_fields {
         configuration.remove(*field);
-    }
-    if provider_name == "webhook" {
-        redact_webhook_url(&mut configuration);
     }
     Value::Object(configuration)
 }
@@ -57,25 +54,4 @@ pub fn redact_provider_configuration(provider: &dyn DdnsProvider) -> Value {
         configuration => configuration.to_string(),
     };
     redact_addition_with_fields(provider.name(), &addition, provider.sensitive_fields())
-}
-
-fn redact_webhook_url(configuration: &mut Map<String, Value>) {
-    let Some(Value::String(url)) = configuration.get("url") else {
-        return;
-    };
-    if url_contains_credentials(url) {
-        configuration.remove("url");
-    }
-}
-
-/// Whether a URL embeds a username or password. Unparseable values are treated
-/// as potentially sensitive so they are removed rather than leaked.
-pub(crate) fn url_contains_credentials(url: &str) -> bool {
-    if url.trim().is_empty() {
-        return false;
-    }
-    match reqwest::Url::parse(url) {
-        Ok(parsed) => !parsed.username().is_empty() || parsed.password().is_some(),
-        Err(_) => true,
-    }
 }

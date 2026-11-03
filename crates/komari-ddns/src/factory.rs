@@ -144,5 +144,5 @@ pub fn factory() -> &'static DdnsFactory {
 pub fn configuration_to_json(provider: &dyn DdnsProvider) -> Result<String, DdnsError> {
     let configuration: Value = provider.configuration();
     serde_json::to_string(&configuration)
-        .map_err(|error| DdnsError::InvalidConfig(error.to_string()))
+        .map_err(|_| DdnsError::InvalidConfig("invalid provider configuration".to_owned()))
 }

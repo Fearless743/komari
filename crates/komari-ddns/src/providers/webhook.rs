@@ -17,8 +17,9 @@ use crate::provider::{ConfigurationItem, DdnsProvider, SyncContext, SyncResult, 
 pub const DEFAULT_BODY: &str = r#"{"client_uuid":"{{client_uuid}}","client_name":"{{client_name}}","ipv4":"{{ipv4}}","ipv6":"{{ipv6}}","triggered_by":"{{triggered_by}}"}"#;
 
 /// Configuration fields that must never be returned by public APIs. The URL
-/// is additionally removed by the redaction helper when it embeds credentials.
-pub const WEBHOOK_SENSITIVE_FIELDS: &[&str] = &["headers", "body"];
+/// is always removed because webhook paths/query strings commonly contain
+/// provider-specific tokens.
+pub const WEBHOOK_SENSITIVE_FIELDS: &[&str] = &["url", "headers", "body"];
 
 /// Configuration stored in `ddns_providers.addition` for a webhook.
 #[derive(Clone, Default, Serialize, Deserialize)]
@@ -34,14 +35,9 @@ pub struct WebhookConfig {
 
 impl std::fmt::Debug for WebhookConfig {
     fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        let url = if crate::redaction::url_contains_credentials(&self.url) {
-            "<redacted>"
-        } else {
-            self.url.as_str()
-        };
         formatter
             .debug_struct("WebhookConfig")
-            .field("url", &url)
+            .field("url", &"<redacted>")
             .field("method", &self.method)
             .field("content_type", &self.content_type)
             .field("headers", &"<redacted>")
@@ -95,7 +91,7 @@ impl DdnsProvider for WebhookProvider {
             return Ok(());
         }
         self.config = serde_json::from_value(configuration)
-            .map_err(|error| DdnsError::InvalidConfig(error.to_string()))?;
+            .map_err(|_| DdnsError::InvalidConfig("invalid webhook configuration".to_owned()))?;
         Ok(())
     }
 
@@ -131,9 +127,8 @@ impl DdnsProvider for WebhookProvider {
         let method = if method.is_empty() {
             reqwest::Method::POST
         } else {
-            reqwest::Method::from_bytes(method.as_bytes()).map_err(|error| {
-                DdnsError::InvalidConfig(format!("invalid webhook method: {error}"))
-            })?
+            reqwest::Method::from_bytes(method.as_bytes())
+                .map_err(|_| DdnsError::InvalidConfig("invalid webhook method".to_owned()))?
         };
 
         let content_type = self.config.content_type.trim();
@@ -145,22 +140,19 @@ impl DdnsProvider for WebhookProvider {
         let mut headers = HeaderMap::new();
         headers.insert(
             reqwest::header::CONTENT_TYPE,
-            HeaderValue::from_str(content_type).map_err(|error| {
-                DdnsError::InvalidConfig(format!("invalid content type: {error}"))
-            })?,
+            HeaderValue::from_str(content_type)
+                .map_err(|_| DdnsError::InvalidConfig("invalid content type".to_owned()))?,
         );
         if !self.config.headers.trim().is_empty() {
             let custom: std::collections::HashMap<String, String> =
-                serde_json::from_str(&self.config.headers).map_err(|error| {
-                    DdnsError::InvalidConfig(format!("invalid headers json: {error}"))
+                serde_json::from_str(&self.config.headers).map_err(|_| {
+                    DdnsError::InvalidConfig("invalid webhook headers json".to_owned())
                 })?;
             for (name, value) in custom {
-                let name = HeaderName::from_bytes(name.as_bytes()).map_err(|error| {
-                    DdnsError::InvalidConfig(format!("invalid header name: {error}"))
-                })?;
-                let value = HeaderValue::from_str(&value).map_err(|error| {
-                    DdnsError::InvalidConfig(format!("invalid header value: {error}"))
-                })?;
+                let name = HeaderName::from_bytes(name.as_bytes())
+                    .map_err(|_| DdnsError::InvalidConfig("invalid header name".to_owned()))?;
+                let value = HeaderValue::from_str(&value)
+                    .map_err(|_| DdnsError::InvalidConfig("invalid header value".to_owned()))?;
                 headers.insert(name, value);
             }
         }
