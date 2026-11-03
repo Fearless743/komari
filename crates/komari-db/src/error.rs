@@ -28,6 +28,27 @@ pub enum DbError {
 
     #[error("time value error: {0}")]
     Time(String),
+
+    #[error("zip archive error: {0}")]
+    Zip(#[from] zip::result::ZipError),
+
+    #[error("invalid backup archive: {0}")]
+    InvalidBackup(String),
+
+    #[error("unsafe path in backup archive: {0}")]
+    UnsafeBackupPath(String),
+
+    #[error("backup limit exceeded: {0}")]
+    BackupLimit(String),
+
+    #[error("backup database integrity check failed: {0}")]
+    BackupIntegrity(String),
+
+    #[error("backup database schema is incompatible: {0}")]
+    BackupSchema(String),
+
+    #[error("a backup import is already in progress")]
+    BackupInProgress,
 }
 
 impl DbError {
