@@ -151,6 +151,56 @@ fn legacy_configs_are_converted_to_key_value() {
 }
 
 #[test]
+fn hybrid_configs_from_a_previous_migration_are_converted() {
+    let dir = TempDir::new("hybrid-configs");
+    let path = dir.join("komari.db");
+    let db = Db::open(&path).unwrap();
+
+    // Shape produced by the previous version: legacy wide columns plus empty
+    // key/value columns added by ALTER TABLE.
+    db.with_connection(|conn| {
+        conn.execute_batch(
+            "CREATE TABLE configs (\
+                 `id` integer PRIMARY KEY AUTOINCREMENT, \
+                 `sitename` varchar(100), \
+                 `allow_cors` boolean, \
+                 `key` text, \
+                 `value` text\
+             );\
+             INSERT INTO configs (id, sitename, allow_cors, key, value) \
+             VALUES (1, 'Hybrid Site', 1, '', '');\
+             INSERT INTO configs (id, sitename, key, value) \
+             VALUES (2, NULL, 'theme', '\"dark\"');",
+        )?;
+        Ok(())
+    })
+    .unwrap();
+
+    db.migrate().unwrap();
+
+    let config = db.config();
+    assert_eq!(
+        config.get_as::<String>("sitename").unwrap().as_deref(),
+        Some("Hybrid Site")
+    );
+    assert_eq!(config.get_as::<bool>("allow_cors").unwrap(), Some(true));
+    // Valid key/value rows that predated the conversion are preserved.
+    assert_eq!(
+        config.get_as::<String>("theme").unwrap().as_deref(),
+        Some("dark")
+    );
+    assert!(db.table_exists("configs_legacy_backup").unwrap());
+
+    // A second migration must not create another backup or change values.
+    db.migrate().unwrap();
+    assert!(!db.table_exists("configs_legacy_backup_2").unwrap());
+    assert_eq!(
+        config.get_as::<String>("sitename").unwrap().as_deref(),
+        Some("Hybrid Site")
+    );
+}
+
+#[test]
 fn unsupported_configs_schema_returns_a_clear_error() {
     let dir = TempDir::new("bad-configs");
     let path = dir.join("komari.db");

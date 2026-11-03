@@ -529,7 +529,18 @@ fn read_legacy_config(
     } else {
         "ORDER BY rowid DESC"
     };
-    let mut stmt = tx.prepare(&format!("SELECT * FROM `{table}` {order} LIMIT 1"))?;
+    // A hybrid table produced by an older version of this migration has both
+    // legacy columns and an (empty) key/value pair. Pick the newest row that
+    // actually carries legacy configuration.
+    let filter = if columns
+        .iter()
+        .any(|column| column.eq_ignore_ascii_case("sitename"))
+    {
+        "WHERE `sitename` IS NOT NULL"
+    } else {
+        ""
+    };
+    let mut stmt = tx.prepare(&format!("SELECT * FROM `{table}` {filter} {order} LIMIT 1"))?;
     let mut rows = stmt.query([])?;
     let Some(row) = rows.next()? else {
         return Ok(Vec::new());
@@ -598,7 +609,10 @@ fn legacy_string(cell: &LegacyCell) -> String {
 
 fn legacy_config_value(column: &str, cell: &LegacyCell) -> Option<serde_json::Value> {
     let name = column.to_ascii_lowercase();
-    if matches!(name.as_str(), "id" | "created_at" | "updated_at") {
+    if matches!(
+        name.as_str(),
+        "id" | "created_at" | "updated_at" | "key" | "value"
+    ) {
         return None;
     }
     let boolean = matches!(
@@ -638,6 +652,37 @@ fn legacy_config_value(column: &str, cell: &LegacyCell) -> Option<serde_json::Va
 /// Convert a pre-1.1.4 single-row `configs` table into the current key/value
 /// form. The old table is renamed to `configs_legacy_backup` instead of being
 /// dropped, so no data is lost.
+fn existing_config_rows(
+    tx: &rusqlite::Transaction<'_>,
+    table: &str,
+) -> crate::error::Result<Vec<(String, String)>> {
+    let columns = actual_columns(tx, table)?;
+    let has_key = columns
+        .iter()
+        .any(|column| column.eq_ignore_ascii_case("key"));
+    let has_value = columns
+        .iter()
+        .any(|column| column.eq_ignore_ascii_case("value"));
+    if !has_key || !has_value {
+        return Ok(Vec::new());
+    }
+
+    let mut stmt = tx.prepare(&format!(
+        "SELECT `key`, `value` FROM `{table}` \
+         WHERE `key` IS NOT NULL AND `key` <> ''"
+    ))?;
+    let rows = stmt.query_map([], |row| {
+        Ok((
+            row.get::<_, String>(0)?,
+            row.get::<_, Option<String>>(1)?.unwrap_or_default(),
+        ))
+    })?;
+    Ok(rows.collect::<rusqlite::Result<Vec<_>>>()?)
+}
+
+/// Convert a pre-1.1.4 single-row `configs` table into the current key/value
+/// form. The old table is renamed to `configs_legacy_backup` instead of being
+/// dropped, so no data is lost.
 fn convert_legacy_configs(tx: &rusqlite::Transaction<'_>) -> crate::error::Result<()> {
     let mut backup = "configs_legacy_backup".to_owned();
     let mut suffix = 2;
@@ -646,10 +691,17 @@ fn convert_legacy_configs(tx: &rusqlite::Transaction<'_>) -> crate::error::Resul
         suffix += 1;
     }
 
+    let existing = existing_config_rows(tx, "configs")?;
     let values = read_legacy_config(tx, "configs")?;
     tx.execute_batch(&format!("ALTER TABLE `configs` RENAME TO `{backup}`"))?;
     tx.execute_batch("CREATE TABLE `configs` (`key` text, `value` text, PRIMARY KEY (`key`))")?;
 
+    for (key, value) in existing {
+        tx.execute(
+            "INSERT OR REPLACE INTO `configs` (`key`, `value`) VALUES (?1, ?2)",
+            rusqlite::params![key, value],
+        )?;
+    }
     for (column, cell) in values {
         let Some(value) = legacy_config_value(&column, &cell) else {
             continue;
@@ -667,17 +719,19 @@ fn configs_need_conversion(tx: &rusqlite::Transaction<'_>) -> crate::error::Resu
         return Ok(false);
     }
     let columns = actual_columns(tx, "configs")?;
-    if columns
-        .iter()
-        .any(|column| column.eq_ignore_ascii_case("key"))
-    {
-        return Ok(false);
-    }
+    // `sitename` wins over `key`: a hybrid table created by an older version
+    // of this migration has a `key` column but still holds legacy data.
     if columns
         .iter()
         .any(|column| column.eq_ignore_ascii_case("sitename"))
     {
         return Ok(true);
+    }
+    if columns
+        .iter()
+        .any(|column| column.eq_ignore_ascii_case("key"))
+    {
+        return Ok(false);
     }
     Err(crate::error::DbError::InvalidData(
         "unsupported legacy configs table: expected either (key, value) or a \
