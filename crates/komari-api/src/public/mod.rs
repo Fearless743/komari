@@ -25,9 +25,13 @@ mod records;
 mod settings;
 mod version;
 
+use std::net::SocketAddr;
+
 use axum::Json;
 use axum::Router;
+use axum::extract::{ConnectInfo, FromRequestParts};
 use axum::http::header::{COOKIE, HOST, USER_AGENT};
+use axum::http::request::Parts;
 use axum::http::{HeaderMap, HeaderValue, StatusCode, header};
 use axum::response::{IntoResponse, Response};
 use axum::routing::{any, get, post};
@@ -168,8 +172,30 @@ pub(crate) fn cookie_value(headers: &HeaderMap, name: &str) -> Option<String> {
         .next()
 }
 
-/// Client IP with the same header precedence as `komari-auth`.
-pub(crate) fn client_ip(headers: &HeaderMap) -> String {
+/// Peer address injected by `into_make_service_with_connect_info`.
+///
+/// Tests and assemblies that do not install `ConnectInfo` simply get `None`.
+pub(crate) struct PeerAddress(pub Option<SocketAddr>);
+
+impl<S> FromRequestParts<S> for PeerAddress
+where
+    S: Send + Sync,
+{
+    type Rejection = std::convert::Infallible;
+
+    async fn from_request_parts(parts: &mut Parts, _state: &S) -> Result<Self, Self::Rejection> {
+        Ok(Self(
+            parts
+                .extensions
+                .get::<ConnectInfo<SocketAddr>>()
+                .map(|info| info.0),
+        ))
+    }
+}
+
+/// Client IP with Go's `X-Forwarded-For` → `X-Real-IP` → `RemoteAddr`
+/// precedence.
+pub(crate) fn client_ip(headers: &HeaderMap, peer: Option<SocketAddr>) -> String {
     if let Some(value) = headers
         .get("x-forwarded-for")
         .and_then(|value| value.to_str().ok())
@@ -180,12 +206,36 @@ pub(crate) fn client_ip(headers: &HeaderMap) -> String {
             return value.to_owned();
         }
     }
-    headers
+    if let Some(value) = headers
         .get("x-real-ip")
         .and_then(|value| value.to_str().ok())
-        .map(|value| value.trim().to_owned())
+        .map(str::trim)
         .filter(|value| !value.is_empty())
+    {
+        return value.to_owned();
+    }
+    peer.map(|address| address.ip().to_string())
         .unwrap_or_default()
+}
+
+/// Go `accounts.GetUserBySession` login check used by the public handlers.
+///
+/// This deliberately reads the `session_token` cookie directly instead of
+/// `AuthContext`, so an API-key `Authorization` header cannot mask a valid
+/// browser session (Go's handlers behave the same way). Like Go, this does not
+/// delete expired sessions; `/api/me` uses [`komari_auth::validate_session`]
+/// instead.
+pub(crate) fn session_login(state: &ApiState, headers: &HeaderMap) -> bool {
+    let Some(session) = cookie_value(headers, SESSION_COOKIE) else {
+        return false;
+    };
+    if session.is_empty() {
+        return false;
+    }
+    komari_auth::session_user(&state.db, &session)
+        .ok()
+        .flatten()
+        .is_some()
 }
 
 /// User agent used when creating a session.
@@ -201,11 +251,12 @@ pub(crate) fn user_agent(headers: &HeaderMap) -> String {
 pub(crate) fn audit(
     state: &ApiState,
     headers: &HeaderMap,
+    peer: Option<SocketAddr>,
     uuid: &str,
     message: impl Into<String>,
     msg_type: &str,
 ) {
-    let ip = client_ip(headers);
+    let ip = client_ip(headers, peer);
     if let Err(error) = state.db.logs().log(&ip, uuid, message, msg_type) {
         tracing::warn!(%error, "failed to write audit log");
     }

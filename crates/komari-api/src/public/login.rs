@@ -15,8 +15,8 @@ use serde_json::json;
 use crate::state::ApiState;
 
 use super::{
-    SESSION_COOKIE, audit, client_ip, cookie_value, redirect, respond_error, respond_success,
-    set_cookie, user_agent,
+    PeerAddress, SESSION_COOKIE, audit, client_ip, cookie_value, redirect, respond_error,
+    respond_success, set_cookie, user_agent,
 };
 
 #[derive(Debug, Default, Deserialize)]
@@ -32,6 +32,7 @@ struct LoginRequest {
 pub(crate) async fn login(
     State(state): State<ApiState>,
     headers: HeaderMap,
+    PeerAddress(peer): PeerAddress,
     body: Bytes,
 ) -> Response {
     let disabled = state
@@ -89,7 +90,7 @@ pub(crate) async fn login(
         }
     }
 
-    let ip = client_ip(&headers);
+    let ip = client_ip(&headers, peer);
     let session =
         match komari_auth::create_session(&state.db, &uuid, &user_agent(&headers), &ip, "password")
         {
@@ -102,7 +103,14 @@ pub(crate) async fn login(
             }
         };
 
-    audit(&state, &headers, &uuid, "logged in (password)", "login");
+    audit(
+        &state,
+        &headers,
+        peer,
+        &uuid,
+        "logged in (password)",
+        "login",
+    );
 
     let mut response = respond_success(json!({
         "set-cookie": { "session_token": session },
@@ -116,7 +124,11 @@ pub(crate) async fn login(
     response
 }
 
-pub(crate) async fn logout(State(state): State<ApiState>, headers: HeaderMap) -> Response {
+pub(crate) async fn logout(
+    State(state): State<ApiState>,
+    headers: HeaderMap,
+    PeerAddress(peer): PeerAddress,
+) -> Response {
     if let Some(session) = cookie_value(&headers, SESSION_COOKIE) {
         if !session.is_empty() {
             if let Err(error) = komari_auth::delete_session(&state.db, &session) {
@@ -124,7 +136,7 @@ pub(crate) async fn logout(State(state): State<ApiState>, headers: HeaderMap) ->
             }
         }
     }
-    audit(&state, &headers, "", "logged out", "logout");
+    audit(&state, &headers, peer, "", "logged out", "logout");
 
     let mut response = redirect("/");
     set_cookie(&mut response, SESSION_COOKIE, "", -1);
@@ -147,11 +159,11 @@ pub(crate) async fn get_me(State(state): State<ApiState>, headers: HeaderMap) ->
         return guest();
     }
 
-    // Go `GetUserBySession` does not check expiry; `session_user` matches that
-    // join and lets the identity middleware own expiry handling.
-    let Ok(Some(user)) = komari_auth::session_user(&state.db, &session) else {
+    // Go `GetMe` uses `accounts.GetSession`, which deletes expired rows.
+    let Ok(Some(validation)) = komari_auth::validate_session(&state.db, &session) else {
         return guest();
     };
+    let user = validation.user;
 
     (
         StatusCode::OK,

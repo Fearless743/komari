@@ -3,16 +3,15 @@
 //! Port of Go `api/public.GetNodesInformation`.
 
 use axum::extract::State;
-use axum::http::StatusCode;
+use axum::http::{HeaderMap, StatusCode};
 use axum::response::Response;
-use komari_auth::AuthContext;
 use serde_json::Value;
 
 use crate::state::ApiState;
 
-use super::respond_success;
+use super::{respond_success, session_login};
 
-pub(crate) async fn get_nodes(State(state): State<ApiState>, context: AuthContext) -> Response {
+pub(crate) async fn get_nodes(State(state): State<ApiState>, headers: HeaderMap) -> Response {
     let clients = match state.db.clients().list() {
         Ok(clients) => clients,
         Err(error) => {
@@ -23,9 +22,9 @@ pub(crate) async fn get_nodes(State(state): State<ApiState>, context: AuthContex
         }
     };
 
-    // Go only treats a *session* as logged in here; an API key is not enough
-    // for hidden clients to become visible.
-    let is_login = context.session_token.is_some();
+    // Go reads the session cookie directly; an API key is not enough for
+    // hidden clients to become visible.
+    let is_login = session_login(&state, &headers);
 
     let mut visible = Vec::with_capacity(clients.len());
     for mut client in clients {

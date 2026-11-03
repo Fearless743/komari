@@ -12,8 +12,8 @@ use komari_oauth::{AccountLinker, CallbackQuery, CallbackRequest, SsoIdentity, r
 use crate::state::ApiState;
 
 use super::{
-    BINDING_COOKIE, OAUTH_STATE_COOKIE, SESSION_COOKIE, audit, callback_url, client_ip,
-    cookie_value, redirect, respond_error, respond_raw_error, set_cookie, user_agent,
+    BINDING_COOKIE, OAUTH_STATE_COOKIE, PeerAddress, SESSION_COOKIE, audit, callback_url,
+    client_ip, cookie_value, redirect, respond_error, respond_raw_error, set_cookie, user_agent,
 };
 
 pub(crate) async fn authorize(State(state): State<ApiState>, headers: HeaderMap) -> Response {
@@ -54,6 +54,7 @@ pub(crate) async fn authorize(State(state): State<ApiState>, headers: HeaderMap)
 pub(crate) async fn callback(
     State(state): State<ApiState>,
     headers: HeaderMap,
+    PeerAddress(peer): PeerAddress,
     RawQuery(raw_query): RawQuery,
 ) -> Response {
     let Some(provider) = state.oauth_provider() else {
@@ -127,6 +128,7 @@ pub(crate) async fn callback(
         audit(
             &state,
             &headers,
+            peer,
             &user.uuid,
             format!(
                 "bound external account (OAuth),sso_id: {}",
@@ -146,7 +148,7 @@ pub(crate) async fn callback(
             &state.db,
             &user.uuid,
             &user_agent(&headers),
-            &client_ip(&headers),
+            &client_ip(&headers, peer),
             "oauth",
         ) {
             Ok(session) => session,
@@ -157,7 +159,14 @@ pub(crate) async fn callback(
                 ));
             }
         };
-        audit(&state, &headers, &user.uuid, "logged in (OAuth)", "login");
+        audit(
+            &state,
+            &headers,
+            peer,
+            &user.uuid,
+            "logged in (OAuth)",
+            "login",
+        );
         let mut response = redirect("/admin");
         set_cookie(
             &mut response,

@@ -5,17 +5,24 @@
 use std::collections::BTreeMap;
 
 use axum::extract::{Path, Query, State};
-use axum::http::StatusCode;
+use axum::http::{HeaderMap, StatusCode};
 use axum::response::{IntoResponse, Response};
-use komari_auth::AuthContext;
-use komari_db::{LocalTime, models::Record};
+use komari_db::LocalTime;
+use komari_db::models::{GPURecord, Record};
 use serde::Deserialize;
 use serde_json::{Map, Value, json};
 
 use crate::response;
 use crate::state::ApiState;
 
-use super::{respond_error, respond_success};
+use super::{respond_error, respond_success, session_login};
+
+/// Largest whole-hour offset that still fits in Go's `time.Duration`.
+///
+/// `time.Duration` is an `int64` nanosecond count; Go silently wraps larger
+/// values. The Rust port rejects them with 400 instead (registered in the
+/// crate README).
+const MAX_HOURS: u64 = 2_562_047;
 
 #[derive(Debug, Default, Deserialize)]
 pub(crate) struct RecordsQuery {
@@ -30,9 +37,9 @@ pub(crate) struct RecordsQuery {
 pub(crate) async fn get_recent(
     State(state): State<ApiState>,
     Path(uuid): Path<String>,
-    context: AuthContext,
+    headers: HeaderMap,
 ) -> Response {
-    if hidden_for_guest(&state, &uuid, context.session_token.is_some()) {
+    if hidden_for_guest(&state, &uuid, session_login(&state, &headers)) {
         // Go reuses the "UUID is required" message to hide the client.
         return respond_error(StatusCode::BAD_REQUEST, "UUID is required");
     }
@@ -51,12 +58,12 @@ pub(crate) async fn get_recent(
 pub(crate) async fn get_records(
     State(state): State<ApiState>,
     Query(query): Query<RecordsQuery>,
-    context: AuthContext,
+    headers: HeaderMap,
 ) -> Response {
     let uuid = query.uuid.unwrap_or_default();
     let load_type = query.load_type.unwrap_or_default();
 
-    if hidden_for_guest(&state, &uuid, context.session_token.is_some()) {
+    if hidden_for_guest(&state, &uuid, session_login(&state, &headers)) {
         return respond_error(StatusCode::BAD_REQUEST, "UUID is required");
     }
     if uuid.is_empty() {
@@ -71,14 +78,15 @@ pub(crate) async fn get_records(
         Ok(hours) => hours,
         Err(_) => return respond_error(StatusCode::BAD_REQUEST, "Invalid hours parameter"),
     };
+    if hours.unsigned_abs() > MAX_HOURS {
+        return respond_error(StatusCode::BAD_REQUEST, "Invalid hours parameter");
+    }
 
     if !valid_load_type(&load_type) {
         return respond_error(StatusCode::BAD_REQUEST, "Invalid load_type parameter");
     }
 
     let Some(window) = chrono::TimeDelta::try_hours(hours) else {
-        // Go silently wraps the duration for absurd values; rejecting keeps
-        // chrono from panicking on an out-of-range TimeDelta.
         return respond_error(StatusCode::BAD_REQUEST, "Invalid hours parameter");
     };
     let Some(start_instant) = chrono::Utc::now().checked_sub_signed(window) else {
@@ -98,10 +106,14 @@ pub(crate) async fn get_records(
 
     let mut response = Map::new();
     if load_type.is_empty() || load_type == "all" {
-        response.insert(
-            "records".to_owned(),
-            serde_json::to_value(&client_records).unwrap_or(Value::Null),
-        );
+        // GORM returns a nil slice when no rows match, which Go encodes as
+        // `null`; the filtered path allocates an empty slice (`[]`).
+        let records = if client_records.is_empty() {
+            Value::Null
+        } else {
+            Value::Array(client_records.iter().map(record_json).collect())
+        };
+        response.insert("records".to_owned(), records);
         response.insert("count".to_owned(), json!(client_records.len()));
     } else {
         let filtered = filter_records_by_load_type(&client_records, &load_type);
@@ -111,6 +123,8 @@ pub(crate) async fn get_records(
         response.insert("load_type".to_owned(), json!(load_type));
     }
 
+    // `gpu` is no longer a valid `load_type` (Go's `validLoadTypes` omits it),
+    // but the branch is kept for parity with the Go condition.
     if load_type.is_empty() || load_type == "all" || load_type == "gpu" {
         match state.db.records().gpu_by_client_and_time(&uuid, start, end) {
             Ok(gpu_records) if !gpu_records.is_empty() => {
@@ -125,7 +139,7 @@ pub(crate) async fn get_records(
                         })
                     });
                     if let Some(records) = entry.get_mut("records").and_then(Value::as_array_mut) {
-                        records.push(serde_json::to_value(&record).unwrap_or(Value::Null));
+                        records.push(gpu_record_json(&record));
                     }
                 }
                 response.insert("gpu_devices".to_owned(), json!(devices));
@@ -153,7 +167,6 @@ fn valid_load_type(load_type: &str) -> bool {
             | "process"
             | "connections"
             | "all"
-            | "gpu"
     )
 }
 
@@ -174,6 +187,29 @@ fn hidden_for_guest(state: &ApiState, uuid: &str, is_login: bool) -> bool {
         .unwrap_or(false)
 }
 
+/// Serialize a record through its JSON text form so `f32` fields use Rust's
+/// shortest round-trip representation (`12.3`, not `12.300000190734863`),
+/// matching Go's `encoding/json` output for `float32`.
+fn record_json(record: &Record) -> Value {
+    json_roundtrip(record)
+}
+
+fn gpu_record_json(record: &GPURecord) -> Value {
+    json_roundtrip(record)
+}
+
+fn json_roundtrip<T: serde::Serialize>(value: &T) -> Value {
+    serde_json::to_string(value)
+        .ok()
+        .and_then(|text| serde_json::from_str(&text).ok())
+        .unwrap_or(Value::Null)
+}
+
+/// Convert an `f32` to a JSON number with its shortest decimal form.
+fn f32_value(value: f32) -> Value {
+    serde_json::from_str(&value.to_string()).unwrap_or(Value::Null)
+}
+
 /// Port of Go `filterRecordsByLoadType`.
 fn filter_records_by_load_type(records: &[Record], load_type: &str) -> Vec<Value> {
     records
@@ -185,41 +221,45 @@ fn filter_records_by_load_type(records: &[Record], load_type: &str) -> Vec<Value
 
             match load_type {
                 "cpu" => {
-                    filtered.insert("cpu".to_owned(), json!(record.cpu));
+                    filtered.insert("cpu".to_owned(), f32_value(record.cpu));
                 }
                 "gpu" => {
-                    filtered.insert("gpu".to_owned(), json!(record.gpu));
+                    filtered.insert("gpu".to_owned(), f32_value(record.gpu));
                 }
                 "ram" => {
                     filtered.insert("ram".to_owned(), json!(record.ram));
                     filtered.insert("ram_total".to_owned(), json!(record.ram_total));
                     if record.ram_total > 0 {
-                        let percent = (record.ram as f32 / record.ram_total as f32 * 100.0) as f64;
-                        filtered.insert("ram_percent".to_owned(), json!(percent));
+                        filtered.insert(
+                            "ram_percent".to_owned(),
+                            f32_value(record.ram as f32 / record.ram_total as f32 * 100.0),
+                        );
                     }
                 }
                 "swap" => {
                     filtered.insert("swap".to_owned(), json!(record.swap));
                     filtered.insert("swap_total".to_owned(), json!(record.swap_total));
                     if record.swap_total > 0 {
-                        let percent =
-                            (record.swap as f32 / record.swap_total as f32 * 100.0) as f64;
-                        filtered.insert("swap_percent".to_owned(), json!(percent));
+                        filtered.insert(
+                            "swap_percent".to_owned(),
+                            f32_value(record.swap as f32 / record.swap_total as f32 * 100.0),
+                        );
                     }
                 }
                 "load" => {
-                    filtered.insert("load".to_owned(), json!(record.load));
+                    filtered.insert("load".to_owned(), f32_value(record.load));
                 }
                 "temp" => {
-                    filtered.insert("temp".to_owned(), json!(record.temp));
+                    filtered.insert("temp".to_owned(), f32_value(record.temp));
                 }
                 "disk" => {
                     filtered.insert("disk".to_owned(), json!(record.disk));
                     filtered.insert("disk_total".to_owned(), json!(record.disk_total));
                     if record.disk_total > 0 {
-                        let percent =
-                            (record.disk as f32 / record.disk_total as f32 * 100.0) as f64;
-                        filtered.insert("disk_percent".to_owned(), json!(percent));
+                        filtered.insert(
+                            "disk_percent".to_owned(),
+                            f32_value(record.disk as f32 / record.disk_total as f32 * 100.0),
+                        );
                     }
                 }
                 "network" => {
@@ -228,6 +268,7 @@ fn filter_records_by_load_type(records: &[Record], load_type: &str) -> Vec<Value
                     filtered.insert("net_total_up".to_owned(), json!(record.net_total_up));
                     filtered.insert("net_total_down".to_owned(), json!(record.net_total_down));
                 }
+
                 "process" => {
                     filtered.insert("process".to_owned(), json!(record.process));
                 }

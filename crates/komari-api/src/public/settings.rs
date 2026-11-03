@@ -38,35 +38,38 @@ pub(crate) async fn get_public_settings(
 
 fn public_info(state: &ApiState, headers: &HeaderMap) -> Result<Value, String> {
     let config = state.db.config();
-    let read_string = |key: &str| -> Result<Option<String>, String> {
+    // Go `GetManyAs[config.Legacy]` persists the default of every missing key.
+    // Use `get_as_or` so the first `/api/public` call writes the same values
+    // back to `configs`; subsequent calls then read the stored values.
+    let read_string = |key: &str, default: &str| -> Result<String, String> {
         config
-            .get_as::<String>(key)
+            .get_as_or::<String>(key, default.to_owned())
             .map_err(|error| error.to_string())
     };
-    let read_bool = |key: &str| -> Result<Option<bool>, String> {
+    let read_bool = |key: &str, default: bool| -> Result<bool, String> {
         config
-            .get_as::<bool>(key)
+            .get_as_or::<bool>(key, default)
             .map_err(|error| error.to_string())
     };
-    let read_i64 = |key: &str| -> Result<Option<i64>, String> {
-        config.get_as::<i64>(key).map_err(|error| error.to_string())
+    let read_i64 = |key: &str, default: i64| -> Result<i64, String> {
+        config
+            .get_as_or::<i64>(key, default)
+            .map_err(|error| error.to_string())
     };
 
-    let sitename = read_string(keys::SITENAME_KEY)?.unwrap_or_else(|| DEFAULT_SITENAME.to_owned());
-    let description =
-        read_string(keys::DESCRIPTION_KEY)?.unwrap_or_else(|| DEFAULT_DESCRIPTION.to_owned());
-    let custom_head = read_string(keys::CUSTOM_HEAD_KEY)?.unwrap_or_default();
-    let custom_body = read_string(keys::CUSTOM_BODY_KEY)?.unwrap_or_default();
-    let oauth_enable = read_bool(keys::OAUTH_ENABLED_KEY)?.unwrap_or(false);
-    let oauth_provider =
-        read_string(keys::OAUTH_PROVIDER_KEY)?.unwrap_or_else(|| DEFAULT_OAUTH_PROVIDER.to_owned());
-    let disable_password_login = read_bool(keys::DISABLE_PASSWORD_LOGIN_KEY)?.unwrap_or(false);
-    let allow_cors = read_bool(keys::ALLOW_CORS_KEY)?.unwrap_or(false);
-    let record_enabled = read_bool(keys::RECORD_ENABLED_KEY)?.unwrap_or(true);
+    let sitename = read_string(keys::SITENAME_KEY, DEFAULT_SITENAME)?;
+    let description = read_string(keys::DESCRIPTION_KEY, DEFAULT_DESCRIPTION)?;
+    let custom_head = read_string(keys::CUSTOM_HEAD_KEY, "")?;
+    let custom_body = read_string(keys::CUSTOM_BODY_KEY, "")?;
+    let oauth_enable = read_bool(keys::OAUTH_ENABLED_KEY, false)?;
+    let oauth_provider = read_string(keys::OAUTH_PROVIDER_KEY, DEFAULT_OAUTH_PROVIDER)?;
+    let disable_password_login = read_bool(keys::DISABLE_PASSWORD_LOGIN_KEY, false)?;
+    let allow_cors = read_bool(keys::ALLOW_CORS_KEY, false)?;
+    let record_enabled = read_bool(keys::RECORD_ENABLED_KEY, true)?;
     let record_preserve_time =
-        read_i64(keys::RECORD_PRESERVE_TIME_KEY)?.unwrap_or(DEFAULT_RECORD_PRESERVE_TIME);
-    let mut private_site = read_bool(keys::PRIVATE_SITE_KEY)?.unwrap_or(false);
-    let theme = read_string(keys::THEME_KEY)?.unwrap_or_else(|| DEFAULT_THEME.to_owned());
+        read_i64(keys::RECORD_PRESERVE_TIME_KEY, DEFAULT_RECORD_PRESERVE_TIME)?;
+    let mut private_site = read_bool(keys::PRIVATE_SITE_KEY, false)?;
+    let theme = read_string(keys::THEME_KEY, DEFAULT_THEME)?;
 
     if has_temp_access(state, headers) {
         private_site = false;
