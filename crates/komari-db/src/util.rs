@@ -51,6 +51,14 @@ pub fn is_bcrypt_hash(hash: &str) -> bool {
         || hash.starts_with("$2y$")
 }
 
+/// Verify only the Go `base64(SHA-256(password + salt))` format.
+///
+/// Unlike [`verify_password`] this never accepts bcrypt, so callers can enforce
+/// the exact Go fallback contract.
+pub fn verify_sha256_password(password: &str, hash: &str) -> bool {
+    !hash.is_empty() && hash_password(password) == hash
+}
+
 /// Verify a stored password hash.
 ///
 /// Writes always use [`hash_password`] (SHA-256); bcrypt rows are accepted for
@@ -60,7 +68,7 @@ pub fn verify_password(password: &str, hash: &str) -> bool {
     if is_bcrypt_hash(hash) {
         return bcrypt::verify(password, hash).unwrap_or(false);
     }
-    hash_password(password) == hash
+    verify_sha256_password(password, hash)
 }
 
 #[cfg(test)]
@@ -82,6 +90,7 @@ mod tests {
         let hash = "$2a$10$C4Gwv0BDoZO0LFJLCMwD/OcQy61qVqTGBbvcnPh0FiTT408C69pv.";
         assert!(verify_password("secret", hash));
         assert!(!verify_password("wrong", hash));
+        assert!(!verify_sha256_password("secret", hash));
         assert!(is_bcrypt_hash(hash));
         assert!(!is_bcrypt_hash(&hash_password("secret")));
         // Writing still produces the Go SHA-256 format.

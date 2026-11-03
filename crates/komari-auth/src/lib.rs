@@ -3,7 +3,7 @@
 //! This crate is the Rust port of the Go backend's
 //! `database/accounts`, `database/accounts/2fa.go` and `api/Auth.go`.
 //!
-//! * [`password`] — bcrypt password hashing (with legacy SHA-256 fallback)
+//! * [`password`] — Go SHA-256 password writes, bcrypt read-only compatibility
 //! * [`session`] — login sessions stored in `komari-db`
 //! * [`totp`] — RFC 6238 TOTP, compatible with `github.com/pquerna/otp`
 //! * [`role`] — the `Admin` / `Client` / `Guest` role model

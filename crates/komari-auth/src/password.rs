@@ -62,12 +62,12 @@ pub fn verify_password(password: &str, hash: &str) -> bool {
     verify_legacy_password(password, hash)
 }
 
-/// Verify the Go `base64(SHA-256(password + salt))` format.
+/// Verify only the Go `base64(SHA-256(password + salt))` format.
+///
+/// This deliberately does not accept bcrypt; use [`verify_password`] for the
+/// read-only compatibility union.
 pub fn verify_legacy_password(password: &str, hash: &str) -> bool {
-    if hash.is_empty() {
-        return false;
-    }
-    komari_db::util::verify_password(password, hash)
+    komari_db::util::verify_sha256_password(password, hash)
 }
 
 /// Create the Go-compatible SHA-256 hash.
@@ -215,7 +215,10 @@ mod tests {
         let legacy = "NwK0chtAiNgPs5S3fCOjr2s6C61k8x+k/s9Y0PesSp4=";
         assert_eq!(legacy_hash_password("admin"), legacy);
         assert!(verify_password("admin", legacy));
+        assert!(verify_legacy_password("admin", legacy));
         assert!(!verify_password("wrong", legacy));
+        // The legacy-only helper must not accept bcrypt rows.
+        assert!(!verify_legacy_password("secret", GO_2A_COST10_SECRET));
     }
 
     #[test]
