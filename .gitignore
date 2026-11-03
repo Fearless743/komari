@@ -2,4 +2,7 @@ target/
 *.db
 *.db-*
 .env
+.env.*
 /data/
+*.log
+.DS_Store
