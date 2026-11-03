@@ -24,6 +24,15 @@ impl Accounts<'_> {
 
     /// Insert a pre-built user row (for example one created from SSO).
     pub fn insert(&self, user: &User) -> Result<()> {
+        // GORM's CreatedAt/UpdatedAt conventions fill zero timestamps.
+        let mut user = user.clone();
+        let now = LocalTime::now();
+        if user.created_at.is_zero() {
+            user.created_at = now;
+        }
+        if user.updated_at.is_zero() {
+            user.updated_at = now;
+        }
         let conn = self.db.conn();
         conn.execute(
             "INSERT INTO users \

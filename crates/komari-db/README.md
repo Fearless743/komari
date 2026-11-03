@@ -32,6 +32,10 @@ Explicit constructors:
 | `Db::open_read_only(path)` | inspection of an existing database |
 | `Db::open_default()` | `KOMARI_DB_*` environment variables |
 
+`DbOptions` also exposes `foreign_keys`: SQLite's default is disabled and the
+Go backend never enables it, so it defaults to `false` for behavioural parity.
+WAL journaling is enabled for read/write handles, like the Go backend.
+
 `DbOptions::from_env()` implements the Go flag precedence for the database
 variables. MySQL is not implemented yet and returns
 `DbError::UnsupportedDatabase`.

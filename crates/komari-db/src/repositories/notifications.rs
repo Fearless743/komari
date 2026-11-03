@@ -34,6 +34,11 @@ impl Notifications<'_> {
 
     /// Insert or replace the settings for one client.
     pub fn offline_save(&self, notification: &OfflineNotification) -> Result<()> {
+        let mut notification = notification.clone();
+        // The Go model relies on `default:180`.
+        if notification.grace_period == 0 {
+            notification.grace_period = 180;
+        }
         let conn = self.db.conn();
         conn.execute(
             "INSERT INTO offline_notifications (client, enable, grace_period, last_notified) \
@@ -98,6 +103,20 @@ impl Notifications<'_> {
     /// Insert a new rule and return its generated id (Go
     /// `AddLoadNotification`).
     pub fn load_insert(&self, notification: &LoadNotification) -> Result<i64> {
+        let mut notification = notification.clone();
+        // Reproduce the database defaults declared by the Go model.
+        if notification.metric.is_empty() {
+            notification.metric = "cpu".to_owned();
+        }
+        if notification.threshold == 0.0 {
+            notification.threshold = 80.0;
+        }
+        if notification.ratio == 0.0 {
+            notification.ratio = 0.8;
+        }
+        if notification.interval == 0 {
+            notification.interval = 15;
+        }
         let conn = self.db.conn();
         conn.execute(
             "INSERT INTO load_notifications \

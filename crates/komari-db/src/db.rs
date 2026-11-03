@@ -23,6 +23,9 @@ pub struct DbOptions {
     pub create_parent_dirs: bool,
     /// Enable WAL journaling, as the Go backend does for SQLite.
     pub wal: bool,
+    /// Enable SQLite foreign-key enforcement. The Go backend leaves SQLite's
+    /// default (disabled) in place, so this defaults to `false`.
+    pub foreign_keys: bool,
     /// SQLite busy timeout.
     pub busy_timeout: Duration,
 }
@@ -34,6 +37,7 @@ impl Default for DbOptions {
             read_only: false,
             create_parent_dirs: true,
             wal: true,
+            foreign_keys: false,
             busy_timeout: Duration::from_secs(5),
         }
     }
@@ -55,6 +59,7 @@ impl DbOptions {
             read_only: true,
             create_parent_dirs: false,
             wal: false,
+            foreign_keys: false,
             ..Self::default()
         }
     }
@@ -118,7 +123,7 @@ impl Db {
             read_only: false,
             in_memory: true,
         };
-        db.configure_connection(false)?;
+        db.configure_connection(false, false)?;
         Ok(db)
     }
 
@@ -164,14 +169,16 @@ impl Db {
             read_only: options.read_only,
             in_memory: false,
         };
-        db.configure_connection(options.wal && !options.read_only)?;
+        db.configure_connection(options.wal && !options.read_only, options.foreign_keys)?;
         db.conn.lock().busy_timeout(options.busy_timeout)?;
         Ok(db)
     }
 
-    fn configure_connection(&self, wal: bool) -> Result<()> {
+    fn configure_connection(&self, wal: bool, foreign_keys: bool) -> Result<()> {
         let conn = self.conn.lock();
-        conn.pragma_update(None, "foreign_keys", "ON")?;
+        if foreign_keys {
+            conn.pragma_update(None, "foreign_keys", "ON")?;
+        }
         if wal {
             // Failure to switch journal modes is not fatal (read-only media,
             // network filesystems); the database still works in rollback mode.

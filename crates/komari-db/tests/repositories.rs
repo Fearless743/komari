@@ -30,6 +30,21 @@ fn clients_crud_and_lookup() {
     assert_eq!(client.traffic_limit_type, "max");
     assert_eq!(client.token.len(), 22);
 
+    // A hand-built row gets GORM's database defaults and timestamps.
+    let plain = Client {
+        uuid: "plain-uuid".to_owned(),
+        token: "plain-token".to_owned(),
+        ..Client::default()
+    };
+    clients.create(&plain).unwrap();
+    let plain = clients.require("plain-uuid").unwrap();
+    assert_eq!(plain.currency, "$");
+    assert_eq!(plain.ddns_record_type, "inherit");
+    assert_eq!(plain.traffic_limit_type, "max");
+    assert!(!plain.created_at.is_zero());
+    assert_eq!(clients.count().unwrap(), 2);
+    clients.delete("plain-uuid").unwrap();
+
     assert_eq!(
         clients.get(&client.uuid).unwrap().unwrap().uuid,
         client.uuid

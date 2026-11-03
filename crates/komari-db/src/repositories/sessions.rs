@@ -16,6 +16,11 @@ pub struct Sessions<'a> {
 impl Sessions<'_> {
     /// Insert a session row.
     pub fn insert(&self, session: &Session) -> Result<()> {
+        // GORM fills CreatedAt when it is left at the zero value.
+        let mut session = session.clone();
+        if session.created_at.is_zero() {
+            session.created_at = LocalTime::now();
+        }
         let conn = self.db.conn();
         conn.execute(
             "INSERT INTO sessions \

@@ -67,6 +67,27 @@ pub struct Clients<'a> {
 impl Clients<'_> {
     /// Insert a client. Use [`Client::new`] to generate UUID/token defaults.
     pub fn create(&self, client: &Client) -> Result<()> {
+        // GORM omits zero-valued columns that declare a database default and
+        // auto-populates CreatedAt/UpdatedAt. Reproduce that behaviour for
+        // callers that construct a Client by hand.
+        let mut client = client.clone();
+        let now = LocalTime::now();
+        if client.created_at.is_zero() {
+            client.created_at = now;
+        }
+        if client.updated_at.is_zero() {
+            client.updated_at = now;
+        }
+        if client.currency.is_empty() {
+            client.currency = "$".to_owned();
+        }
+        if client.ddns_record_type.is_empty() {
+            client.ddns_record_type = "inherit".to_owned();
+        }
+        if client.traffic_limit_type.is_empty() {
+            client.traffic_limit_type = "max".to_owned();
+        }
+
         let conn = self.db.conn();
         conn.execute(
             &format!("INSERT INTO clients ({COLUMNS}) VALUES ({PLACEHOLDERS})"),
