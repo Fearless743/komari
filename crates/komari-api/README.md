@@ -48,3 +48,46 @@ tracked here so later tasks can adapt them.
   that belongs to the web task (B09).
 - An administrator WebSocket still needs a resolvable `?token=` client token;
   admin HTTP reports/basic-info use the body UUID instead.
+
+## B06 — admin API and JSON-RPC 2.0
+
+`admin_router()` implements the Go `api/admin/**` groups (settings, clients,
+records, sessions, 2FA, backup, DDNS/notification/OAuth providers, themes,
+logs, clipboard, notification rules, test/update endpoints). Every handler
+takes `RequireAdmin`, so merging `admin_router()` without the role middleware
+still returns `401` for guests and agents.
+
+`rpc_router()` implements `/api/rpc2` over both POST and WebSocket. Both
+transports share `rpc::dispatch`, the namespace checks (`guest`/`client`/
+`admin`/`common`) and the codes from `utils/rpc/errors.go`. Registered methods:
+
+- `common:getNodes`, `common:getNodesLatestStatus`, `common:getMe`,
+  `common:getPublicInfo`, `common:getVersion`, `common:getNodeRecentStatus`,
+  `common:getRecords`
+- `admin:getClients`, `admin:getClient`, `admin:getSettings`,
+  `admin:saveSettings`, `admin:addClient`, `admin:editClient`,
+  `admin:removeClient`
+- internal `rpc.ping`, `rpc.version`, `rpc.methods`, `rpc.help`
+
+Provider GET responses call `komari_ddns::redact_addition`,
+`komari_notify::redact_addition` or the local OAuth redactor; the database
+keeps the complete `addition` JSON.
+
+Known differences:
+
+- `GET /api/admin/2fa/generate` returns the enrolment material as JSON
+  (`secret`, `otpauth_url`) instead of a PNG QR code; the `2fa_secret` cookie
+  and enable/disable flow are unchanged.
+- Theme upload/update/import endpoints are not implemented (listing, switching,
+  deleting and per-theme settings are). They need ZIP/SSRF handling from the Go
+  implementation.
+- `common:getRecords` iterates the current `clients` table, so records of
+  already-deleted clients are not returned.
+- `common:getPublicInfo` does not merge managed-theme defaults from
+  `data/theme/<short>/komari-theme.json`.
+- `common:getMe` for an agent returns the resolved client UUID; the Go code has
+  an inverted error check and may return the token instead.
+- Admin backup upload validates `komari-backup-markup` and stages
+  `<data_dir>/backup.zip`; the server assembly must call
+  `komari_db::restore_pending_backup` at startup (Go exits and restores on the
+  next boot).
