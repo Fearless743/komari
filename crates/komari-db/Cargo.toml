@@ -7,6 +7,7 @@ license.workspace = true
 
 [dependencies]
 base64 = "0.22"
+bcrypt = { workspace = true }
 chrono = { workspace = true }
 parking_lot = { workspace = true }
 rand = { workspace = true }

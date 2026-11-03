@@ -4,12 +4,15 @@ pub mod cli;
 pub mod logging;
 pub mod version;
 
+use std::path::Path;
+
 use anyhow::{Context, Result};
-use clap::Parser;
+use clap::{CommandFactory, Parser};
 use komari_config::{Config, ConfigOverrides, DatabaseType, LogLevel};
+use komari_db::Db;
 use tracing::{debug, info};
 
-use crate::cli::{ChpasswdArgs, Cli, Command, GlobalArgs, ServerArgs};
+use crate::cli::{ChpasswdArgs, Cli, Command, Disable2faArgs, GlobalArgs, ServerArgs};
 
 /// Parse the process arguments and execute the selected command.
 pub fn run() -> Result<()> {
@@ -25,7 +28,7 @@ pub fn run_cli(cli: Cli) -> Result<()> {
     {
         Command::Server(args) => run_server(&cli.global, args),
         Command::Chpasswd(args) => run_chpasswd(&cli.global, args),
-        Command::Disable2fa => run_disable_2fa(&cli.global),
+        Command::Disable2fa(args) => run_disable_2fa(&cli.global, args),
         Command::PermitLogin => run_permit_password_login(&cli.global),
     }
 }
@@ -69,42 +72,136 @@ fn run_server(global: &GlobalArgs, args: ServerArgs) -> Result<()> {
 
 fn run_chpasswd(global: &GlobalArgs, args: ChpasswdArgs) -> Result<()> {
     logging::init(LogLevel::Info);
-    let Some(password) = args.password else {
-        anyhow::bail!("missing --password; run `komari chpasswd --help` for usage");
+    let Some(password) = args.password.filter(|password| !password.is_empty()) else {
+        // Go prints the command help and returns exit code 0.
+        print_chpasswd_help();
+        return Ok(());
     };
-    if password.is_empty() {
-        anyhow::bail!("--password must not be empty");
+
+    let Some(db) = open_existing_db(global)? else {
+        return Ok(());
+    };
+
+    let username = match args.username {
+        Some(username) => username,
+        None => db
+            .accounts()
+            .list()
+            .context("failed to list user accounts")?
+            .into_iter()
+            .min_by(|left, right| left.uuid.cmp(&right.uuid))
+            .map(|user| user.username)
+            .unwrap_or_default(),
+    };
+
+    println!("Changing password for user: {username}");
+    if username.is_empty() {
+        println!("Error: 无法找到用户名");
+        return Ok(());
     }
 
-    let config = load_aux_config(global)?;
-    println!(
-        "chpasswd is not implemented in the Rust backend yet (database: {}).",
-        config.db.file
-    );
-    println!("The password was not changed. Use the Go backend until this command lands.");
+    if let Err(error) = komari_auth::change_password(&db, &username, &password) {
+        let message = match error {
+            komari_auth::AuthError::UserNotFound(_) => "无法找到用户名".to_owned(),
+            other => other.to_string(),
+        };
+        println!("Error: {message}");
+        return Ok(());
+    }
+    println!("Password changed successfully, new password: {password}");
+
+    if let Err(error) = db.sessions().delete_all() {
+        println!("Unable to force logout of other devices: {error}");
+        return Ok(());
+    }
+    println!("Please restart the server to apply the changes.");
     Ok(())
 }
 
-fn run_disable_2fa(global: &GlobalArgs) -> Result<()> {
+fn print_chpasswd_help() {
+    let mut command = Cli::command();
+    if let Some(subcommand) = command.find_subcommand_mut("chpasswd") {
+        println!("{}", subcommand.render_help());
+    }
+}
+
+fn run_disable_2fa(global: &GlobalArgs, args: Disable2faArgs) -> Result<()> {
     logging::init(LogLevel::Info);
-    let config = load_aux_config(global)?;
-    println!(
-        "disable-2fa is not implemented in the Rust backend yet (database: {}).",
-        config.db.file
-    );
-    println!("No change was made. Use the Go backend until this command lands.");
+    // Go creates and AutoMigrates the database for this command.
+    let db = open_or_create_db(global)?;
+
+    if let Some(username) = args.username {
+        let user = db
+            .accounts()
+            .require_by_username(&username)
+            .with_context(|| format!("user not found: {username}"))?;
+        komari_auth::disable_2fa(&db, &user.uuid).context("failed to disable 2FA for the user")?;
+    } else {
+        komari_auth::disable_all_2fa(&db).context("failed to disable 2FA")?;
+    }
+
+    println!("2FA has been disabled.");
+    println!("Please restart the server to apply the changes.");
     Ok(())
 }
 
 fn run_permit_password_login(global: &GlobalArgs) -> Result<()> {
     logging::init(LogLevel::Info);
-    let config = load_aux_config(global)?;
-    println!(
-        "permit-login is not implemented in the Rust backend yet (database: {}).",
-        config.db.file
-    );
-    println!("No change was made. Use the Go backend until this command lands.");
+    // Go creates and AutoMigrates the database for this command.
+    let db = open_or_create_db(global)?;
+
+    // Current Go reads this key/value row; the legacy command's column update
+    // is only relevant to pre-1.1.4 schemas.
+    db.config()
+        .set("disable_password_login", &false)
+        .context("failed to update disable_password_login")?;
+
+    println!("Password login has been permitted.");
+    println!("Please restart the server to apply the changes.");
     Ok(())
+}
+
+/// Open an existing database for `chpasswd`.
+///
+/// Mirrors Go `cmd/chpasswd.go`, which prints `Database file does not exist.`
+/// and exits successfully instead of creating an empty database.
+fn open_existing_db(global: &GlobalArgs) -> Result<Option<Db>> {
+    let config = load_aux_db_config(global)?;
+    if config.db.file != ":memory:" && !Path::new(&config.db.file).exists() {
+        println!("Database file does not exist.");
+        return Ok(None);
+    }
+
+    let db = Db::open(&config.db.file)
+        .with_context(|| format!("failed to open database {}", config.db.file))?;
+    // Go `GetDBInstance` runs AutoMigrate even for chpasswd. This also makes an
+    // empty file (freshly touched SQLite db) usable instead of failing with
+    // "no such table: users".
+    db.migrate()
+        .with_context(|| format!("failed to migrate database {}", config.db.file))?;
+    Ok(Some(db))
+}
+
+/// Open or create and migrate a database for `disable-2fa`/`permit-login`,
+/// matching the Go commands' `dbcore.GetDBInstance()` + `AutoMigrate` path.
+fn open_or_create_db(global: &GlobalArgs) -> Result<Db> {
+    let config = load_aux_db_config(global)?;
+    let db = Db::open(&config.db.file)
+        .with_context(|| format!("failed to open database {}", config.db.file))?;
+    db.migrate()
+        .with_context(|| format!("failed to migrate database {}", config.db.file))?;
+    Ok(db)
+}
+
+fn load_aux_db_config(global: &GlobalArgs) -> Result<Config> {
+    let config = load_aux_config(global)?;
+    if !config.db.is_sqlite() {
+        anyhow::bail!(
+            "database type {:?} is not supported yet; only sqlite is implemented",
+            config.db.db_type
+        );
+    }
+    Ok(config)
 }
 
 fn load_aux_config(global: &GlobalArgs) -> Result<Config> {
