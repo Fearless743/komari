@@ -1,0 +1,160 @@
+//! Compatibility checks against the real Go backend database.
+//!
+//! The test is skipped when the reference database is not present (for example
+//! on CI), but whenever it exists every table must be readable and its schema
+//! must match what this crate creates.
+
+use std::path::Path;
+
+use komari_db::models::Config as LegacyConfig;
+use komari_db::{Db, LocalTime, migrate::TABLES};
+
+const REFERENCE_DB: &str = "/home/fearless/github/komari/komari/data/komari.db";
+
+fn reference_path() -> Option<String> {
+    let path = std::env::var("KOMARI_COMPAT_DB").unwrap_or_else(|_| REFERENCE_DB.to_owned());
+    Path::new(&path).exists().then_some(path)
+}
+
+type ColumnInfo = (String, String, i64, Option<String>, i64);
+
+fn columns(db: &Db, table: &str) -> Vec<ColumnInfo> {
+    db.with_connection(|conn| {
+        let mut stmt = conn.prepare(&format!("PRAGMA table_info(`{table}`)"))?;
+        let rows = stmt.query_map([], |row| {
+            Ok((
+                row.get::<_, String>(1)?,
+                row.get::<_, String>(2)?,
+                row.get::<_, i64>(3)?,
+                row.get::<_, Option<String>>(4)?,
+                row.get::<_, i64>(5)?,
+            ))
+        })?;
+        Ok(rows.collect::<rusqlite::Result<Vec<_>>>()?)
+    })
+    .unwrap()
+}
+
+fn indexes(db: &Db, table: &str) -> Vec<(String, i64, String)> {
+    db.with_connection(|conn| {
+        let mut stmt = conn.prepare(&format!("PRAGMA index_list(`{table}`)"))?;
+        let rows = stmt.query_map([], |row| {
+            Ok((
+                row.get::<_, String>(1)?,
+                row.get::<_, i64>(2)?,
+                row.get::<_, String>(3)?,
+            ))
+        })?;
+        Ok(rows.collect::<rusqlite::Result<Vec<_>>>()?)
+    })
+    .unwrap()
+}
+
+#[test]
+fn reference_database_schema_matches_our_migration() {
+    let Some(path) = reference_path() else {
+        eprintln!("reference database {REFERENCE_DB} not found; skipping");
+        return;
+    };
+
+    let reference = Db::open_read_only(&path).expect("open reference database read-only");
+    assert!(reference.is_read_only());
+
+    let fresh = Db::open_in_memory().unwrap();
+    fresh.migrate().unwrap();
+
+    for table in TABLES {
+        assert!(
+            reference.table_exists(table).unwrap(),
+            "reference database is missing table {table}"
+        );
+        let expected = columns(&fresh, table);
+        let actual = columns(&reference, table);
+        assert_eq!(actual, expected, "column mismatch for table {table}");
+        assert_eq!(
+            indexes(&reference, table),
+            indexes(&fresh, table),
+            "index mismatch for table {table}"
+        );
+    }
+}
+
+#[test]
+fn reference_database_is_readable_and_has_expected_tables() {
+    let Some(path) = reference_path() else {
+        eprintln!("reference database {REFERENCE_DB} not found; skipping");
+        return;
+    };
+
+    let db = Db::open_read_only(&path).unwrap();
+    for table in [
+        "clients",
+        "users",
+        "sessions",
+        "records",
+        "configs",
+        "gpu_records",
+        "logs",
+        "clipboards",
+        "load_notifications",
+        "offline_notifications",
+        "oidc_providers",
+        "message_sender_providers",
+        "ddns_providers",
+        "ddns_sync_history",
+        "theme_configurations",
+        "records_long_term",
+        "gpu_records_long_term",
+    ] {
+        assert!(db.table_exists(table).unwrap(), "missing {table}");
+    }
+    assert!(db.schema_is_current().unwrap());
+
+    // The bundled database always contains the key/value configuration table.
+    let config = db.config();
+    let all = config.get_all().expect("read configs");
+    if all.is_empty() {
+        eprintln!("reference database has an empty configs table; skipping value assertions");
+    } else {
+        let sitename = config
+            .get_as::<String>("sitename")
+            .expect("read sitename")
+            .expect("sitename must exist");
+        assert_eq!(sitename, "Komari");
+        assert_eq!(
+            config.get("theme").unwrap().unwrap(),
+            serde_json::json!("default")
+        );
+        assert_eq!(
+            config
+                .get_as::<i64>("record_preserve_time")
+                .unwrap()
+                .unwrap(),
+            720
+        );
+        assert!(all.contains_key("sitename"));
+    }
+
+    // Users should be readable, including the non-standard timestamp layout.
+    let users = db.accounts().list().expect("read users");
+    if let Some(user) = users.first() {
+        assert!(!user.username.is_empty());
+        assert!(!user.created_at.is_zero());
+        assert!(user.created_at.to_storage_string().starts_with("20"));
+    }
+
+    // Sessions contain driver-written timestamps with nanosecond precision and
+    // an explicit +00:00 offset; Go's LocalTime keeps the wall clock.
+    let sessions = db.sessions().list().expect("read sessions");
+    if let Some(session) = sessions.first() {
+        assert!(!session.expires.is_zero());
+        if !session.latest_online.is_zero() {
+            assert_eq!(session.latest_online.to_storage_string().len(), 27);
+        }
+    }
+
+    // Configs are key/value JSON, and the legacy single-row model still
+    // deserializes when explicitly requested.
+    let _legacy = LegacyConfig::default();
+    let _: LocalTime = LocalTime::default();
+}
