@@ -33,6 +33,10 @@ impl DdnsProvider for EmptyProvider {
     async fn sync(&self, _context: &SyncContext) -> Result<SyncResult, DdnsError> {
         Ok(SyncResult::default())
     }
+
+    async fn delete_record(&self, _record_id: &str) -> Result<(), DdnsError> {
+        Ok(())
+    }
 }
 
 /// Register the `empty` provider.

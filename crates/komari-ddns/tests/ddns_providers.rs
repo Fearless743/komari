@@ -375,6 +375,39 @@ async fn webhook_reports_status_errors_and_invalid_configuration() {
     assert!(error.to_string().contains("webhook URL is not configured"));
 }
 
+#[tokio::test]
+async fn cloudflare_deletes_record_with_authentication() {
+    let server = MockServer::start(|request| {
+        if request.method == "DELETE" && request.path == "/zones/zone-1/dns_records/record-1" {
+            MockResponse::json(200, r#"{"success":true,"errors":[]}"#)
+        } else {
+            MockResponse::json(500, r#"{"success":false}"#)
+        }
+    })
+    .await;
+    let provider = cloudflare(
+        &server,
+        json!({"api_token":"token","zone_id":"zone-1","record_type":"A"}),
+    );
+
+    provider.delete_record("record-1").await.expect("delete");
+    let requests = server.requests();
+    assert_eq!(requests.len(), 1);
+    assert_eq!(requests[0].method, "DELETE");
+    assert_eq!(requests[0].header("authorization"), Some("Bearer token"));
+
+    let empty = EmptyProvider;
+    empty.delete_record("record-1").await.expect("empty delete");
+
+    let mut webhook = WebhookProvider::new();
+    webhook.set_configuration(json!({})).expect("config");
+    let error = webhook
+        .delete_record("record-1")
+        .await
+        .expect_err("webhook deletion is unsupported");
+    assert!(error.to_string().contains("does not support deleting"));
+}
+
 #[test]
 fn webhook_helpers_match_go() {
     let ctx = context("1.2.3.4", "2001:db8::1");

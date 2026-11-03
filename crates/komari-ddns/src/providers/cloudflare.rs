@@ -166,6 +166,32 @@ impl DdnsProvider for CloudflareProvider {
             .await?;
         Ok(SyncResult::resolved(record_id))
     }
+
+    async fn delete_record(&self, record_id: &str) -> Result<(), DdnsError> {
+        if self.config.api_token.trim().is_empty() || self.config.zone_id.trim().is_empty() {
+            return Err(DdnsError::NotConfigured(
+                "cloudflare DDNS is not fully configured".to_owned(),
+            ));
+        }
+        let request = self.client.delete(format!(
+            "{}/zones/{}/dns_records/{}",
+            self.base_url,
+            self.config.zone_id,
+            record_id.trim()
+        ));
+        let (_, body) = self
+            .send(self.headers(request), "cloudflare delete")
+            .await?;
+
+        let response: CloudflareMutationResponse = serde_json::from_str(&body)?;
+        if !response.success {
+            return Err(DdnsError::Provider(format!(
+                "cloudflare delete error: {}",
+                error_messages(&response.errors)
+            )));
+        }
+        Ok(())
+    }
 }
 
 impl CloudflareProvider {
@@ -302,14 +328,7 @@ impl CloudflareProvider {
             .send(self.headers(request), "cloudflare update")
             .await?;
 
-        #[derive(Deserialize)]
-        struct UpdateResponse {
-            #[serde(default)]
-            success: bool,
-            #[serde(default)]
-            errors: Vec<CloudflareMessage>,
-        }
-        let response: UpdateResponse = serde_json::from_str(&body)?;
+        let response: CloudflareMutationResponse = serde_json::from_str(&body)?;
         if !response.success {
             return Err(DdnsError::Provider(format!(
                 "cloudflare api returned error: {}",
@@ -318,6 +337,14 @@ impl CloudflareProvider {
         }
         Ok(())
     }
+}
+
+#[derive(Clone, Debug, Default, Deserialize)]
+struct CloudflareMutationResponse {
+    #[serde(default)]
+    success: bool,
+    #[serde(default)]
+    errors: Vec<CloudflareMessage>,
 }
 
 #[derive(Clone, Debug, Default, Deserialize)]

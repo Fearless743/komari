@@ -138,4 +138,16 @@ pub trait DdnsProvider: Send + Sync {
 
     /// Create or update the DNS record for one client.
     async fn sync(&self, context: &SyncContext) -> Result<SyncResult, DdnsError>;
+
+    /// Delete one DNS record by provider-specific id.
+    ///
+    /// Go's `IDdnsProvider` only creates/updates records through `Sync`; the
+    /// default implementation reports that deletion is unsupported so the
+    /// capability can be added per backend without breaking the interface.
+    async fn delete_record(&self, record_id: &str) -> Result<(), DdnsError> {
+        Err(DdnsError::Provider(format!(
+            "{} does not support deleting DNS records (record {record_id})",
+            self.name()
+        )))
+    }
 }
