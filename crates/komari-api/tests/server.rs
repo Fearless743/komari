@@ -1594,6 +1594,50 @@ async fn qq_style_provider_skips_query_state_but_requires_the_cookie() {
 }
 
 #[tokio::test]
+async fn oauth_callback_rebinds_an_account_with_an_existing_sso() {
+    let dir = TempDir::new().expect("temp dir");
+    let db = memory_db();
+    let user = db.accounts().create("rebind", "password").expect("user");
+    komari_oauth::AccountLinker::new(&db)
+        .bind(
+            &user.uuid,
+            &komari_oauth::SsoIdentity::new("fake", "old-subject"),
+        )
+        .expect("initial bind");
+    let session = komari_auth::create_session(&db, &user.uuid, "test", "127.0.0.1", "password")
+        .expect("session");
+    let running = oauth_server(&dir, db, "new-subject").await;
+    let client = http_client();
+
+    let (location, cookie) = oauth_start(&running, &client).await;
+    let state = oauth_state(&location, &cookie);
+    let response = client
+        .get(format!(
+            "{}/api/oauth_callback?state={state}&code=the-code",
+            running.base
+        ))
+        .header(
+            COOKIE,
+            format!(
+                "oauth_state={state}; binding_external_account={}; session_token={session}",
+                user.uuid
+            ),
+        )
+        .send()
+        .await
+        .expect("callback");
+    assert_eq!(response.status(), reqwest::StatusCode::FOUND);
+    let stored = running
+        .db
+        .accounts()
+        .require_by_uuid(&user.uuid)
+        .expect("stored");
+    assert_eq!(stored.sso_id, "fake_new-subject");
+
+    running.stop().await;
+}
+
+#[tokio::test]
 async fn oauth_callback_rejects_a_mismatched_state() {
     let dir = TempDir::new().expect("temp dir");
     let running = oauth_server(&dir, memory_db(), "subject-1").await;
