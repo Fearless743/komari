@@ -320,7 +320,9 @@ pub fn default_config(name: &str) -> Value {
             "client_secret": "",
         }),
         "qq" => json!({
-            "aggregation_url": "https://login.qjqq.cn",
+            // Go's Initialize marshals the zero value; the metadata default
+            // remains the UI suggestion from the struct tag.
+            "aggregation_url": "",
             "app_id": "",
             "app_key": "",
             "login_type": "",

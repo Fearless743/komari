@@ -17,30 +17,20 @@ use crate::http::{json_response, string_field, value_to_string};
 use crate::provider::OAuthProvider;
 use crate::redirect::checked_redirect_uri;
 use crate::state::StateStore;
-use crate::types::{AuthorizationRequest, ExchangeRequest, TokenSet, UserInfo};
-
-const DEFAULT_AGGREGATION_URL: &str = "https://login.qjqq.cn";
+use crate::types::{AuthorizationRequest, ExchangeRequest, TokenSet, UserInfo, sanitize_raw};
 
 /// QQ configuration, matching Go's `qq.Addition`.
-#[derive(Clone, Serialize, Deserialize)]
+///
+/// Go stores the zero value (`""`) when no configuration has been saved; the
+/// `https://login.qjqq.cn` value in the factory metadata is only the UI
+/// suggestion from the Go struct tag.
+#[derive(Clone, Default, Serialize, Deserialize)]
 #[serde(default)]
 pub struct QqConfig {
-    #[serde(default = "default_aggregation_url")]
     pub aggregation_url: String,
     pub app_id: String,
     pub app_key: String,
     pub login_type: String,
-}
-
-impl Default for QqConfig {
-    fn default() -> Self {
-        Self {
-            aggregation_url: DEFAULT_AGGREGATION_URL.to_owned(),
-            app_id: String::new(),
-            app_key: String::new(),
-            login_type: String::new(),
-        }
-    }
 }
 
 impl fmt::Debug for QqConfig {
@@ -186,7 +176,7 @@ impl OAuthProvider for QqProvider {
             expires_at: None,
             scope: None,
             id_token: None,
-            raw: Some(value),
+            raw: Some(sanitize_raw(value)),
             id_token_claims: None,
         })
     }
@@ -206,22 +196,19 @@ impl OAuthProvider for QqProvider {
             avatar: string_field(value, "faceimg"),
             union_id: string_field(value, "unionid"),
             open_id: string_field(value, "openid"),
-            raw: Some(value.clone()),
+            raw: Some(sanitize_raw(value.clone())),
         })
     }
 }
 
 fn subject_from(value: &Value) -> Option<String> {
+    // Go only accepts social_uid. openid/unionid are retained as metadata but
+    // must never become the account subject.
     string_field(value, "social_uid")
-        .or_else(|| string_field(value, "openid"))
-        .or_else(|| string_field(value, "unionid"))
         .or_else(|| value.get("social_uid").and_then(value_to_string))
+        .filter(|subject| !subject.is_empty())
 }
 
 fn encode(value: &str) -> String {
     url::form_urlencoded::byte_serialize(value.as_bytes()).collect()
-}
-
-fn default_aggregation_url() -> String {
-    DEFAULT_AGGREGATION_URL.to_owned()
 }

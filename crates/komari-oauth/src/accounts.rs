@@ -69,11 +69,24 @@ impl From<&User> for SessionUser {
 }
 
 /// Result of resolving an external identity to a local account.
-#[derive(Clone, Debug)]
+#[derive(Clone)]
 pub struct OAuthAccount {
     pub user: User,
     /// `true` when a new local account was created for this identity.
     pub created: bool,
+}
+
+impl std::fmt::Debug for OAuthAccount {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter
+            .debug_struct("OAuthAccount")
+            .field("uuid", &self.user.uuid)
+            .field("username", &self.user.username)
+            .field("sso_type", &self.user.sso_type)
+            .field("sso_id", &self.user.sso_id)
+            .field("created", &self.created)
+            .finish()
+    }
 }
 
 impl OAuthAccount {
@@ -111,7 +124,12 @@ impl<'a> AccountLinker<'a> {
         Ok(None)
     }
 
-    /// Find an account or create one with a random local password.
+    /// Explicit opt-in account provisioning.
+    ///
+    /// Go's OAuth login does **not** create an account for an unknown external
+    /// identity; it returns 401 until an administrator binds it. Call
+    /// [`AccountLinker::login`] for that behaviour. This method is for
+    /// deployments that intentionally want self-service registration.
     ///
     /// Existing accounts are never modified, so a local password is preserved
     /// even when the same account later signs in through OAuth.
@@ -139,12 +157,21 @@ impl<'a> AccountLinker<'a> {
     }
 
     /// Resolve an [`OAuthUser`] to a local account, creating it when needed.
+    ///
+    /// This is the explicit opt-in registration path; see
+    /// [`AccountLinker::find_or_create`].
     pub fn find_or_create_from_user(&self, oauth_user: &OAuthUser) -> Result<OAuthAccount> {
         let preferred = oauth_user
             .username
             .as_deref()
             .or_else(|| oauth_user.email.as_deref().and_then(email_local_part));
         self.find_or_create(&oauth_user.identity(), preferred)
+    }
+
+    /// Go-compatible login lookup: return the bound account or
+    /// [`OAuthError::AccountNotBound`] (the API layer maps this to 401).
+    pub fn login(&self, identity: &SsoIdentity) -> Result<User> {
+        self.find(identity)?.ok_or(OAuthError::AccountNotBound)
     }
 
     /// Bind an external identity to an existing account.
@@ -296,6 +323,74 @@ mod tests {
         ));
         let stored: User = db.accounts().require_by_uuid(&other.uuid).unwrap();
         assert!(stored.sso_id.is_empty());
+    }
+
+    #[test]
+    fn login_requires_an_existing_binding_but_find_or_create_is_opt_in() {
+        let db = database();
+        let linker = AccountLinker::new(&db);
+        let identity = SsoIdentity::new("github", "404");
+
+        assert!(matches!(
+            linker.login(&identity),
+            Err(crate::OAuthError::AccountNotBound)
+        ));
+        let created = linker.find_or_create(&identity, Some("new-user")).unwrap();
+        assert!(created.created);
+        assert_eq!(linker.login(&identity).unwrap().uuid, created.user.uuid);
+    }
+
+    #[test]
+    fn finds_legacy_rows_that_store_a_bare_subject_and_sso_type() {
+        let db = database();
+        let mut user = db.accounts().create("legacy", "password").unwrap();
+        user.sso_type = "github".to_owned();
+        user.sso_id = "legacy-subject".to_owned();
+        db.accounts().update(&user).unwrap();
+
+        let linker = AccountLinker::new(&db);
+        let found = linker
+            .find(&SsoIdentity::new("github", "legacy-subject"))
+            .unwrap()
+            .unwrap();
+        assert_eq!(found.uuid, user.uuid);
+    }
+
+    #[test]
+    fn rebind_replaces_the_target_binding_but_not_another_users_identity() {
+        let db = database();
+        let linker = AccountLinker::new(&db);
+        let user = db.accounts().create("admin", "password").unwrap();
+        linker
+            .bind(&user.uuid, &SsoIdentity::new("github", "first"))
+            .unwrap();
+        let rebound = linker
+            .rebind(&user.uuid, &SsoIdentity::new("qq", "second"))
+            .unwrap();
+        assert_eq!(rebound.sso_id, "qq_second");
+        assert_eq!(rebound.sso_type, "qq");
+
+        let other = db.accounts().create("other", "password").unwrap();
+        linker
+            .bind(&other.uuid, &SsoIdentity::new("github", "third"))
+            .unwrap();
+        assert!(matches!(
+            linker.rebind(&user.uuid, &SsoIdentity::new("github", "third")),
+            Err(crate::OAuthError::AlreadyBound)
+        ));
+    }
+
+    #[test]
+    fn oauth_account_debug_does_not_print_the_password_hash() {
+        let db = database();
+        let linker = AccountLinker::new(&db);
+        let account = linker
+            .find_or_create(&SsoIdentity::new("github", "55"), Some("debug-user"))
+            .unwrap();
+        let debug = format!("{account:?}");
+        assert!(debug.contains("debug-user"));
+        assert!(!debug.contains(&account.user.passwd));
+        assert!(!debug.contains("passwd"));
     }
 
     #[test]

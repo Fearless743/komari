@@ -1,10 +1,10 @@
 //! Cloudflare Access provider.
 //!
 //! Cloudflare Access does not use an authorization-code exchange. The
-//! callback carries a signed JWT in the `Cf-Access-Jwt-Assertion` header (or,
-//! for non-browser clients, in a `code`/`token` query parameter). The JWT is
-//! verified against the team's `/cdn-cgi/access/certs` JWKS with `policy_aud`
-//! as the expected audience.
+//! callback carries a signed JWT in the `Cf-Access-Jwt-Assertion` header. Query
+//! parameters are rejected by default; non-browser clients must opt in with
+//! `allow_query_token`. The JWT is verified against the team's
+//! `/cdn-cgi/access/certs` JWKS with `policy_aud` as the expected audience.
 
 use async_trait::async_trait;
 use serde::{Deserialize, Serialize};
@@ -18,6 +18,7 @@ use crate::redirect::checked_redirect_uri;
 use crate::state::StateStore;
 use crate::types::{
     AuthorizationRequest, CallbackRequest, ExchangeRequest, OAuthUser, TokenSet, UserInfo,
+    sanitize_raw,
 };
 
 /// Cloudflare Access configuration, matching Go's `cloudflare.Addition`.
@@ -26,6 +27,10 @@ use crate::types::{
 pub struct CloudflareConfig {
     pub team_domain: String,
     pub policy_aud: String,
+    /// Accept a JWT from `code`/`token`/`access_token` query parameters instead
+    /// of the `Cf-Access-Jwt-Assertion` header. Disabled by default to match
+    /// Go and to keep browser callbacks header-only.
+    pub allow_query_token: bool,
 }
 
 /// Cloudflare Access provider instance.
@@ -79,7 +84,7 @@ impl CloudflareProvider {
             union_id: None,
             open_id: None,
             tokens: None,
-            raw: Some(verified.payload),
+            raw: Some(sanitize_raw(verified.payload)),
         })
     }
 }
@@ -140,8 +145,8 @@ impl OAuthProvider for CloudflareProvider {
             expires_at: None,
             scope: None,
             id_token: Some(request.code.to_owned()),
-            raw: Some(verified.payload.clone()),
-            id_token_claims: Some(verified.payload),
+            raw: Some(sanitize_raw(verified.payload.clone())),
+            id_token_claims: Some(sanitize_raw(verified.payload)),
         })
     }
 
@@ -173,7 +178,7 @@ impl OAuthProvider for CloudflareProvider {
             avatar: None,
             union_id: None,
             open_id: None,
-            raw: Some(verified.payload),
+            raw: Some(sanitize_raw(verified.payload)),
         })
     }
 
@@ -194,14 +199,18 @@ impl OAuthProvider for CloudflareProvider {
             .filter(|value| !value.is_empty())
             .map(str::to_owned)
             .or_else(|| {
-                request
-                    .query
-                    .get("code")
-                    .or_else(|| request.query.get("token"))
-                    .or_else(|| request.query.get("access_token"))
-                    .cloned()
+                if self.config.allow_query_token {
+                    request
+                        .query
+                        .get("code")
+                        .or_else(|| request.query.get("token"))
+                        .or_else(|| request.query.get("access_token"))
+                        .cloned()
+                        .or_else(|| request.code.map(str::to_owned))
+                } else {
+                    None
+                }
             })
-            .or_else(|| request.code.map(str::to_owned))
             .ok_or_else(|| OAuthError::UserInfo("no Cloudflare Access JWT found".to_owned()))?;
 
         let verified = self.verified_user(&jwt).await?;
