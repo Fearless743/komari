@@ -609,17 +609,31 @@ fn read_legacy_config(
             )
         })
         .collect();
-    let filter = if legacy_columns.is_empty() {
-        String::new()
+    let legacy_condition = if legacy_columns.is_empty() {
+        None
     } else {
-        format!(
-            "WHERE {}",
+        Some(format!(
+            "({})",
             legacy_columns
                 .iter()
                 .map(|column| format!("`{column}` IS NOT NULL"))
                 .collect::<Vec<_>>()
                 .join(" OR ")
-        )
+        ))
+    };
+    let has_key_column = columns
+        .iter()
+        .any(|column| column.eq_ignore_ascii_case("key"));
+    // In a hybrid table the legacy columns may have DEFAULT values, so a pure
+    // KV row can satisfy the "legacy column is not NULL" test. The key column
+    // is the reliable discriminator: legacy rows have an empty/NULL key.
+    let filter = match (has_key_column, legacy_condition) {
+        (true, Some(condition)) => {
+            format!("WHERE (`key` IS NULL OR `key` = '') AND {condition}")
+        }
+        (true, None) => "WHERE (`key` IS NULL OR `key` = '')".to_owned(),
+        (false, Some(condition)) => format!("WHERE {condition}"),
+        (false, None) => String::new(),
     };
 
     let mut values = None;

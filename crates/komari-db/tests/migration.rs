@@ -302,6 +302,53 @@ fn legacy_row_with_null_sitename_is_converted() {
 }
 
 #[test]
+fn pure_kv_rows_with_legacy_defaults_do_not_override_legacy_row() {
+    let dir = TempDir::new("defaulted-hybrid");
+    let path = dir.join("komari.db");
+    let db = Db::open(&path).unwrap();
+
+    // Legacy columns have DEFAULTs, so inserting only key/value still makes
+    // those columns non-NULL on the pure KV row.
+    db.with_connection(|conn| {
+        conn.execute_batch(
+            "CREATE TABLE configs (\
+                 `id` integer PRIMARY KEY AUTOINCREMENT, \
+                 `sitename` varchar(100) DEFAULT 'DefaultSite', \
+                 `description` text DEFAULT 'default-desc', \
+                 `theme` varchar(100) DEFAULT 'default', \
+                 `allow_cors` boolean DEFAULT 0, \
+                 `key` text, \
+                 `value` text\
+             );\
+             INSERT INTO configs (id, sitename, description, theme, allow_cors, key, value) \
+             VALUES (1, 'Old Site', 'old-desc', 'legacy-theme', 1, '', '');\
+             INSERT INTO configs (id, key, value) \
+             VALUES (2, 'theme', '\"dark\"');",
+        )?;
+        Ok(())
+    })
+    .unwrap();
+
+    db.migrate().unwrap();
+
+    let config = db.config();
+    assert_eq!(
+        config.get_as::<String>("sitename").unwrap().as_deref(),
+        Some("Old Site")
+    );
+    assert_eq!(
+        config.get_as::<String>("description").unwrap().as_deref(),
+        Some("old-desc")
+    );
+    assert_eq!(config.get_as::<bool>("allow_cors").unwrap(), Some(true));
+    // The existing KV row wins for keys it contains.
+    assert_eq!(
+        config.get_as::<String>("theme").unwrap().as_deref(),
+        Some("dark")
+    );
+}
+
+#[test]
 fn pure_kv_hybrid_rows_do_not_create_empty_legacy_keys() {
     let dir = TempDir::new("pure-kv-hybrid");
     let path = dir.join("komari.db");
