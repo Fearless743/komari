@@ -1201,6 +1201,60 @@ async fn graceful_shutdown_times_out_half_open_connections() {
 }
 
 #[tokio::test]
+async fn setting_oidc_updates_the_public_oauth_provider() {
+    let dir = TempDir::new().expect("temp dir");
+    let db = memory_db();
+    db.config()
+        .set("o_auth_enabled", &true)
+        .expect("enable oauth");
+    db.config()
+        .set("o_auth_provider", &"generic")
+        .expect("select generic");
+    let server = build(server_config(&dir), db).await;
+    let state = server.state().clone();
+    let session = create_admin_session(&state.db);
+    let running = start(server).await;
+    let client = http_client();
+
+    let addition = serde_json::json!({
+        "client_id": "client-id",
+        "client_secret": "client-secret",
+        "auth_url": "https://idp.example/authorize",
+        "token_url": "https://idp.example/token",
+        "user_info_url": "https://idp.example/userinfo",
+        "scope": "openid",
+        "user_id_field": "sub",
+    })
+    .to_string();
+    let response = client
+        .post(format!("{}/api/admin/settings/oidc", running.base))
+        .header(COOKIE, format!("session_token={session}"))
+        .json(&serde_json::json!({"name": "generic", "addition": addition}))
+        .send()
+        .await
+        .expect("set oidc");
+    assert_eq!(response.status(), reqwest::StatusCode::OK);
+
+    let response = client
+        .get(format!("{}/api/oauth", running.base))
+        .send()
+        .await
+        .expect("oauth start");
+    assert_eq!(response.status(), reqwest::StatusCode::FOUND);
+    let location = response
+        .headers()
+        .get("location")
+        .and_then(|value| value.to_str().ok())
+        .unwrap_or_default();
+    assert!(
+        location.starts_with("https://idp.example/authorize?"),
+        "{location}"
+    );
+
+    running.stop().await;
+}
+
+#[tokio::test]
 async fn oauth_is_disabled_by_default() {
     let dir = TempDir::new().expect("temp dir");
     let server = build(server_config(&dir), memory_db()).await;
