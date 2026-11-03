@@ -280,6 +280,53 @@ async fn delete_record_requires_a_loaded_provider_and_delegates() {
 }
 
 #[tokio::test]
+async fn load_provider_error_does_not_echo_the_addition() {
+    let db = database();
+    let service = DdnsService::new(Arc::clone(&db));
+    let error = service
+        .load_provider("cloudflare", "\"secret-addition-token\"")
+        .expect_err("top-level string is invalid");
+    assert!(!error.to_string().contains("secret-addition-token"));
+    assert!(
+        error
+            .to_string()
+            .contains("invalid cloudflare configuration")
+    );
+}
+
+#[tokio::test]
+async fn sync_error_history_and_audit_do_not_echo_webhook_secrets() {
+    let db = database();
+    enable_ddns(&db);
+    let service = DdnsService::new(Arc::clone(&db)).with_retry_policy(0, Duration::ZERO);
+    service
+        .load_provider(
+            "webhook",
+            r#"{"url":"http://127.0.0.1:1/hook","headers":"\"Bearer header-secret\""}"#,
+        )
+        .expect("load webhook");
+    let client = create_client(&db, "client-1", "1.1.1.1");
+
+    let error = service
+        .sync_client(&client, "test", false)
+        .await
+        .expect_err("headers parsing fails");
+    assert!(!error.to_string().contains("header-secret"));
+
+    let history = db.ddns().history("", 50).unwrap();
+    assert_eq!(history.len(), 1);
+    assert_eq!(history[0].status, "failed");
+    assert!(!history[0].error.contains("header-secret"));
+
+    let logs = db.logs().list(10).unwrap();
+    assert!(!logs.is_empty());
+    assert!(
+        logs.iter()
+            .all(|entry| !entry.message.contains("header-secret"))
+    );
+}
+
+#[tokio::test]
 async fn load_provider_validates_name_and_configuration() {
     let db = database();
     let (service, _) = service(&db, "", 2);
