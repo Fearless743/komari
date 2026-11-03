@@ -9,7 +9,6 @@
 # `komari-theme.json` and `preview.png`/`perview.png`):
 #   docker build \
 #     --build-arg KOMARI_THEME_SRC=.komari-theme \
-#     --build-arg KOMARI_DEFAULT_THEME_DIR=/src/theme \
 #     --build-arg KOMARI_VERSION=1.2.3 \
 #     --build-arg KOMARI_VERSION_HASH=$(git rev-parse HEAD) \
 #     -t komari:local .
@@ -34,25 +33,28 @@ FROM chef AS builder
 
 COPY --from=planner /src/recipe.json recipe.json
 
-# Frontend theme source, relative to the build context. The default is B14's
-# committed placeholder; CI and release builds pass a real komari-web checkout.
-# Both copies are created before `cargo chef cook` so the dependency cook also
-# works if komari-cli gains a komari-web dependency later (B09).
-ARG KOMARI_THEME_SRC=crates/komari-web/defaultTheme
-COPY ${KOMARI_THEME_SRC}/ /src/theme/
-COPY ${KOMARI_THEME_SRC}/ /src/crates/komari-web/defaultTheme/
-
-# B14's komari-web/build.rs reads KOMARI_DEFAULT_THEME_DIR at compile time and
-# embeds that directory with rust-embed. The default path exists after
-# `COPY . .` on a tree that includes B14. A real theme copied to /src/theme is
-# selected by passing --build-arg KOMARI_DEFAULT_THEME_DIR=/src/theme.
-ARG KOMARI_DEFAULT_THEME_DIR=/src/crates/komari-web/defaultTheme
-ENV KOMARI_DEFAULT_THEME_DIR=${KOMARI_DEFAULT_THEME_DIR} \
-    CARGO_PROFILE_RELEASE_STRIP=symbols
-
+# Stable B14 placeholder for the dependency cook. Using the committed theme
+# here keeps a real frontend checkout from invalidating the dependency cache;
+# it also keeps the cook working if komari-cli gains a komari-web dependency.
+COPY crates/komari-web/defaultTheme/ /src/crates/komari-web/defaultTheme/
+ENV KOMARI_DEFAULT_THEME_DIR=/src/crates/komari-web/defaultTheme
 RUN cargo chef cook --release --locked --recipe-path recipe.json --package komari-cli
 
+# Frontend theme source, relative to the build context. The default is B14's
+# committed placeholder; CI and release builds pass a real komari-web checkout.
+# This copy happens after the dependency cook so theme changes only invalidate
+# the final compile layer.
+ARG KOMARI_THEME_SRC=crates/komari-web/defaultTheme
+COPY ${KOMARI_THEME_SRC}/ /src/theme/
+
 COPY . .
+
+# B14's komari-web/build.rs reads KOMARI_DEFAULT_THEME_DIR at compile time and
+# embeds that directory with rust-embed. There is only one real theme copy:
+# /src/theme. A custom KOMARI_THEME_SRC is therefore picked up automatically.
+ARG KOMARI_DEFAULT_THEME_DIR=/src/theme
+ENV KOMARI_DEFAULT_THEME_DIR=${KOMARI_DEFAULT_THEME_DIR} \
+    CARGO_PROFILE_RELEASE_STRIP=symbols
 
 # Version injection mirrors the Go release workflow's ldflags:
 #   -X .../utils.CurrentVersion  -> KOMARI_VERSION

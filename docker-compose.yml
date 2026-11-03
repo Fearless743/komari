@@ -10,11 +10,11 @@ services:
         KOMARI_VERSION: ${KOMARI_VERSION:-dev}
         KOMARI_VERSION_HASH: ${KOMARI_VERSION_HASH:-unknown}
         # Theme source, relative to the repository root. The default is B14's
-        # placeholder; set both variables for a real frontend checkout:
-        #   KOMARI_THEME_SRC=.komari-theme \
-        #   KOMARI_DEFAULT_THEME_DIR=/src/theme docker compose build
+        # committed placeholder; set KOMARI_THEME_SRC=.komari-theme for a real
+        # frontend checkout. KOMARI_DEFAULT_THEME_DIR defaults to /src/theme,
+        # the single copy made inside the builder.
         KOMARI_THEME_SRC: ${KOMARI_THEME_SRC:-crates/komari-web/defaultTheme}
-        KOMARI_DEFAULT_THEME_DIR: ${KOMARI_DEFAULT_THEME_DIR:-/src/crates/komari-web/defaultTheme}
+        KOMARI_DEFAULT_THEME_DIR: ${KOMARI_DEFAULT_THEME_DIR:-/src/theme}
     container_name: komari
     restart: unless-stopped
     ports:
