@@ -224,7 +224,9 @@ pub(crate) fn get_me(context: &RpcContext, _request: &RpcRequest) -> Result<Valu
             "sso_id": "client",
             "sso_type": "client",
             "username": "client",
-            "uuid": context.client_uuid,
+            // Go assigns `meta.ClientToken` and only overwrites it on a lookup
+            // error, so the observable value is the token.
+            "uuid": context.client_token,
         })),
         Permission::Guest => Ok(json!({
             "2fa_enabled": false,
