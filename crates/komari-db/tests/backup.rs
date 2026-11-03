@@ -928,6 +928,29 @@ fn pre_restore_directory_inside_data_dir_is_skipped() {
     assert!(!target.join("backup").exists());
 }
 
+#[cfg(unix)]
+#[test]
+fn pre_restore_symlink_into_data_dir_is_skipped() {
+    let source = TempDir::new("backup-pre-symlink-source");
+    let data = make_data_dir(&source);
+    let db = make_db(&data);
+    let archive = db.export_backup(&options(&data)).unwrap();
+    drop(db);
+
+    let destination = TempDir::new("backup-pre-symlink-destination");
+    let target = destination.join("data");
+    import_backup_bytes(&options(&target), &archive).expect("initial import");
+    fs::create_dir_all(target.join("inner")).unwrap();
+
+    let link = destination.join("backup-link");
+    std::os::unix::fs::symlink(target.join("inner"), &link).unwrap();
+
+    let mut restore_options = options(&target);
+    restore_options.pre_restore_backup_dir = Some(link);
+    let report = import_backup_bytes(&restore_options, &archive).expect("restore");
+    assert!(report.pre_restore_archive.is_none());
+}
+
 #[test]
 fn restore_pending_removes_backup_zip_extracted_from_the_archive() {
     let source = TempDir::new("backup-pending-nested-source");

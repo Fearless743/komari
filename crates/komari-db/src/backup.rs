@@ -401,7 +401,10 @@ fn create_pre_restore_archive(options: &BackupOptions) -> Option<PathBuf> {
         return None;
     }
 
-    if normalize_path(directory).starts_with(normalize_path(&options.data_dir)) {
+    // Resolve symlinks so a `backup-link -> data/inner` path cannot smuggle
+    // the pre-restore archive inside the directory that is about to be
+    // replaced (which would delete the archive immediately).
+    if canonical_candidate(directory).starts_with(canonical_candidate(&options.data_dir)) {
         eprintln!(
             "komari-db backup: pre_restore_backup_dir {} is inside data_dir {}; skipping pre-restore archive",
             directory.display(),
