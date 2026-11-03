@@ -1045,8 +1045,12 @@ mod tests {
 
     #[tokio::test]
     async fn head_body_token_passes_through_auth_layer() {
-        async fn handler(context: AuthContext) -> String {
-            context.role.to_string()
+        async fn handler(context: AuthContext) -> StatusCode {
+            if context.role == Role::Client {
+                StatusCode::OK
+            } else {
+                StatusCode::UNAUTHORIZED
+            }
         }
 
         let fixture = fixture();
@@ -1194,10 +1198,9 @@ mod tests {
         let body = axum::body::to_bytes(response.into_body(), usize::MAX)
             .await
             .unwrap();
-        let json: serde_json::Value = serde_json::from_slice(&body).unwrap();
         assert_eq!(
-            json["message"],
-            "Private site is enabled, please login first."
+            String::from_utf8_lossy(&body),
+            r#"{"status":"error","message":"Private site is enabled, please login first."}"#
         );
 
         for path in [
