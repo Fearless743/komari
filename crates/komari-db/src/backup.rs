@@ -452,7 +452,7 @@ pub fn import_backup_file(options: &BackupOptions, path: impl AsRef<Path>) -> Re
 }
 
 fn ensure_safe_destination(db: &Db, options: &BackupOptions, destination: &Path) -> Result<()> {
-    let destination = normalize_path(destination);
+    let destination = canonical_candidate(destination);
     let mut protected = Vec::new();
     if let Some(path) = db.path() {
         protected.push(path.to_path_buf());
@@ -466,7 +466,7 @@ fn ensure_safe_destination(db: &Db, options: &BackupOptions, destination: &Path)
             append_suffix(&path, "-wal"),
             append_suffix(&path, "-shm"),
         ] {
-            if normalize_path(&candidate) == destination {
+            if canonical_candidate(&candidate) == destination {
                 return Err(DbError::InvalidData(format!(
                     "backup destination {} would overwrite the live database",
                     destination.display()
@@ -475,6 +475,20 @@ fn ensure_safe_destination(db: &Db, options: &BackupOptions, destination: &Path)
         }
     }
     Ok(())
+}
+
+/// Resolve a path for comparison: canonicalize it when it exists (following a
+/// final symlink), otherwise canonicalize its parent and keep the file name.
+fn canonical_candidate(path: &Path) -> PathBuf {
+    if let Ok(resolved) = fs::canonicalize(path) {
+        return resolved;
+    }
+    let parent = path.parent().unwrap_or_else(|| Path::new("."));
+    let parent = fs::canonicalize(parent).unwrap_or_else(|_| normalize_path(parent));
+    match path.file_name() {
+        Some(name) => parent.join(name),
+        None => parent,
+    }
 }
 
 fn append_suffix(path: &Path, suffix: &str) -> PathBuf {
