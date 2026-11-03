@@ -69,7 +69,7 @@ CREATE TABLE IF NOT EXISTS `clients` (
     `auto_renewal` numeric DEFAULT false,
     `currency` varchar(20) DEFAULT "$",
     `expired_at` timestamp,
-    `"group"` varchar(100),
+    `group` varchar(100),
     `tags` text,
     `ddns_enabled` numeric DEFAULT false,
     `ddns_hostname` varchar(255),

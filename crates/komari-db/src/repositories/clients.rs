@@ -51,7 +51,7 @@ pub struct ClientPatch {
 const COLUMNS: &str = "`uuid`, `token`, `name`, `cpu_name`, `virtualization`, `arch`, \
      `cpu_cores`, `os`, `kernel_version`, `gpu_name`, `ipv4`, `ipv6`, `region`, `remark`, \
      `public_remark`, `mem_total`, `swap_total`, `disk_total`, `version`, `weight`, `price`, \
-     `billing_cycle`, `auto_renewal`, `currency`, `expired_at`, `\"group\"`, `tags`, \
+     `billing_cycle`, `auto_renewal`, `currency`, `expired_at`, `group`, `tags`, \
      `ddns_enabled`, `ddns_hostname`, `ddns_record_id`, `ddns_record_type`, `hidden`, \
      `traffic_limit`, `traffic_limit_type`, `created_at`, `updated_at`";
 

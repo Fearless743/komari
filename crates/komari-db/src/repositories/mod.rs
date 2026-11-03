@@ -35,7 +35,7 @@ use crate::models::FromRow;
 
 pub use accounts::Accounts;
 pub use clients::{ClientPatch, Clients};
-pub use clipboard::ClipboardRepo;
+pub use clipboard::{ClipboardPatch, ClipboardRepo};
 pub use config::ConfigRepo;
 pub use ddns::Ddns;
 pub use logs::Logs;

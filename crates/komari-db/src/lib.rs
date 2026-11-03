@@ -27,7 +27,7 @@ pub use db::{DEFAULT_DB_FILE, Db, DbOptions};
 pub use error::{DbError, Result};
 pub use json::StringArray;
 pub use repositories::{
-    Accounts, AggregateFn, ClientPatch, Clients, ClipboardRepo, ConfigRepo, Ddns, Logs,
-    Notifications, Providers, RecordMetric, RecordTable, Records, Sessions, Themes,
+    Accounts, AggregateFn, ClientPatch, Clients, ClipboardPatch, ClipboardRepo, ConfigRepo, Ddns,
+    Logs, Notifications, Providers, RecordMetric, RecordTable, Records, Sessions, Themes,
 };
 pub use time::LocalTime;
