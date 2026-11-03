@@ -497,6 +497,7 @@ fn optional_pre_restore_archive_captures_the_previous_data() {
     import_backup_bytes(&options(&target), &archive).expect("initial import");
 
     fs::write(target.join("new.txt"), b"added later").unwrap();
+    fs::write(target.join("scratch.tmp"), b"keep me too").unwrap();
     let live = Db::open(target.join(BACKUP_DB_NAME)).unwrap();
     live.config().set("sitename", "after").unwrap();
     drop(live);
@@ -506,6 +507,9 @@ fn optional_pre_restore_archive_captures_the_previous_data() {
     // The restore itself only needs the database, but the pre-restore archive
     // must still capture the whole old data directory.
     restore_options.include_data = false;
+    // The pre-restore snapshot must ignore these exclusions and keep transient
+    // files, unlike a normal export.
+    restore_options.exclude = vec![target.join("scratch.tmp")];
     restore_options.pre_restore_backup_dir = Some(backup_dir.clone());
     let report = import_backup_bytes(&restore_options, &archive).expect("restore");
 
@@ -514,6 +518,7 @@ fn optional_pre_restore_archive_captures_the_previous_data() {
     let pre_bytes = fs::read(&pre_restore).unwrap();
     let names = zip_names(&pre_bytes);
     assert!(names.iter().any(|name| name == "new.txt"));
+    assert!(names.iter().any(|name| name == "scratch.tmp"));
     assert!(names.iter().any(|name| name == BACKUP_DB_NAME));
 
     let extracted = TempDir::new("backup-pre-extracted");
@@ -687,9 +692,16 @@ fn marker_uses_go_rfc3339_second_precision_without_newline() {
     let text = String::from_utf8(marker).unwrap();
     assert!(!text.ends_with('\n'));
     let timestamp = text.rsplit(": ").next().unwrap();
-    assert_eq!(timestamp.len(), 25, "{timestamp}");
     assert!(timestamp.contains('T'));
     assert!(!timestamp.contains('.'), "{timestamp}");
+    if let Some(prefix) = timestamp.strip_suffix('Z') {
+        assert_eq!(prefix.len(), 19, "{timestamp}");
+    } else {
+        assert_eq!(timestamp.len(), 25, "{timestamp}");
+        let bytes = timestamp.as_bytes();
+        assert!(bytes[19] == b'+' || bytes[19] == b'-', "{timestamp}");
+        assert_eq!(bytes[22], b':', "{timestamp}");
+    }
 }
 
 #[test]
@@ -870,6 +882,129 @@ fn restore_pending_backup_mirrors_go_startup_restore() {
         restore_pending_backup(&options(&destination.join("missing")))
             .unwrap()
             .is_none()
+    );
+}
+
+#[test]
+fn max_compression_ratio_is_enforced() {
+    let source = TempDir::new("backup-ratio-source");
+    let data = make_data_dir(&source);
+    let db = make_db(&data);
+    let database = snapshot_bytes(&db);
+    drop(db);
+
+    let zeros = vec![0u8; 1024 * 1024];
+    let archive = build_zip(&[
+        (BACKUP_MARKUP_NAME, MARKER),
+        (BACKUP_DB_NAME, &database),
+        ("zeros.bin", &zeros),
+    ]);
+
+    let destination = TempDir::new("backup-ratio-destination");
+    let target = sentinel_target(&destination);
+    let mut limited = options(&target);
+    limited.max_compression_ratio = 10;
+    let error = import_backup_bytes(&limited, &archive).unwrap_err();
+    assert!(matches!(error, DbError::BackupLimit(_)), "{error}");
+    assert_sentinel(&target);
+}
+
+#[test]
+fn pre_restore_directory_inside_data_dir_is_skipped() {
+    let source = TempDir::new("backup-pre-inside-source");
+    let data = make_data_dir(&source);
+    let db = make_db(&data);
+    let archive = db.export_backup(&options(&data)).unwrap();
+    drop(db);
+
+    let destination = TempDir::new("backup-pre-inside-destination");
+    let target = destination.join("data");
+    import_backup_bytes(&options(&target), &archive).expect("initial import");
+
+    let mut restore_options = options(&target);
+    restore_options.pre_restore_backup_dir = Some(target.join("backup"));
+    let report = import_backup_bytes(&restore_options, &archive).expect("restore");
+    assert!(report.pre_restore_archive.is_none());
+    assert!(!target.join("backup").exists());
+}
+
+#[test]
+fn restore_pending_removes_backup_zip_extracted_from_the_archive() {
+    let source = TempDir::new("backup-pending-nested-source");
+    let data = make_data_dir(&source);
+    let db = make_db(&data);
+    let database = snapshot_bytes(&db);
+    drop(db);
+
+    let archive = build_zip(&[
+        (BACKUP_MARKUP_NAME, MARKER),
+        (BACKUP_DB_NAME, &database),
+        ("backup.zip", b"nested pending archive"),
+    ]);
+
+    let destination = TempDir::new("backup-pending-nested-destination");
+    let target = destination.join("data");
+    fs::create_dir_all(&target).unwrap();
+    fs::write(target.join("backup.zip"), &archive).unwrap();
+
+    restore_pending_backup(&options(&target))
+        .expect("restore")
+        .expect("pending archive");
+    assert!(!target.join("backup.zip").exists());
+    assert!(
+        Db::open(target.join(BACKUP_DB_NAME))
+            .unwrap()
+            .schema_is_current()
+            .unwrap()
+    );
+}
+
+#[test]
+fn restore_pending_rejects_an_oversized_pending_archive() {
+    let source = TempDir::new("backup-pending-large-source");
+    let data = make_data_dir(&source);
+    let db = make_db(&data);
+    let archive = db.export_backup(&options(&data)).unwrap();
+    drop(db);
+
+    let destination = TempDir::new("backup-pending-large-destination");
+    let target = sentinel_target(&destination);
+    fs::write(target.join("backup.zip"), &archive).unwrap();
+
+    let mut limited = options(&target);
+    limited.max_archive_bytes = (archive.len() - 1) as u64;
+    let error = restore_pending_backup(&limited).unwrap_err();
+    assert!(matches!(error, DbError::BackupLimit(_)), "{error}");
+    assert!(target.join("backup.zip").is_file());
+    assert_sentinel(&target);
+}
+
+#[cfg(unix)]
+#[test]
+fn export_refuses_symlinked_database_destinations() {
+    let source = TempDir::new("backup-symlink-destination-source");
+    let data = make_data_dir(&source);
+    let db = make_db(&data);
+
+    let link_dir = source.join("link");
+    std::os::unix::fs::symlink(&data, &link_dir).unwrap();
+    let error = db
+        .export_backup_to(&options(&data), link_dir.join(BACKUP_DB_NAME))
+        .unwrap_err();
+    assert!(matches!(&error, DbError::InvalidData(_)), "{error}");
+
+    let link_file = source.join("db-link");
+    std::os::unix::fs::symlink(data.join(BACKUP_DB_NAME), &link_file).unwrap();
+    let error = db
+        .export_backup_to(&options(&data), &link_file)
+        .unwrap_err();
+    assert!(matches!(&error, DbError::InvalidData(_)), "{error}");
+
+    assert!(
+        Db::open(data.join(BACKUP_DB_NAME))
+            .unwrap()
+            .schema_is_current()
+            .unwrap()
     );
 }
 
