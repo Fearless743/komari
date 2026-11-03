@@ -126,9 +126,9 @@ pub fn redacted_error(error: &OAuthError, secrets: &[&str]) -> String {
 /// parameters) with `********`.
 ///
 /// Providers call this before turning a transport or response error into an
-/// [`OAuthError`]. `client_secret`, `app_key`, `access_token`, `refresh_token`
-/// and `id_token` values are also masked when they appear as query/form
-/// parameters, so an error URL can be logged safely.
+/// [`OAuthError`]. Parameter names are normalized before comparison, so
+/// `access_token`, `accessToken` and `access-token` are all masked in query,
+/// form and JSON contexts.
 pub fn redact_secrets(message: &str, secrets: &[&str]) -> String {
     let mut result = message.to_owned();
 
@@ -146,15 +146,7 @@ pub fn redact_secrets(message: &str, secrets: &[&str]) -> String {
         result = result.replace(secret, "********");
     }
 
-    for parameter in [
-        "client_secret",
-        "appkey",
-        "access_token",
-        "refresh_token",
-        "id_token",
-    ] {
-        result = redact_query_parameter(&result, parameter);
-    }
+    result = redact_query_parameters(&result);
     redact_json_document(&result)
 }
 
@@ -219,35 +211,58 @@ pub(crate) fn is_sensitive_key(key: &str) -> bool {
             | "appkey"
             | "secret"
             | "code"
+            | "state"
             | "token"
             | "password"
+            | "passwd"
+            | "twofactor"
+            | "twofactorsecret"
+            | "totp"
+            | "totpsecret"
     )
 }
 
-fn redact_query_parameter(input: &str, parameter: &str) -> String {
-    let needle = format!("{parameter}=");
+fn redact_query_parameters(input: &str) -> String {
+    let bytes = input.as_bytes();
     let mut output = String::with_capacity(input.len());
-    let mut rest = input;
+    let mut copied_until = 0;
+    let mut index = 0;
 
-    while let Some(index) = rest.find(&needle) {
-        let (before, after) = rest.split_at(index);
-        output.push_str(before);
-        output.push_str(&needle);
-        output.push_str("********");
-
-        let value = &after[needle.len()..];
-        let end = value
-            .find(|character: char| {
-                matches!(
-                    character,
-                    '&' | '#' | ' ' | '\t' | '\n' | '\r' | '"' | '\'' | '}' | ']'
-                )
-            })
-            .unwrap_or(value.len());
-        rest = &value[end..];
+    while index < bytes.len() {
+        if bytes[index] == b'=' {
+            let mut key_start = index;
+            while key_start > 0 && is_parameter_name_byte(bytes[key_start - 1]) {
+                key_start -= 1;
+            }
+            if key_start < index {
+                let key = &input[key_start..index];
+                if is_sensitive_key(key) {
+                    output.push_str(&input[copied_until..key_start]);
+                    output.push_str(key);
+                    output.push_str("=********");
+                    let mut value_end = index + 1;
+                    while value_end < bytes.len()
+                        && !matches!(
+                            bytes[value_end],
+                            b'&' | b'#' | b' ' | b'\t' | b'\n' | b'\r' | b'"' | b'\'' | b'}' | b']'
+                        )
+                    {
+                        value_end += 1;
+                    }
+                    copied_until = value_end;
+                    index = value_end;
+                    continue;
+                }
+            }
+        }
+        index += 1;
     }
-    output.push_str(rest);
+    output.push_str(&input[copied_until..]);
     output
+}
+
+fn is_parameter_name_byte(byte: u8) -> bool {
+    byte.is_ascii_alphanumeric() || matches!(byte, b'_' | b'-' | b'.')
 }
 
 /// A helper for implementing [`fmt::Debug`] on provider configurations without
@@ -270,6 +285,36 @@ mod tests {
         assert!(!redacted.contains("tok-123"));
         assert!(!redacted.contains("jwt-456"));
         assert!(redacted.contains("********"));
+    }
+
+    #[test]
+    fn redacts_normalized_query_and_form_parameters() {
+        let message = "https://idp/cb?accessToken=camel-value&access-token=kebab-value&clientSecret=client-value&idToken=jwt-value&code=auth-code&state=csrf-state&passwd=hash-value&two_factor=totp-value&totp_secret=totp-key-value";
+        let redacted = redact_secrets(message, &[]);
+        for value in [
+            "camel-value",
+            "kebab-value",
+            "client-value",
+            "jwt-value",
+            "auth-code",
+            "csrf-state",
+            "hash-value",
+            "totp-value",
+            "totp-key-value",
+        ] {
+            assert!(!redacted.contains(value), "leaked {value}: {redacted}");
+        }
+        assert!(redacted.contains("********"));
+    }
+
+    #[test]
+    fn redacts_json_account_secrets() {
+        let message = r#"{"passwd":"hash-value","two_factor":"totp-secret","totp_secret":"totp-key","safe":"ok"}"#;
+        let redacted = redact_secrets(message, &[]);
+        assert!(!redacted.contains("hash-value"));
+        assert!(!redacted.contains("totp-secret"));
+        assert!(!redacted.contains("totp-key"));
+        assert!(redacted.contains("ok"));
     }
 
     #[test]
