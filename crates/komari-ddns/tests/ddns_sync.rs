@@ -295,6 +295,27 @@ async fn load_provider_validates_name_and_configuration() {
 }
 
 #[tokio::test]
+async fn invalid_provider_config_json_falls_back_to_client_overrides() {
+    let db = database();
+    enable_ddns(&db);
+    db.ddns_providers()
+        .save(&ProviderModel::new("test", "not-json"))
+        .expect("save invalid provider config");
+    let (service, state) = service(&db, "", 2);
+    let client = create_client(&db, "client-1", "1.1.1.1");
+
+    service
+        .sync_client(&client, "test", false)
+        .await
+        .expect("invalid provider config must not abort sync");
+
+    assert_eq!(state.calls.lock().unwrap().len(), 1);
+    let history = db.ddns().history("", 50).unwrap();
+    assert_eq!(history[0].status, "success");
+    assert_eq!(history[0].hostname, "node.example.com");
+}
+
+#[tokio::test]
 async fn initialize_persists_defaults_and_loads_selected_provider() {
     let db = database();
     db.ddns_providers()
