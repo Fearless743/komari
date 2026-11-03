@@ -56,18 +56,30 @@ impl ConfigRepo<'_> {
     }
 
     /// Typed decode (Go `config.GetAs`). Returns `None` when the key is absent.
-    pub fn get_as<T: DeserializeOwned>(&self, key: &str) -> Result<Option<T>> {
+    ///
+    /// Values are decoded with the same fallbacks as Go: JSON `null` becomes
+    /// the type's zero value and numbers are converted between integer and
+    /// floating-point targets (a stored `80.0` can be read as `i64`).
+    pub fn get_as<T: DeserializeOwned + Default>(&self, key: &str) -> Result<Option<T>> {
         match self.get_raw(key)? {
-            Some(raw) => Ok(Some(serde_json::from_str(&raw)?)),
+            Some(raw) => {
+                let value: JsonValue = serde_json::from_str(&raw)?;
+                Ok(Some(decode_loose(&value)?))
+            }
             None => Ok(None),
         }
     }
 
     /// Typed decode with a default that is persisted when the key is absent
     /// (Go `config.GetAs` with a default argument).
-    pub fn get_as_or<T: DeserializeOwned + Serialize>(&self, key: &str, default: T) -> Result<T> {
+    pub fn get_as_or<T: DeserializeOwned + Serialize + Default>(
+        &self,
+        key: &str,
+        default: T,
+    ) -> Result<T> {
         if let Some(raw) = self.get_raw(key)? {
-            return Ok(serde_json::from_str(&raw)?);
+            let value: JsonValue = serde_json::from_str(&raw)?;
+            return decode_loose(&value);
         }
         self.set(key, &default)?;
         Ok(default)
@@ -164,4 +176,37 @@ impl ConfigRepo<'_> {
         let count: i64 = conn.query_row("SELECT COUNT(*) FROM configs", [], |row| row.get(0))?;
         Ok(count)
     }
+}
+
+/// Decode a JSON value with Go `config.GetAs`-style fallbacks.
+fn decode_loose<T: DeserializeOwned + Default>(value: &JsonValue) -> Result<T> {
+    // `json.Unmarshal("null", &t)` leaves t at its zero value and returns nil.
+    if value.is_null() {
+        return Ok(T::default());
+    }
+
+    if let Ok(decoded) = serde_json::from_value(value.clone()) {
+        return Ok(decoded);
+    }
+
+    if let Some(number) = value.as_f64() {
+        if !number.is_finite() {
+            return Ok(serde_json::from_value(value.clone())?);
+        }
+        // Go's convertAndSet truncates floats when the target is an integer.
+        let truncated = number.trunc();
+        if truncated >= i64::MIN as f64 && truncated <= i64::MAX as f64 {
+            if let Ok(decoded) = serde_json::from_value(JsonValue::from(truncated as i64)) {
+                return Ok(decoded);
+            }
+        }
+        if truncated >= 0.0 && truncated <= u64::MAX as f64 {
+            if let Ok(decoded) = serde_json::from_value(JsonValue::from(truncated as u64)) {
+                return Ok(decoded);
+            }
+        }
+    }
+
+    // Surface serde's original error for incompatible values.
+    Ok(serde_json::from_value(value.clone())?)
 }

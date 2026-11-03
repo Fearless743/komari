@@ -542,6 +542,34 @@ fn config_get_set_typed_and_defaults() {
 }
 
 #[test]
+fn config_get_as_uses_go_style_loose_conversions() {
+    let db = memory_db();
+    let config = db.config();
+
+    config.set_raw("float_as_int", "80.0").unwrap();
+    assert_eq!(config.get_as::<i64>("float_as_int").unwrap(), Some(80));
+    config.set_raw("fraction_as_int", "80.9").unwrap();
+    assert_eq!(config.get_as::<i64>("fraction_as_int").unwrap(), Some(80));
+
+    config.set_raw("int_as_float", "80").unwrap();
+    assert_eq!(
+        config.get_as::<f64>("int_as_float").unwrap(),
+        Some(80.0_f64)
+    );
+
+    config.set_raw("null_value", "null").unwrap();
+    assert_eq!(config.get_as::<i64>("null_value").unwrap(), Some(0));
+    assert_eq!(
+        config.get_as::<String>("null_value").unwrap(),
+        Some(String::new())
+    );
+    assert_eq!(config.get_as::<bool>("null_value").unwrap(), Some(false));
+
+    // `get_as_or` also uses the loose conversion for existing values.
+    assert_eq!(config.get_as_or("float_as_int", 0_i64).unwrap(), 80_i64);
+}
+
+#[test]
 fn notifications_offline_and_load() {
     let db = memory_db();
     let client = db.clients().create_named("node").unwrap();

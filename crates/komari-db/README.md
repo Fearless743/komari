@@ -136,6 +136,6 @@ real configuration values.
 - The pre-1.0.2 migrations that moved OAuth/notification settings out of the
   old `configs` columns are not re-run; databases from that era should be
   opened once with the Go backend first.
-- `ConfigRepo::get_as<T>` uses serde's conversion rules. Values that need
-  Go-style lossy numeric coercion (for example an integer stored as a JSON
-  float) should be decoded as `f64` or converted by the caller.
+- `ConfigRepo::get_as<T>` applies the same fallbacks as Go `config.GetAs`:
+  `null` becomes the type's zero value and integers/floats are converted
+  between numeric target types (for example a stored `80.0` reads as `i64`).
