@@ -257,7 +257,6 @@ CREATE TABLE IF NOT EXISTS `gpu_records_long_term` (
 "#;
 
 const INDEX_SQL: &str = r#"
-CREATE UNIQUE INDEX IF NOT EXISTS `idx_sessions_session` ON `sessions`(`session`);
 CREATE INDEX IF NOT EXISTS `idx_offline_notifications_client` ON `offline_notifications`(`client`);
 CREATE INDEX IF NOT EXISTS `idx_ddns_sync_history_client_uuid` ON `ddns_sync_history`(`client_uuid`);
 CREATE INDEX IF NOT EXISTS `idx_records_client` ON `records`(`client`);
@@ -373,6 +372,312 @@ fn add_missing_columns(tx: &rusqlite::Transaction<'_>) -> crate::error::Result<(
     Ok(())
 }
 
+fn table_exists_tx(tx: &rusqlite::Transaction<'_>, table: &str) -> rusqlite::Result<bool> {
+    let count: i64 = tx.query_row(
+        "SELECT COUNT(*) FROM sqlite_master WHERE type = 'table' AND name = ?1",
+        [table],
+        |row| row.get(0),
+    )?;
+    Ok(count > 0)
+}
+
+fn index_columns(
+    tx: &rusqlite::Transaction<'_>,
+    index: &str,
+) -> rusqlite::Result<Vec<Option<String>>> {
+    let mut stmt = tx.prepare(&format!("PRAGMA index_info(`{index}`)"))?;
+    let rows = stmt.query_map([], |row| row.get::<_, Option<String>>(2))?;
+    rows.collect()
+}
+
+fn has_unique_column(
+    tx: &rusqlite::Transaction<'_>,
+    table: &str,
+    column: &str,
+) -> rusqlite::Result<bool> {
+    let mut stmt = tx.prepare(&format!("PRAGMA index_list(`{table}`)"))?;
+    let indexes = stmt
+        .query_map([], |row| {
+            Ok((row.get::<_, String>(1)?, row.get::<_, i64>(2)?))
+        })?
+        .collect::<rusqlite::Result<Vec<_>>>()?;
+
+    for (name, unique) in indexes {
+        if unique == 0 {
+            continue;
+        }
+        let columns = index_columns(tx, &name)?;
+        if columns.len() == 1
+            && columns[0]
+                .as_deref()
+                .is_some_and(|value| value.eq_ignore_ascii_case(column))
+        {
+            return Ok(true);
+        }
+    }
+    Ok(false)
+}
+
+fn ensure_no_duplicates(
+    tx: &rusqlite::Transaction<'_>,
+    table: &str,
+    column: &str,
+) -> crate::error::Result<()> {
+    let duplicates: i64 = tx.query_row(
+        &format!(
+            "SELECT COUNT(*) FROM (\
+                 SELECT `{column}` FROM `{table}` \
+                 WHERE `{column}` IS NOT NULL \
+                 GROUP BY `{column}` HAVING COUNT(*) > 1\
+             )"
+        ),
+        [],
+        |row| row.get(0),
+    )?;
+    if duplicates > 0 {
+        return Err(crate::error::DbError::InvalidData(format!(
+            "cannot restore unique constraint on {table}.{column}: {duplicates} duplicate value(s)"
+        )));
+    }
+    Ok(())
+}
+
+/// Old tables often predate unique constraints. Restore them with a unique
+/// index (functionally identical to a `UNIQUE` constraint) when the data has
+/// no duplicates. Empty identifiers get a synthetic rowid-based value first so
+/// additive migrations remain usable.
+fn ensure_unique_columns(tx: &rusqlite::Transaction<'_>) -> crate::error::Result<()> {
+    // Backfill identifiers that were added as empty columns by the migration.
+    for (table, column) in [
+        ("clients", "token"),
+        ("users", "username"),
+        ("sessions", "session"),
+    ] {
+        if table_exists_tx(tx, table)? {
+            tx.execute(
+                &format!(
+                    "UPDATE `{table}` SET `{column}` = 'legacy-' || rowid \
+                     WHERE `{column}` IS NULL OR `{column}` = ''"
+                ),
+                [],
+            )?;
+        }
+    }
+
+    // The canonical schema keeps both the primary key and this explicit index.
+    if table_exists_tx(tx, "sessions")? && !has_unique_column(tx, "sessions", "session")? {
+        ensure_no_duplicates(tx, "sessions", "session")?;
+    }
+    tx.execute(
+        "CREATE UNIQUE INDEX IF NOT EXISTS `idx_sessions_session` ON `sessions`(`session`)",
+        [],
+    )?;
+
+    for (table, column, index) in [
+        ("users", "username", "uni_users_username"),
+        ("clients", "token", "uni_clients_token"),
+        ("oidc_providers", "name", "uni_oidc_providers_name"),
+        (
+            "message_sender_providers",
+            "name",
+            "uni_message_sender_providers_name",
+        ),
+        ("ddns_providers", "name", "uni_ddns_providers_name"),
+        (
+            "offline_notifications",
+            "client",
+            "uni_offline_notifications_client",
+        ),
+        (
+            "theme_configurations",
+            "short",
+            "uni_theme_configurations_short",
+        ),
+        ("configs", "key", "uni_configs_key"),
+    ] {
+        if has_unique_column(tx, table, column)? {
+            continue;
+        }
+        ensure_no_duplicates(tx, table, column)?;
+        tx.execute(
+            &format!("CREATE UNIQUE INDEX IF NOT EXISTS `{index}` ON `{table}`(`{column}`)"),
+            [],
+        )?;
+    }
+    Ok(())
+}
+
+#[derive(Debug)]
+enum LegacyCell {
+    Null,
+    Integer(i64),
+    Real(f64),
+    Text(String),
+    Blob,
+}
+
+fn read_legacy_config(
+    tx: &rusqlite::Transaction<'_>,
+    table: &str,
+) -> crate::error::Result<Vec<(String, LegacyCell)>> {
+    let columns = actual_columns(tx, table)?;
+    let mut stmt = tx.prepare(&format!("SELECT * FROM `{table}` LIMIT 1"))?;
+    let mut rows = stmt.query([])?;
+    let Some(row) = rows.next()? else {
+        return Ok(Vec::new());
+    };
+
+    let mut values = Vec::with_capacity(columns.len());
+    for (index, name) in columns.into_iter().enumerate() {
+        let cell = match row.get_ref(index)? {
+            rusqlite::types::ValueRef::Null => LegacyCell::Null,
+            rusqlite::types::ValueRef::Integer(value) => LegacyCell::Integer(value),
+            rusqlite::types::ValueRef::Real(value) => LegacyCell::Real(value),
+            rusqlite::types::ValueRef::Text(value) => {
+                LegacyCell::Text(String::from_utf8_lossy(value).into_owned())
+            }
+            rusqlite::types::ValueRef::Blob(_) => LegacyCell::Blob,
+        };
+        values.push((name, cell));
+    }
+    Ok(values)
+}
+
+fn legacy_bool(cell: &LegacyCell) -> bool {
+    match cell {
+        LegacyCell::Integer(value) => *value != 0,
+        LegacyCell::Real(value) => *value != 0.0,
+        LegacyCell::Text(value) => {
+            matches!(
+                value.trim().to_ascii_lowercase().as_str(),
+                "1" | "true" | "yes"
+            )
+        }
+        LegacyCell::Null | LegacyCell::Blob => false,
+    }
+}
+
+fn legacy_i64(cell: &LegacyCell) -> i64 {
+    match cell {
+        LegacyCell::Integer(value) => *value,
+        LegacyCell::Real(value) => *value as i64,
+        LegacyCell::Text(value) => value
+            .trim()
+            .parse::<i64>()
+            .or_else(|_| value.trim().parse::<f64>().map(|number| number as i64))
+            .unwrap_or_default(),
+        LegacyCell::Null | LegacyCell::Blob => 0,
+    }
+}
+
+fn legacy_f64(cell: &LegacyCell) -> f64 {
+    match cell {
+        LegacyCell::Integer(value) => *value as f64,
+        LegacyCell::Real(value) => *value,
+        LegacyCell::Text(value) => value.trim().parse::<f64>().unwrap_or_default(),
+        LegacyCell::Null | LegacyCell::Blob => 0.0,
+    }
+}
+
+fn legacy_string(cell: &LegacyCell) -> String {
+    match cell {
+        LegacyCell::Text(value) => value.clone(),
+        LegacyCell::Integer(value) => value.to_string(),
+        LegacyCell::Real(value) => value.to_string(),
+        LegacyCell::Null | LegacyCell::Blob => String::new(),
+    }
+}
+
+fn legacy_config_value(column: &str, cell: &LegacyCell) -> Option<serde_json::Value> {
+    let name = column.to_ascii_lowercase();
+    if matches!(name.as_str(), "id" | "created_at" | "updated_at") {
+        return None;
+    }
+    let boolean = matches!(
+        name.as_str(),
+        "allow_cors"
+            | "private_site"
+            | "send_ip_addr_to_guest"
+            | "eula_accepted"
+            | "geo_ip_enabled"
+            | "ddns_enabled"
+            | "o_auth_enabled"
+            | "disable_password_login"
+            | "notification_enabled"
+            | "expire_notification_enabled"
+            | "login_notification"
+            | "record_enabled"
+    );
+    let integer = matches!(
+        name.as_str(),
+        "ddns_sync_interval" | "expire_notification_lead_days" | "record_preserve_time"
+    );
+    let float = name == "traffic_limit_percentage";
+
+    Some(if boolean {
+        serde_json::Value::Bool(legacy_bool(cell))
+    } else if integer {
+        serde_json::Value::Number(serde_json::Number::from(legacy_i64(cell)))
+    } else if float {
+        serde_json::Number::from_f64(legacy_f64(cell))
+            .map(serde_json::Value::Number)
+            .unwrap_or(serde_json::Value::Null)
+    } else {
+        serde_json::Value::String(legacy_string(cell))
+    })
+}
+
+/// Convert a pre-1.1.4 single-row `configs` table into the current key/value
+/// form. The old table is renamed to `configs_legacy_backup` instead of being
+/// dropped, so no data is lost.
+fn convert_legacy_configs(tx: &rusqlite::Transaction<'_>) -> crate::error::Result<()> {
+    let mut backup = "configs_legacy_backup".to_owned();
+    let mut suffix = 2;
+    while table_exists_tx(tx, &backup)? {
+        backup = format!("configs_legacy_backup_{suffix}");
+        suffix += 1;
+    }
+
+    let values = read_legacy_config(tx, "configs")?;
+    tx.execute_batch(&format!("ALTER TABLE `configs` RENAME TO `{backup}`"))?;
+    tx.execute_batch("CREATE TABLE `configs` (`key` text, `value` text, PRIMARY KEY (`key`))")?;
+
+    for (column, cell) in values {
+        let Some(value) = legacy_config_value(&column, &cell) else {
+            continue;
+        };
+        tx.execute(
+            "INSERT OR REPLACE INTO `configs` (`key`, `value`) VALUES (?1, ?2)",
+            rusqlite::params![column, serde_json::to_string(&value)?],
+        )?;
+    }
+    Ok(())
+}
+
+fn configs_need_conversion(tx: &rusqlite::Transaction<'_>) -> crate::error::Result<bool> {
+    if !table_exists_tx(tx, "configs")? {
+        return Ok(false);
+    }
+    let columns = actual_columns(tx, "configs")?;
+    if columns
+        .iter()
+        .any(|column| column.eq_ignore_ascii_case("key"))
+    {
+        return Ok(false);
+    }
+    if columns
+        .iter()
+        .any(|column| column.eq_ignore_ascii_case("sitename"))
+    {
+        return Ok(true);
+    }
+    Err(crate::error::DbError::InvalidData(
+        "unsupported legacy configs table: expected either (key, value) or a \
+         single-row configuration with a sitename column"
+            .to_owned(),
+    ))
+}
+
 impl Db {
     /// Create every missing table and index, and add missing columns to old
     /// tables. Safe to call on every startup and safe to call repeatedly on an
@@ -397,11 +702,18 @@ impl Db {
 
         let mut conn = self.conn();
         let tx = conn.transaction()?;
+        // Convert the pre-1.1.4 single-row configs table before generic
+        // column repair, because its schema is structurally different.
+        if configs_need_conversion(&tx)? {
+            convert_legacy_configs(&tx)?;
+        }
         // Tables first: older tables keep their existing definition.
         tx.execute_batch(SCHEMA_SQL)?;
         // Then add any columns the old table is missing, so the index DDL and
         // repository queries below never reference a non-existent column.
         add_missing_columns(&tx)?;
+        // Restore unique constraints that old tables may never have had.
+        ensure_unique_columns(&tx)?;
         // Indexes last: they can reference columns added in the step above.
         tx.execute_batch(INDEX_SQL)?;
         // Older `sessions` tables had no `expires` column, so the additive

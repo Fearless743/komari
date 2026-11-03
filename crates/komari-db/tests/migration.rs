@@ -91,6 +91,133 @@ fn legacy_sessions_without_expiry_are_expired() {
 }
 
 #[test]
+fn legacy_configs_are_converted_to_key_value() {
+    let dir = TempDir::new("legacy-configs");
+    let path = dir.join("komari.db");
+    let db = Db::open(&path).unwrap();
+
+    db.with_connection(|conn| {
+        conn.execute_batch(
+            "CREATE TABLE configs (\
+                 `id` integer PRIMARY KEY AUTOINCREMENT, \
+                 `sitename` varchar(100), \
+                 `allow_cors` boolean, \
+                 `record_preserve_time` integer, \
+                 `traffic_limit_percentage` float\
+             );\
+             INSERT INTO configs (sitename, allow_cors, record_preserve_time, traffic_limit_percentage) \
+             VALUES ('Old Site', 1, 123, 80.5);",
+        )?;
+        Ok(())
+    })
+    .unwrap();
+
+    db.migrate().unwrap();
+
+    let config = db.config();
+    assert_eq!(
+        config.get_as::<String>("sitename").unwrap().as_deref(),
+        Some("Old Site")
+    );
+    assert_eq!(config.get_as::<bool>("allow_cors").unwrap(), Some(true));
+    assert_eq!(
+        config.get_as::<i64>("record_preserve_time").unwrap(),
+        Some(123)
+    );
+    assert_eq!(
+        config.get_as::<f64>("traffic_limit_percentage").unwrap(),
+        Some(80.5)
+    );
+
+    // The key/value table is fully usable (ON CONFLICT on the primary key).
+    config.set("theme", "dark").unwrap();
+    assert_eq!(
+        config.get_as::<String>("theme").unwrap().as_deref(),
+        Some("dark")
+    );
+
+    // The original single row is preserved in the backup table.
+    assert!(db.table_exists("configs_legacy_backup").unwrap());
+    let backup_rows: i64 = db
+        .with_connection(|conn| {
+            Ok(
+                conn.query_row("SELECT COUNT(*) FROM configs_legacy_backup", [], |row| {
+                    row.get(0)
+                })?,
+            )
+        })
+        .unwrap();
+    assert_eq!(backup_rows, 1);
+}
+
+#[test]
+fn unsupported_configs_schema_returns_a_clear_error() {
+    let dir = TempDir::new("bad-configs");
+    let path = dir.join("komari.db");
+    let db = Db::open(&path).unwrap();
+    db.with_connection(|conn| {
+        conn.execute_batch(
+            "CREATE TABLE configs (`foo` text); INSERT INTO configs VALUES ('bar');",
+        )?;
+        Ok(())
+    })
+    .unwrap();
+
+    let error = db.migrate().unwrap_err();
+    assert!(
+        matches!(error, komari_db::DbError::InvalidData(ref message) if message.contains("configs")),
+        "unexpected error: {error}"
+    );
+}
+
+#[test]
+fn migration_restores_missing_unique_constraints() {
+    let dir = TempDir::new("old-unique");
+    let path = dir.join("komari.db");
+    let db = Db::open(&path).unwrap();
+
+    db.with_connection(|conn| {
+        conn.execute_batch(
+            "CREATE TABLE clients (\
+                 `uuid` varchar(36) PRIMARY KEY, \
+                 `token` varchar(255) NOT NULL, \
+                 `name` varchar(100)\
+             );\
+             INSERT INTO clients VALUES ('c1', 'token-1', 'one');\
+             INSERT INTO clients VALUES ('c2', 'token-2', 'two');\
+             CREATE TABLE users (\
+                 `uuid` varchar(36) PRIMARY KEY, \
+                 `username` varchar(50) NOT NULL, \
+                 `passwd` varchar(255) NOT NULL\
+             );\
+             INSERT INTO users VALUES ('u1', 'admin', 'hash');\
+             INSERT INTO users VALUES ('u2', 'other', 'hash');",
+        )?;
+        Ok(())
+    })
+    .unwrap();
+
+    db.migrate().unwrap();
+
+    let existing = db.clients().require("c1").unwrap();
+    let duplicate_client = komari_db::models::Client {
+        uuid: "c3".to_owned(),
+        token: existing.token.clone(),
+        name: "duplicate".to_owned(),
+        ..komari_db::models::Client::default()
+    };
+    assert!(db.clients().create(&duplicate_client).is_err());
+
+    let duplicate_user = komari_db::models::User {
+        uuid: "u3".to_owned(),
+        username: "admin".to_owned(),
+        passwd: "hash".to_owned(),
+        ..komari_db::models::User::default()
+    };
+    assert!(db.accounts().insert(&duplicate_user).is_err());
+}
+
+#[test]
 fn migration_adds_columns_before_building_indexes() {
     let dir = TempDir::new("old-indexed");
     let path = dir.join("komari.db");
