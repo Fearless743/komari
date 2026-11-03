@@ -115,8 +115,11 @@ Errors are defined by `DbError` (`thiserror`); lookups return
 - `TZ` selects the application timezone (unset/empty means UTC, matching Go).
 - `LocalTime::from_instant` converts absolute date-times into the application
   timezone (the equivalent of Go `FromTime` + `.In(GetAppLocation())`);
-  `LocalTime::now_and_after` starts from the fold-aware `Local::now()` and adds
-  an absolute duration, so session expiry stays correct across DST transitions.
+  `LocalTime::now_and_after`/`absolute_after` return absolute `DateTime<Utc>`
+  pairs (a DST-fold pair still differs by exactly the requested duration), and
+  `Session::expires_instant` keeps the absolute expiry for in-process expiry
+  checks. The database stores wall clocks only, so the two sides of an autumn
+  fold format identically — the same limitation as Go's `LocalTime`.
 
 `StringArray` stores a JSON array of strings, matching `models.StringArray`.
 Its zero value serializes as `null` (Go's nil slice) and both `null` and SQL
