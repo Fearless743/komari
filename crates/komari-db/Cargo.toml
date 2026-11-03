@@ -9,6 +9,7 @@ license.workspace = true
 base64 = "0.22"
 bcrypt = { workspace = true }
 chrono = { workspace = true }
+libc = "0.2"
 parking_lot = { workspace = true, features = ["arc_lock"] }
 rand = { workspace = true }
 rusqlite = { workspace = true, features = ["backup"] }

@@ -730,6 +730,20 @@ fn replace_data_dir(staging: &Path, data_dir: &Path) -> Result<bool> {
         return Ok(false);
     }
 
+    // Linux can swap the two directory entries atomically, so there is never a
+    // window where `data_dir` does not exist. Other platforms fall back to the
+    // two-rename sequence below.
+    if exchange_directories(staging, data_dir).is_ok() {
+        // `staging` now contains the old data directory.
+        if let Err(error) = fs::remove_dir_all(staging) {
+            eprintln!(
+                "komari-db backup: could not remove previous data at {}: {error}",
+                staging.display()
+            );
+        }
+        return Ok(true);
+    }
+
     let previous = unique_path(parent, ".komari-backup-previous");
     fs::rename(data_dir, &previous)?;
     match fs::rename(staging, data_dir) {
@@ -744,6 +758,42 @@ fn replace_data_dir(staging: &Path, data_dir: &Path) -> Result<bool> {
             Err(error.into())
         }
     }
+}
+
+#[cfg(target_os = "linux")]
+fn exchange_directories(left: &Path, right: &Path) -> io::Result<()> {
+    use std::ffi::CString;
+    use std::os::unix::ffi::OsStrExt;
+
+    let left = CString::new(left.as_os_str().as_bytes())
+        .map_err(|_| io::Error::new(io::ErrorKind::InvalidInput, "path contains NUL"))?;
+    let right = CString::new(right.as_os_str().as_bytes())
+        .map_err(|_| io::Error::new(io::ErrorKind::InvalidInput, "path contains NUL"))?;
+
+    // SAFETY: both pointers are valid NUL-terminated strings for the duration
+    // of the call and `AT_FDCWD` is a valid dirfd.
+    let result = unsafe {
+        libc::renameat2(
+            libc::AT_FDCWD,
+            left.as_ptr(),
+            libc::AT_FDCWD,
+            right.as_ptr(),
+            libc::RENAME_EXCHANGE,
+        )
+    };
+    if result == 0 {
+        Ok(())
+    } else {
+        Err(io::Error::last_os_error())
+    }
+}
+
+#[cfg(not(target_os = "linux"))]
+fn exchange_directories(_left: &Path, _right: &Path) -> io::Result<()> {
+    Err(io::Error::new(
+        io::ErrorKind::Unsupported,
+        "atomic directory exchange is only available on Linux",
+    ))
 }
 
 fn collect_data_entries(

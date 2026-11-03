@@ -1082,6 +1082,7 @@ dependencies = [
  "base64 0.22.1",
  "bcrypt",
  "chrono",
+ "libc",
  "parking_lot",
  "rand 0.8.8",
  "rusqlite",
