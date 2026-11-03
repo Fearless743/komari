@@ -8,6 +8,7 @@
 //! [`crate::client_router`]. [`public_router_with_state`] also installs B03's
 //! private-site middleware, which is the Go server's global behaviour.
 
+mod login;
 mod nodes;
 mod settings;
 mod version;
@@ -17,7 +18,7 @@ use axum::Router;
 use axum::http::header::{COOKIE, HOST, USER_AGENT};
 use axum::http::{HeaderMap, HeaderValue, StatusCode, header};
 use axum::response::{IntoResponse, Response};
-use axum::routing::{any, get};
+use axum::routing::{any, get, post};
 use komari_auth::PrivateSite;
 use serde_json::{Value, json};
 
@@ -55,6 +56,9 @@ pub fn public_router() -> Router<ApiState> {
         .route("/api/nodes", get(nodes::get_nodes))
         .route("/api/public", get(settings::get_public_settings))
         .route("/api/version", get(version::get_version))
+        .route("/api/me", get(login::get_me))
+        .route("/api/login", post(login::login))
+        .route("/api/logout", get(login::logout))
 }
 
 /// Public routes with state, including the private-site guard.
