@@ -171,6 +171,17 @@ async fn server_starts_and_serves_ping() {
 }
 
 #[tokio::test]
+async fn server_initializes_the_geoip_service() {
+    let dir = TempDir::new().expect("temp dir");
+    let server = Server::start(server_config(&dir))
+        .await
+        .expect("start server");
+    let geoip = server.state().geoip.as_ref().expect("geoip service");
+    assert_ne!(geoip.provider_key(), "empty");
+    assert_eq!(geoip.provider_key(), "ipinfo");
+}
+
+#[tokio::test]
 async fn server_mounts_client_routes_and_static_fallback() {
     let dir = TempDir::new().expect("temp dir");
     let server = build(server_config(&dir), memory_db()).await;

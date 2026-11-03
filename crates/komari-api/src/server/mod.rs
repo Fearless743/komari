@@ -222,15 +222,16 @@ impl ServerBuilder {
             }
         };
 
-        if state.geoip.is_none() {
-            let geoip = Arc::new(GeoIpService::new().with_database(state.db.clone()));
-            if self.initialize_services {
-                if let Err(error) = geoip.initialize().await {
-                    warn!(%error, "failed to initialize GeoIP; continuing without lookups");
-                }
+        let geoip = match state.geoip.clone() {
+            Some(service) => service,
+            None => Arc::new(GeoIpService::new().with_database(state.db.clone())),
+        };
+        if self.initialize_services {
+            if let Err(error) = geoip.initialize().await {
+                warn!(%error, "failed to initialize GeoIP; continuing without lookups");
             }
-            state = state.with_geoip_service(geoip);
         }
+        state = state.with_geoip_service(geoip);
 
         let db = state.db.clone();
         let oauth = self.oauth.unwrap_or_default();
