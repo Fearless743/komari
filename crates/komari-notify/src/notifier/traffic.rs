@@ -135,6 +135,9 @@ pub fn check_traffic(
     tracker: &mut TrafficTracker,
     now: DateTime<Utc>,
 ) -> Result<Vec<TrafficAlert>> {
+    // Go's cache janitor runs independently of reports; purge expired entries
+    // even when there is nothing to evaluate.
+    tracker.purge_expired(now);
     if reports.is_empty() {
         return Ok(Vec::new());
     }
@@ -228,6 +231,16 @@ mod tests {
         db.clients().create(&client).unwrap();
         db.config().set("traffic_limit_percentage", &80.0).unwrap();
         (db, client.uuid)
+    }
+
+    #[test]
+    fn empty_reports_still_purge_expired_steps() {
+        let (db, uuid) = db_with_client(1000, "sum");
+        let mut tracker = TrafficTracker::new();
+        assert!(tracker.should_notify(&uuid, 80, now()));
+        let reports = HashMap::new();
+        check_traffic(&db, &reports, &mut tracker, now() + TimeDelta::days(31)).unwrap();
+        assert_eq!(tracker.last_step(&uuid), None);
     }
 
     #[test]
