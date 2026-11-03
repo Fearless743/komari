@@ -119,22 +119,22 @@ fn reference_database_is_readable_and_has_expected_tables() {
     if all.is_empty() {
         eprintln!("reference database has an empty configs table; skipping value assertions");
     } else {
+        // Values differ between installations, so only assert shape/validity.
         let sitename = config
             .get_as::<String>("sitename")
             .expect("read sitename")
             .expect("sitename must exist");
-        assert_eq!(sitename, "Komari");
-        assert_eq!(
-            config.get("theme").unwrap().unwrap(),
-            serde_json::json!("default")
-        );
-        assert_eq!(
-            config
-                .get_as::<i64>("record_preserve_time")
-                .unwrap()
-                .unwrap(),
-            720
-        );
+        assert!(!sitename.is_empty());
+        let theme = config
+            .get("theme")
+            .expect("read theme")
+            .expect("theme must exist");
+        assert!(theme.is_string());
+        let preserve = config
+            .get_as::<i64>("record_preserve_time")
+            .unwrap()
+            .expect("record_preserve_time must exist");
+        assert!(preserve > 0);
         assert!(all.contains_key("sitename"));
     }
 
@@ -171,7 +171,46 @@ fn migrating_a_copy_of_the_reference_database_preserves_data() {
 
     let dir = TempDir::new("reference-copy");
     let copy = dir.join("komari.db");
-    std::fs::copy(&path, &copy).expect("copy reference database");
+    // VACUUM INTO produces a transactionally consistent snapshot including
+    // any WAL content, unlike copying the main file alone.
+    let copied_with_vacuum = {
+        let source = Db::open_read_only(&path).unwrap();
+        let destination = copy.to_string_lossy().into_owned();
+        source
+            .with_connection(|conn| {
+                conn.execute("VACUUM INTO ?1", [destination.as_str()])?;
+                Ok(())
+            })
+            .is_ok()
+    };
+    if !copied_with_vacuum {
+        // Fallback for SQLite builds without VACUUM INTO: copy the database
+        // and its WAL sidecars.
+        std::fs::copy(&path, &copy).expect("copy reference database");
+        for suffix in ["-wal", "-shm"] {
+            let source = format!("{path}{suffix}");
+            if Path::new(&source).exists() {
+                std::fs::copy(&source, format!("{}{suffix}", copy.display()))
+                    .expect("copy sqlite sidecar");
+            }
+        }
+    }
+
+    // The snapshot must already match the source before migration runs.
+    let source = Db::open_read_only(&path).unwrap();
+    let snapshot = Db::open_read_only(&copy).unwrap();
+    assert_eq!(
+        source.config().count().unwrap(),
+        snapshot.config().count().unwrap()
+    );
+    assert_eq!(
+        source.accounts().count().unwrap(),
+        snapshot.accounts().count().unwrap()
+    );
+    assert_eq!(
+        source.sessions().count().unwrap(),
+        snapshot.sessions().count().unwrap()
+    );
 
     let db = Db::open(&copy).expect("open copied database");
     let before = db.config().count().unwrap();
@@ -187,7 +226,8 @@ fn migrating_a_copy_of_the_reference_database_preserves_data() {
     assert_eq!(db.sessions().count().unwrap(), sessions_before);
     assert!(db.schema_is_current().unwrap());
     if before > 0 {
-        assert!(db.config().get("sitename").unwrap().is_some());
+        // Every configuration row is still present and readable.
+        assert_eq!(db.config().get_all().unwrap().len(), before as usize);
     }
 
     // New writes still work on the upgraded copy.
