@@ -694,14 +694,9 @@ fn marker_uses_go_rfc3339_second_precision_without_newline() {
     let timestamp = text.rsplit(": ").next().unwrap();
     assert!(timestamp.contains('T'));
     assert!(!timestamp.contains('.'), "{timestamp}");
-    if let Some(prefix) = timestamp.strip_suffix('Z') {
-        assert_eq!(prefix.len(), 19, "{timestamp}");
-    } else {
-        assert_eq!(timestamp.len(), 25, "{timestamp}");
-        let bytes = timestamp.as_bytes();
-        assert!(bytes[19] == b'+' || bytes[19] == b'-', "{timestamp}");
-        assert_eq!(bytes[22], b':', "{timestamp}");
-    }
+    // The exact `Z`/`±HH:MM` choice is covered by the injectable-clock unit
+    // tests in backup.rs; this integration check only validates the archive
+    // payload shape.
 }
 
 #[test]

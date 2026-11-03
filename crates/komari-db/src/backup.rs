@@ -1081,13 +1081,17 @@ fn add_directory<W: Write + Seek>(zip: &mut ZipWriter<W>, name: &str, mode: u32)
 }
 
 fn markup_content() -> String {
-    // Go uses time.RFC3339: second precision, numeric offset, no trailing
-    // newline.
+    markup_content_at(chrono::Local::now().fixed_offset())
+}
+
+fn markup_content_at(now: chrono::DateTime<chrono::FixedOffset>) -> String {
+    // Go uses time.RFC3339: second precision, `Z` for UTC, numeric offset
+    // otherwise, and no trailing newline.
     format!(
         "此文件为 Komari 备份标记文件，请勿删除。\n\
          This is a Komari backup markup file, please do not delete.\n\n\
          备份时间 / Backup Time: {}",
-        chrono::Local::now().to_rfc3339_opts(chrono::SecondsFormat::Secs, true)
+        now.to_rfc3339_opts(chrono::SecondsFormat::Secs, true)
     )
 }
 
@@ -1179,5 +1183,33 @@ impl Drop for TempDirGuard {
         if self.armed {
             let _ = fs::remove_dir_all(&self.path);
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use chrono::{FixedOffset, TimeZone};
+
+    #[test]
+    fn markup_formats_utc_with_z() {
+        let utc = FixedOffset::east_opt(0)
+            .unwrap()
+            .with_ymd_and_hms(2026, 11, 4, 1, 2, 3)
+            .unwrap();
+        let content = markup_content_at(utc);
+        assert!(content.ends_with("2026-11-04T01:02:03Z"), "{content}");
+        assert!(!content.ends_with('\n'));
+    }
+
+    #[test]
+    fn markup_formats_non_utc_with_numeric_offset() {
+        let east8 = FixedOffset::east_opt(8 * 3600)
+            .unwrap()
+            .with_ymd_and_hms(2026, 11, 4, 1, 2, 3)
+            .unwrap();
+        let content = markup_content_at(east8);
+        assert!(content.ends_with("2026-11-04T01:02:03+08:00"), "{content}");
+        assert!(!content.ends_with('\n'));
     }
 }
