@@ -48,11 +48,7 @@ pub async fn register_client(
             .into_response();
     }
 
-    let requested = query
-        .get("name")
-        .map(String::as_str)
-        .unwrap_or_default()
-        .trim();
+    let requested = query.get("name").map(String::as_str).unwrap_or_default();
     let name = if requested.is_empty() {
         format!("{AUTO_PREFIX}{}", util::generate_random_string(8))
     } else {
