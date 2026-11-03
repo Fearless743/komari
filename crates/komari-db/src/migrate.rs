@@ -269,9 +269,116 @@ CREATE INDEX IF NOT EXISTS `idx_gpu_records_long_term_time` ON `gpu_records_long
 CREATE INDEX IF NOT EXISTS `idx_gpu_records_long_term_device_index` ON `gpu_records_long_term`(`device_index`);
 "#;
 
+/// Extract the column definitions for `table` from the canonical DDL above.
+fn expected_columns(table: &str) -> Vec<(String, String)> {
+    let marker = format!("CREATE TABLE IF NOT EXISTS `{table}` (");
+    let Some(start) = SCHEMA_SQL.find(&marker) else {
+        return Vec::new();
+    };
+    let body = &SCHEMA_SQL[start + marker.len()..];
+    let end = body.find("\n);").unwrap_or(body.len());
+
+    body[..end]
+        .lines()
+        .filter_map(|line| {
+            let line = line.trim().trim_end_matches(',').trim();
+            if line.is_empty() {
+                return None;
+            }
+            let upper = line.to_ascii_uppercase();
+            if upper.starts_with("PRIMARY KEY")
+                || upper.starts_with("CONSTRAINT")
+                || upper.starts_with("UNIQUE")
+                || upper.starts_with("FOREIGN KEY")
+            {
+                return None;
+            }
+            let mut parts = line.splitn(2, char::is_whitespace);
+            let name = parts.next()?.trim_matches('`').trim_matches('"').to_owned();
+            let definition = parts.next()?.trim().to_owned();
+            Some((name, definition))
+        })
+        .collect()
+}
+
+/// Columns added to old tables must be nullable or have a default, otherwise
+/// SQLite rejects the ALTER on a non-empty table. Keep declared defaults, and
+/// synthesize one for scalar types so existing rows are readable by `FromRow`.
+fn alter_definition(definition: &str) -> String {
+    let mut definition = definition
+        .replace("PRIMARY KEY", "")
+        .replace("AUTOINCREMENT", "")
+        .replace("NOT NULL", "")
+        .replace("UNIQUE", "")
+        .trim()
+        .to_owned();
+    while definition.contains("  ") {
+        definition = definition.replace("  ", " ");
+    }
+
+    if definition.to_ascii_uppercase().contains("DEFAULT") {
+        return definition;
+    }
+
+    let lower = definition.to_ascii_lowercase();
+    let numeric = lower.starts_with("integer")
+        || lower.starts_with("bigint")
+        || lower.starts_with("int")
+        || lower.starts_with("decimal")
+        || lower.starts_with("numeric")
+        || lower.starts_with("real")
+        || lower.starts_with("double")
+        || lower.starts_with("float")
+        || lower.starts_with("boolean");
+    let text = lower.starts_with("varchar")
+        || lower.starts_with("text")
+        || lower.starts_with("longtext")
+        || lower.starts_with("char")
+        || lower.starts_with("blob");
+
+    if numeric {
+        definition.push_str(" DEFAULT 0");
+    } else if text {
+        definition.push_str(" DEFAULT ''");
+    }
+    definition
+}
+
+fn actual_columns(tx: &rusqlite::Transaction<'_>, table: &str) -> rusqlite::Result<Vec<String>> {
+    let mut stmt = tx.prepare(&format!("PRAGMA table_info(`{table}`)"))?;
+    let rows = stmt.query_map([], |row| row.get::<_, String>(1))?;
+    rows.collect()
+}
+
+fn add_missing_columns(tx: &rusqlite::Transaction<'_>) -> crate::error::Result<()> {
+    for table in TABLES {
+        let actual = actual_columns(tx, table)?;
+        for (name, definition) in expected_columns(table) {
+            if actual
+                .iter()
+                .any(|column| column.eq_ignore_ascii_case(&name))
+            {
+                continue;
+            }
+            let definition = alter_definition(&definition);
+            tx.execute(
+                &format!("ALTER TABLE `{table}` ADD COLUMN `{name}` {definition}"),
+                [],
+            )?;
+        }
+    }
+    Ok(())
+}
+
 impl Db {
-    /// Create every missing table and index. Safe to call on every startup and
-    /// safe to call repeatedly on an existing database.
+    /// Create every missing table and index, and add missing columns to old    /// tables. Safe to call on every startup and safe to call repeatedly on an
+    /// existing database.
+    ///
+    /// `CREATE TABLE IF NOT EXISTS` leaves older tables untouched, which means
+    /// a database created by an older Komari release may lack newer columns.
+    /// This method compares `PRAGMA table_info` with the target schema and
+    /// only runs `ALTER TABLE ... ADD COLUMN` for the missing ones; it never
+    /// drops, renames or rewrites existing columns.
     pub fn migrate(&self) -> Result<()> {
         if self.is_read_only() {
             // A read-only handle can still be used for inspection. Only fail
@@ -283,6 +390,7 @@ impl Db {
         let mut conn = self.conn();
         let tx = conn.transaction()?;
         tx.execute_batch(SCHEMA_SQL)?;
+        add_missing_columns(&tx)?;
         tx.commit()?;
         Ok(())
     }

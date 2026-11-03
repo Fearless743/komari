@@ -42,7 +42,9 @@ variables. MySQL is not implemented yet and returns
 
 ## Schema
 
-`migrate()` creates the tables from `database/models/**` in the Go backend:
+`migrate()` creates the tables from `database/models/**` in the Go backend and
+adds missing columns to older tables with `ALTER TABLE ... ADD COLUMN` (never
+dropping or rewriting existing data):
 
 `clients`, `users`, `sessions`, `records`, `gpu_records`, `logs`, `clipboards`,
 `offline_notifications`, `load_notifications`, `oidc_providers`,

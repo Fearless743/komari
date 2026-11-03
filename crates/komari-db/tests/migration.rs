@@ -39,6 +39,65 @@ fn migration_can_run_twice_in_memory() {
 }
 
 #[test]
+fn migration_adds_missing_columns_without_losing_data() {
+    let dir = TempDir::new("old-schema");
+    let path = dir.join("komari.db");
+    let db = Db::open(&path).unwrap();
+
+    // Simulate a database created before newer fields were added.
+    db.with_connection(|conn| {
+        conn.execute_batch(
+            "CREATE TABLE clients (\
+                 `uuid` varchar(36) PRIMARY KEY, \
+                 `token` varchar(255) NOT NULL, \
+                 `name` varchar(100)\
+             );\
+             INSERT INTO clients (uuid, token, name) VALUES ('old-client', 'old-token', 'legacy');\
+             CREATE TABLE users (\
+                 `uuid` varchar(36) PRIMARY KEY, \
+                 `username` varchar(50) NOT NULL, \
+                 `passwd` varchar(255) NOT NULL\
+             );\
+             INSERT INTO users (uuid, username, passwd) VALUES ('old-user', 'admin', 'hash');",
+        )?;
+        Ok(())
+    })
+    .unwrap();
+
+    db.migrate().unwrap();
+
+    let client = db.clients().require("old-client").unwrap();
+    assert_eq!(client.name, "legacy");
+    assert_eq!(client.token, "old-token");
+    assert_eq!(client.currency, "$");
+    assert_eq!(client.traffic_limit_type, "max");
+    assert_eq!(client.tags, "");
+    assert_eq!(client.mem_total, 0);
+    assert!(client.created_at.is_zero());
+
+    let user = db.accounts().require_by_uuid("old-user").unwrap();
+    assert_eq!(user.username, "admin");
+    assert_eq!(user.sso_type, "");
+    assert_eq!(user.two_factor, "");
+
+    // New columns are writable after the additive migration.
+    db.clients()
+        .patch(
+            "old-client",
+            &komari_db::ClientPatch {
+                tags: Some("prod;db".to_owned()),
+                ..komari_db::ClientPatch::default()
+            },
+        )
+        .unwrap();
+    assert_eq!(db.clients().require("old-client").unwrap().tags, "prod;db");
+
+    // The second migration must be a no-op.
+    db.migrate().unwrap();
+    assert!(db.schema_is_current().unwrap());
+}
+
+#[test]
 fn migration_is_idempotent_on_disk_and_preserves_data() {
     let dir = TempDir::new("idempotent");
     let path = dir.join("komari.db");
