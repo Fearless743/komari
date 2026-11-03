@@ -450,7 +450,16 @@ impl Records<'_> {
 
     /// All live samples, oldest first.
     pub fn all(&self) -> Result<Vec<Record>> {
-        self.all_in(RecordTable::Live)
+        self.all_combined()
+    }
+
+    /// Every sample from `records` followed by every sample from
+    /// `records_long_term`, matching Go `GetAllRecords`. Each table is ordered
+    /// by time ascending; the two lists are concatenated without deduplication.
+    pub fn all_combined(&self) -> Result<Vec<Record>> {
+        let mut records = self.all_in(RecordTable::Live)?;
+        records.extend(self.all_in(RecordTable::LongTerm)?);
+        Ok(records)
     }
 
     pub fn all_in(&self, table: RecordTable) -> Result<Vec<Record>> {

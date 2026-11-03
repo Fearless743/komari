@@ -767,6 +767,33 @@ fn audit_logs_filter_and_retention() {
 }
 
 #[test]
+fn all_merges_live_and_long_term_records() {
+    let db = memory_db();
+    let records = db.records();
+    let client = db.clients().create_named("all").unwrap();
+
+    let mut live = Record::new(&client.uuid);
+    live.time = recent(60);
+    live.cpu = 11.0;
+    records.insert(&live).unwrap();
+
+    let mut long_term = Record::new(&client.uuid);
+    long_term.time = recent(600);
+    long_term.cpu = 22.0;
+    records
+        .insert_into(RecordTable::LongTerm, &long_term)
+        .unwrap();
+
+    let all = records.all().unwrap();
+    assert_eq!(all.len(), 2);
+    assert_eq!(all[0].cpu, 11.0);
+    assert_eq!(all[1].cpu, 22.0);
+
+    // The single-table helper remains available.
+    assert_eq!(records.all_in(RecordTable::LongTerm).unwrap().len(), 1);
+}
+
+#[test]
 fn audit_logs_order_and_paginate() {
     let db = memory_db();
     let logs = db.logs();

@@ -87,7 +87,7 @@ let sitename: Option<String> = db.config().get_as("sitename")?;
 | `clients()` | `clients` | create/get by UUID or token, patch, rename, delete, list |
 | `accounts()` | `users` | salted SHA-256 password check/change, SSO binding, 2FA |
 | `sessions()` | `sessions` | create/validate, expiry cleanup, latest activity |
-| `records()` | `records*`, `gpu_records*` | batch insert, ranges, latest, aggregate, cleanup |
+| `records()` | `records*`, `gpu_records*` | batch insert, combined live+long-term ranges, latest, aggregate, cleanup |
 | `config()` | `configs` | raw/typed `Get`/`Set`, `GetAs<T>`, persisted defaults |
 | `notifications()` | `offline_notifications`, `load_notifications` | CRUD for both rule types |
 | `message_senders()` | `message_sender_providers` | provider JSON CRUD |
