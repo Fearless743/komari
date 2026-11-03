@@ -24,21 +24,15 @@ pub fn get_metric_value(record: &Record, metric: &str, client: Option<&Client>) 
         "gpu" | "Gpu" => record.gpu,
         "net_in" | "netin" | "NetIn" => bytes_per_second_to_mbps(record.net_in),
         "net_out" | "netout" | "NetOut" => bytes_per_second_to_mbps(record.net_out),
-        "ram" | "Ram" => percentage(
-            record.ram,
-            record.ram_total,
-            client.map(|value| value.mem_total).unwrap_or(0),
-        ),
-        "swap" | "Swap" => percentage(
-            record.swap,
-            record.swap_total,
-            client.map(|value| value.swap_total).unwrap_or(0),
-        ),
-        "disk" | "Disk" => percentage(
-            record.disk,
-            record.disk_total,
-            client.map(|value| value.disk_total).unwrap_or(0),
-        ),
+        "ram" | "Ram" => client.map_or(0.0, |client| {
+            percentage(record.ram, record.ram_total, client.mem_total)
+        }),
+        "swap" | "Swap" => client.map_or(0.0, |client| {
+            percentage(record.swap, record.swap_total, client.swap_total)
+        }),
+        "disk" | "Disk" => client.map_or(0.0, |client| {
+            percentage(record.disk, record.disk_total, client.disk_total)
+        }),
         "load" | "Load" => record.load,
         "temp" | "Temp" => record.temp,
         "ram_total" | "RamTotal" => record.ram_total as f32,
@@ -226,6 +220,9 @@ mod tests {
         };
         assert_eq!(get_metric_value(&record, "ram", Some(&client)), 50.0);
         assert_eq!(get_metric_value(&record, "Ram", Some(&client)), 50.0);
+        assert_eq!(get_metric_value(&record, "ram", None), 0.0);
+        assert_eq!(get_metric_value(&record, "swap", None), 0.0);
+        assert_eq!(get_metric_value(&record, "disk", None), 0.0);
         assert_eq!(get_metric_value(&record, "unknown", Some(&client)), 0.0);
     }
 
