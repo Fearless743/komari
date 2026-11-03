@@ -443,7 +443,10 @@ fn ensure_no_duplicates(
     Ok(())
 }
 
-/// Backfill one identifier column row by row with unpredictable values.
+const MAX_BACKFILL_ATTEMPTS: usize = 16;
+
+/// Backfill one identifier column row by row with unpredictable values,
+/// retrying when the generated value collides with an existing row.
 fn backfill_column(
     tx: &rusqlite::Transaction<'_>,
     table: &str,
@@ -461,9 +464,34 @@ fn backfill_column(
         rows.collect::<rusqlite::Result<Vec<_>>>()?
     };
     for rowid in rowids {
+        let mut chosen = None;
+        for _ in 0..MAX_BACKFILL_ATTEMPTS {
+            let candidate = generate();
+            if candidate.is_empty() {
+                continue;
+            }
+            let exists: i64 = tx.query_row(
+                &format!(
+                    "SELECT COUNT(*) FROM `{table}` \
+                     WHERE `{column}` = ?1 AND rowid <> ?2"
+                ),
+                rusqlite::params![candidate, rowid],
+                |row| row.get(0),
+            )?;
+            if exists == 0 {
+                chosen = Some(candidate);
+                break;
+            }
+        }
+        let Some(value) = chosen else {
+            return Err(crate::error::DbError::InvalidData(format!(
+                "failed to generate a unique value for {table}.{column} \
+                 after {MAX_BACKFILL_ATTEMPTS} attempts"
+            )));
+        };
         tx.execute(
             &format!("UPDATE `{table}` SET `{column}` = ?1 WHERE rowid = ?2"),
-            rusqlite::params![generate(), rowid],
+            rusqlite::params![value, rowid],
         )?;
     }
     Ok(())
@@ -874,5 +902,41 @@ mod tests {
         for table in TABLES {
             assert!(names.iter().any(|name| name == table), "missing {table}");
         }
+    }
+
+    #[test]
+    fn backfill_retries_when_generated_value_exists() {
+        let db = Db::open_in_memory().unwrap();
+        db.with_connection(|conn| {
+            conn.execute_batch(
+                "CREATE TABLE t (id integer PRIMARY KEY, v text);\
+                 INSERT INTO t VALUES (1, 'taken'), (2, ''), (3, '');",
+            )?;
+            Ok(())
+        })
+        .unwrap();
+
+        let mut conn = db.conn();
+        let tx = conn.transaction().unwrap();
+        let mut calls = 0;
+        backfill_column(&tx, "t", "v", || {
+            calls += 1;
+            match calls {
+                1 | 2 => "taken".to_owned(),
+                n => format!("unique-{n}"),
+            }
+        })
+        .unwrap();
+        tx.commit().unwrap();
+        drop(conn);
+
+        let values: Vec<String> = db
+            .with_connection(|conn| {
+                let mut stmt = conn.prepare("SELECT v FROM t WHERE id <> 1 ORDER BY id")?;
+                let rows = stmt.query_map([], |row| row.get::<_, String>(0))?;
+                Ok(rows.collect::<rusqlite::Result<Vec<_>>>()?)
+            })
+            .unwrap();
+        assert_eq!(values, vec!["unique-3", "unique-4"]);
     }
 }
