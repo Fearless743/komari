@@ -35,6 +35,8 @@ pub struct ApiConfig {
     pub report_flush_interval: Duration,
     /// Top fraction used by `AverageReport` (Go passes 0.3).
     pub report_top_percentage: f64,
+    /// Delay between MJPEG frames (Go's `refreshInterval`, 2 seconds).
+    pub mjpeg_frame_interval: Duration,
 }
 
 impl Default for ApiConfig {
@@ -48,6 +50,7 @@ impl Default for ApiConfig {
             report_retention: Duration::from_secs(60),
             report_flush_interval: Duration::from_secs(60),
             report_top_percentage: 0.3,
+            mjpeg_frame_interval: Duration::from_secs(2),
         }
     }
 }

@@ -20,7 +20,7 @@ Ports of Go `api/public/*.go` plus the route table in `cmd/server.go`:
 | `GET /api/recent/{uuid}` | Reads the B05 in-memory report buffer (`api.Records`); omits `data` when nothing is buffered. |
 | `GET /api/records/load` | `uuid`/`hours`/`load_type` validation, per-metric projection and GPU device grouping. |
 | `GET /api/oauth`, `GET /api/oauth_callback` | Uses the B13 provider installed with `ApiState::set_oauth_provider`; error bodies use Go's `error` key. |
-| `GET /api/mjpeg_live` | Explicit `501` (see below). |
+| `GET /api/mjpeg_live` | `multipart/x-mixed-replace; boundary=frame` JPEG stream rendered from the latest `records` rows with a built-in bitmap font. Frame interval is `ApiConfig::mjpeg_frame_interval` (2 s by default). |
 
 `public_router_with_state` additionally installs `komari_auth::PrivateSite`,
 matching the global private-site middleware in `cmd/server.go`. Server
@@ -60,11 +60,14 @@ provider rows and loads `o_auth_provider`) before serving requests.
 
 ## Known differences / follow-up work
 
-- `/api/mjpeg_live` returns `501 {"status":"error","message":...}` instead of a
-  `multipart/x-mixed-replace` stream. Go's handler depends on JSON-RPC node data
-  and an externally downloaded MiSans font (`./data/font.ttf`); both are outside
-  B04. Clients should fall back to the HTML dashboard until the image pipeline
-  is ported.
+- `/api/mjpeg_live` renders from the `records` table instead of the JSON-RPC
+  node snapshot, uses the built-in 5x7 bitmap font instead of the downloaded
+  MiSans font, and drops hidden clients like Go's guest `common:getNodes` call.
+  The `lang` and `tz_offset` query parameters are accepted but the frame text is
+  English and uses the application timezone.
+- `/api/records/load` rejects `hours` outside `±2_562_047` (the largest whole
+  hour offset that fits in Go's `time.Duration`) with 400. Go silently wraps the
+  duration for larger values.
 - `/api/rpc2` and the admin API are separate tasks (B06/B07) and are not part of
   this router.
 - `/api/oauth_callback` binding uses `komari_oauth::AccountLinker::bind`, which

@@ -1,13 +1,16 @@
 //! Integration tests for the public/browser API (`komari_api::public`).
 
+use std::net::SocketAddr;
 use std::sync::Arc;
 use std::time::Duration;
 
 use async_trait::async_trait;
 use axum::Router;
 use axum::body::{Body, to_bytes};
+use axum::extract::ConnectInfo;
 use axum::http::header::{CONTENT_TYPE, COOKIE, LOCATION, SET_COOKIE};
 use axum::http::{HeaderMap, Method, Request, StatusCode};
+use futures_util::StreamExt;
 use komari_api::{
     ApiConfig, ApiState, Report, client_router, public_router, public_router_with_state,
 };
@@ -34,6 +37,8 @@ fn state() -> ApiState {
     let config = ApiConfig {
         presence_sweep_interval: Duration::ZERO,
         report_flush_interval: Duration::ZERO,
+        // Keep the MJPEG test fast; production defaults to 2 seconds.
+        mjpeg_frame_interval: Duration::from_millis(10),
         ..ApiConfig::default()
     };
     ApiState::with_config(memory_db(), config)
@@ -68,6 +73,11 @@ fn with_cookie(mut request: Request<Body>, cookie: &str) -> Request<Body> {
     request
         .headers_mut()
         .insert(COOKIE, cookie.parse().expect("valid cookie header"));
+    request
+}
+
+fn with_peer(mut request: Request<Body>, address: SocketAddr) -> Request<Body> {
+    request.extensions_mut().insert(ConnectInfo(address));
     request
 }
 
@@ -152,6 +162,7 @@ struct MockProvider {
     states: StateStore,
     subject: String,
     fail: bool,
+    skip_state: bool,
 }
 
 impl MockProvider {
@@ -160,6 +171,7 @@ impl MockProvider {
             states: StateStore::default(),
             subject: subject.to_owned(),
             fail: false,
+            skip_state: false,
         }
     }
 }
@@ -176,6 +188,10 @@ impl OAuthProvider for MockProvider {
 
     fn state_store(&self) -> &StateStore {
         &self.states
+    }
+
+    fn skip_query_state_check(&self) -> bool {
+        self.skip_state
     }
 
     async fn init(&self) -> komari_oauth::Result<()> {
@@ -297,6 +313,35 @@ async fn nodes_include_hidden_clients_for_a_logged_in_session() {
 // ---------------------------------------------------------------------------
 
 #[tokio::test]
+async fn nodes_prefer_the_session_cookie_over_an_api_key() {
+    let state = state();
+    let hidden = create_client(&state, "hidden", true);
+    let (_, session) = create_session(&state, "admin");
+    set_config_string(&state, "api_key", "0123456789abcdef");
+
+    // An API key alone is not a browser session: hidden clients stay hidden.
+    let mut api_key_request = get("/api/nodes");
+    api_key_request.headers_mut().insert(
+        axum::http::header::AUTHORIZATION,
+        "Bearer 0123456789abcdef".parse().expect("header"),
+    );
+    let (_, _, body) = call(&app(&state), api_key_request).await;
+    assert_eq!(body["data"], json!([]));
+
+    // With both credentials present, Go still reads the session cookie.
+    let mut both = with_cookie(get("/api/nodes"), &format!("session_token={session}"));
+    both.headers_mut().insert(
+        axum::http::header::AUTHORIZATION,
+        "Bearer 0123456789abcdef".parse().expect("header"),
+    );
+    let (status, _, body) = call(&app(&state), both).await;
+    assert_eq!(status, StatusCode::OK);
+    let nodes = body["data"].as_array().expect("node array");
+    assert_eq!(nodes.len(), 1);
+    assert_eq!(nodes[0]["uuid"], hidden);
+}
+
+#[tokio::test]
 async fn public_settings_use_go_defaults_when_config_is_empty() {
     let state = state();
     let (status, _, body) = call(&app(&state), get("/api/public")).await;
@@ -317,6 +362,27 @@ async fn public_settings_use_go_defaults_when_config_is_empty() {
     assert_eq!(data["private_site"], false);
     assert_eq!(data["theme"], "default");
     assert_eq!(data["theme_settings"], json!({}));
+
+    // Go `GetManyAs` writes defaults back to `configs` on the first call.
+    for key in [
+        "sitename",
+        "description",
+        "custom_head",
+        "custom_body",
+        "o_auth_enabled",
+        "o_auth_provider",
+        "disable_password_login",
+        "allow_cors",
+        "record_enabled",
+        "record_preserve_time",
+        "private_site",
+        "theme",
+    ] {
+        assert!(
+            state.db.config().contains(key).expect("config lookup"),
+            "missing persisted default for {key}"
+        );
+    }
 }
 
 #[tokio::test]
@@ -506,6 +572,79 @@ async fn me_reports_guest_and_logged_in_states() {
 }
 
 #[tokio::test]
+async fn me_treats_an_expired_session_as_a_guest_and_deletes_it() {
+    let state = state();
+    let user = state.db.accounts().create("admin", "secret").expect("user");
+    let session = komari_auth::create_session_with_expiry(
+        &state.db,
+        &user.uuid,
+        -1,
+        "test-agent",
+        "127.0.0.1",
+        "password",
+    )
+    .expect("expired session");
+    assert_eq!(state.db.sessions().count().expect("session count"), 1);
+
+    let request = with_cookie(get("/api/me"), &format!("session_token={session}"));
+    let (status, _, body) = call(&app(&state), request).await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(body, json!({ "username": "Guest", "logged_in": false }));
+    assert_eq!(state.db.sessions().count().expect("session count"), 0);
+}
+
+#[tokio::test]
+async fn login_uses_the_peer_address_and_writes_an_audit_row() {
+    let state = state();
+    state.db.accounts().create("admin", "secret").expect("user");
+    let request = with_peer(
+        post_json(
+            "/api/login",
+            json!({ "username": "admin", "password": "secret" }),
+        ),
+        SocketAddr::from(([203, 0, 113, 9], 4444)),
+    );
+    let (status, _, _) = call(&app(&state), request).await;
+    assert_eq!(status, StatusCode::OK);
+
+    let sessions = state.db.sessions().list().expect("sessions");
+    assert_eq!(sessions[0].ip, "203.0.113.9");
+
+    let logs = state.db.logs().list(10).expect("logs");
+    let entry = logs
+        .iter()
+        .find(|entry| entry.msg_type == "login")
+        .expect("login audit row");
+    assert_eq!(entry.message, "logged in (password)");
+    assert_eq!(entry.ip, "203.0.113.9");
+    assert_eq!(entry.uuid, sessions[0].uuid);
+}
+
+#[tokio::test]
+async fn forwarded_headers_take_precedence_over_the_peer_address() {
+    let state = state();
+    let (_, session) = create_session(&state, "admin");
+    let mut request = with_peer(
+        with_cookie(get("/api/logout"), &format!("session_token={session}")),
+        SocketAddr::from(([203, 0, 113, 9], 4444)),
+    );
+    request.headers_mut().insert(
+        "x-forwarded-for",
+        "198.51.100.7, 10.0.0.1".parse().expect("header"),
+    );
+    let (status, _, _) = call(&app(&state), request).await;
+    assert_eq!(status, StatusCode::FOUND);
+
+    let logs = state.db.logs().list(10).expect("logs");
+    let entry = logs
+        .iter()
+        .find(|entry| entry.msg_type == "logout")
+        .expect("logout audit row");
+    assert_eq!(entry.message, "logged out");
+    assert_eq!(entry.ip, "198.51.100.7");
+}
+
+#[tokio::test]
 async fn logout_deletes_the_session_and_clears_the_cookie() {
     let state = state();
     let (_, session) = create_session(&state, "admin");
@@ -646,13 +785,17 @@ async fn records_load_validates_parameters_and_hidden_clients() {
     assert_eq!(status, StatusCode::BAD_REQUEST);
     assert_eq!(body["message"], "UUID is required");
 
-    let (status, _, body) = call(
-        &app(&state),
-        get("/api/records/load?uuid=some-uuid&load_type=nope"),
-    )
-    .await;
-    assert_eq!(status, StatusCode::BAD_REQUEST);
-    assert_eq!(body["message"], "Invalid load_type parameter");
+    for load_type in ["nope", "gpu"] {
+        let (status, _, body) = call(
+            &app(&state),
+            get(&format!(
+                "/api/records/load?uuid=some-uuid&load_type={load_type}"
+            )),
+        )
+        .await;
+        assert_eq!(status, StatusCode::BAD_REQUEST);
+        assert_eq!(body["message"], "Invalid load_type parameter");
+    }
 
     let (status, _, body) = call(
         &app(&state),
@@ -669,6 +812,79 @@ async fn records_load_validates_parameters_and_hidden_clients() {
     .await;
     assert_eq!(status, StatusCode::BAD_REQUEST);
     assert_eq!(body["message"], "UUID is required");
+}
+
+#[tokio::test]
+async fn records_load_uses_go_f32_formatting_and_nulls_empty_results() {
+    let state = state();
+    let uuid = create_client(&state, "visible", false);
+
+    // No rows and no load_type filter: Go's nil slice encodes as `null`.
+    let (_, _, body) = call(&app(&state), get(&format!("/api/records/load?uuid={uuid}"))).await;
+    assert!(body["data"]["records"].is_null());
+    assert_eq!(body["data"]["count"], 0);
+
+    let mut record = Record::new(uuid.clone());
+    record.cpu = 12.3;
+    record.ram = 1;
+    record.ram_total = 3;
+    state.db.records().insert(&record).expect("insert record");
+
+    let (_, _, body) = call(
+        &app(&state),
+        get(&format!("/api/records/load?uuid={uuid}&load_type=cpu")),
+    )
+    .await;
+    assert_eq!(body["data"]["records"][0]["cpu"], json!(12.3));
+
+    let (_, _, body) = call(&app(&state), get(&format!("/api/records/load?uuid={uuid}"))).await;
+    assert_eq!(body["data"]["records"][0]["cpu"], json!(12.3));
+
+    let (_, _, body) = call(
+        &app(&state),
+        get(&format!("/api/records/load?uuid={uuid}&load_type=ram")),
+    )
+    .await;
+    // Go encodes the `float32` value with its shortest form ("33.333336").
+    let expected: f64 = (1.0f32 / 3.0f32 * 100.0)
+        .to_string()
+        .parse()
+        .expect("f32 text");
+    assert_eq!(
+        body["data"]["records"][0]["ram_percent"]
+            .as_f64()
+            .expect("number"),
+        expected
+    );
+}
+
+#[tokio::test]
+async fn records_load_rejects_extreme_hours_and_wraps_connections() {
+    let state = state();
+    let uuid = create_client(&state, "visible", false);
+    let mut record = Record::new(uuid.clone());
+    record.connections = 2;
+    record.connections_udp = 5;
+    state.db.records().insert(&record).expect("insert record");
+
+    for hours in ["3000000", "9223372036854775807", "-9223372036854775808"] {
+        let (status, _, body) = call(
+            &app(&state),
+            get(&format!("/api/records/load?uuid={uuid}&hours={hours}")),
+        )
+        .await;
+        assert_eq!(status, StatusCode::BAD_REQUEST, "hours={hours}");
+        assert_eq!(body["message"], "Invalid hours parameter");
+    }
+
+    let (_, _, body) = call(
+        &app(&state),
+        get(&format!(
+            "/api/records/load?uuid={uuid}&load_type=connections"
+        )),
+    )
+    .await;
+    assert_eq!(body["data"]["records"][0]["connections_tcp"], -3);
 }
 
 // ---------------------------------------------------------------------------
@@ -726,6 +942,40 @@ async fn oauth_callback_rejects_an_invalid_state() {
     let (status, _, body) = call(&app(&state), request).await;
     assert_eq!(status, StatusCode::BAD_REQUEST);
     assert_eq!(body["error"], "Invalid state");
+}
+
+#[tokio::test]
+async fn oauth_callback_skips_query_state_for_qq_providers() {
+    let state = state();
+    set_config_bool(&state, "o_auth_enabled", true);
+    let provider: Arc<dyn OAuthProvider> = Arc::new(MockProvider {
+        states: StateStore::default(),
+        subject: "qq-user".to_owned(),
+        fail: false,
+        skip_state: true,
+    });
+    state.set_oauth_provider(Some(provider));
+    let user = state
+        .db
+        .accounts()
+        .create("qq-admin", "unused")
+        .expect("user");
+    state
+        .db
+        .accounts()
+        .bind_sso(&user.uuid, "mock_qq-user")
+        .expect("bind sso");
+
+    let (_, headers, _) = call(&app(&state), get("/api/oauth")).await;
+    let oauth_state = cookie_value(&headers, "oauth_state").expect("state cookie");
+    let request = with_cookie(
+        get("/api/oauth_callback?state=different&code=abc"),
+        &format!("oauth_state={oauth_state}"),
+    );
+    let (status, headers, _) = call(&app(&state), request).await;
+    assert_eq!(status, StatusCode::FOUND);
+    assert_eq!(headers.get(LOCATION).expect("location"), "/admin");
+    assert_eq!(state.db.sessions().count().expect("session count"), 1);
 }
 
 #[tokio::test]
@@ -811,6 +1061,7 @@ async fn oauth_callback_reports_provider_failures_with_the_error_key() {
         states: StateStore::default(),
         subject: "user-1".to_owned(),
         fail: true,
+        skip_state: false,
     });
     provider
         .state_store()
@@ -881,15 +1132,70 @@ async fn private_site_blocks_guest_api_paths_but_allows_public_prefixes() {
 }
 
 #[tokio::test]
-async fn mjpeg_returns_an_explicit_not_implemented_response() {
+async fn mjpeg_streams_multipart_jpeg_frames_until_the_client_disconnects() {
     let state = state();
-    let (status, _, body) = call(&app(&state), get("/api/mjpeg_live")).await;
-    assert_eq!(status, StatusCode::NOT_IMPLEMENTED);
-    assert_eq!(body["status"], "error");
+    let uuid = create_client(&state, "visible", false);
+    let mut record = Record::new(uuid);
+    record.cpu = 12.3;
+    record.ram = 512;
+    record.ram_total = 1024;
+    state.db.records().insert(&record).expect("insert record");
+
+    let response = app(&state)
+        .oneshot(get("/api/mjpeg_live"))
+        .await
+        .expect("router response");
+    assert_eq!(response.status(), StatusCode::OK);
     assert_eq!(
-        body["message"],
-        "MJPEG live stream is not implemented in the Rust backend"
+        response
+            .headers()
+            .get(CONTENT_TYPE)
+            .expect("content type")
+            .to_str()
+            .expect("header text"),
+        "multipart/x-mixed-replace; boundary=frame"
     );
+    assert_eq!(
+        response
+            .headers()
+            .get("cache-control")
+            .expect("cache control")
+            .to_str()
+            .expect("header text"),
+        "no-cache"
+    );
+
+    let mut stream = response.into_body().into_data_stream();
+    for frame_number in 0..2 {
+        let frame = tokio::time::timeout(Duration::from_secs(2), stream.next())
+            .await
+            .expect("frame within timeout")
+            .expect("stream item")
+            .expect("frame bytes");
+        let part = String::from_utf8_lossy(&frame[..64.min(frame.len())]);
+        assert!(
+            part.starts_with("--frame\r\nContent-Type: image/jpeg\r\n"),
+            "frame {frame_number} part header"
+        );
+        let header_end = frame
+            .windows(4)
+            .position(|window| window == b"\r\n\r\n")
+            .expect("multipart header terminator")
+            + 4;
+        assert!(
+            frame.len() > header_end + 3,
+            "frame {frame_number} has JPEG payload"
+        );
+        assert_eq!(
+            &frame[header_end..header_end + 3],
+            &[0xFF, 0xD8, 0xFF],
+            "frame {frame_number} JPEG SOI magic"
+        );
+    }
+
+    // Dropping the body cancels the `unfold` stream; there is no detached
+    // rendering task left behind.
+    drop(stream);
 }
 
 fn now_unix() -> i64 {
