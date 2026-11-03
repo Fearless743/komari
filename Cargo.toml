@@ -19,7 +19,7 @@ version = "0.1.0"
 edition = "2024"
 rust-version = "1.85"
 license = "MIT"
-repository = "https://github.com/komari-monitor/komari"
+repository = "https://github.com/Fearless743/komari"
 
 [workspace.dependencies]
 # Internal crates. Later tasks add code to these crates but must not need to
