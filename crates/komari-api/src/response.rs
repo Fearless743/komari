@@ -23,10 +23,19 @@ pub fn success_no_data() -> Json<Value> {
 }
 
 /// Go `RespondSuccessMessage`: a success envelope with a custom message.
+///
+/// `data` follows Go's `json:"data,omitempty"`: a JSON `null` is omitted.
 pub fn success_message(message: impl Into<String>, data: Value) -> Json<Value> {
+    let message = message.into();
+    if data.is_null() {
+        return Json(json!({
+            "status": "success",
+            "message": message,
+        }));
+    }
     Json(json!({
         "status": "success",
-        "message": message.into(),
+        "message": message,
         "data": data,
     }))
 }

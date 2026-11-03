@@ -498,7 +498,7 @@ async fn admin_theme_list_set_and_delete() {
     .await;
     assert_eq!(status, StatusCode::NOT_FOUND);
 
-    let (status, _) = call(
+    let (status, body) = call(
         &app,
         bearer(
             Method::POST,
@@ -508,6 +508,10 @@ async fn admin_theme_list_set_and_delete() {
     )
     .await;
     assert_eq!(status, StatusCode::OK);
+    assert_eq!(
+        body,
+        json!({"status": "success", "message": "主题删除成功"})
+    );
     assert!(!theme_root.exists());
 }
 
