@@ -204,6 +204,7 @@ pub(crate) async fn delete_load(
     };
     let ids = ids.iter().filter_map(Value::as_i64).collect::<Vec<_>>();
     match state.db.notifications().load_delete(&ids) {
+        Ok(0) => internal("Failed to delete load notifications: record not found"),
         Ok(_) => {
             audit(&state, &admin, "delete load notifications", "warn");
             ok()
@@ -229,9 +230,42 @@ pub(crate) async fn edit_load(
         Err(response) => return response,
     };
     for notification in &request.notifications {
-        let mut notification = notification.clone();
-        if let Err(error) = state.db.notifications().load_save(&mut notification) {
-            return internal(error.to_string());
+        if notification.id == 0 {
+            return internal("Failed to edit load notifications: record not found");
+        }
+        let existing = match state.db.notifications().load_get(notification.id) {
+            Ok(Some(existing)) => existing,
+            Ok(None) => return internal("Failed to edit load notifications: record not found"),
+            Err(error) => return internal(error.to_string()),
+        };
+        let mut updated = notification.clone();
+        // GORM `Updates(struct)` skips zero-valued fields; preserve the old
+        // values (including `last_notified`) unless the caller set them.
+        if updated.name.is_empty() {
+            updated.name = existing.name;
+        }
+        if updated.clients.as_slice().is_empty() {
+            updated.clients = existing.clients;
+        }
+        if updated.metric.is_empty() {
+            updated.metric = existing.metric;
+        }
+        if updated.threshold == 0.0 {
+            updated.threshold = existing.threshold;
+        }
+        if updated.ratio == 0.0 {
+            updated.ratio = existing.ratio;
+        }
+        if updated.interval == 0 {
+            updated.interval = existing.interval;
+        }
+        if updated.last_notified.is_zero() {
+            updated.last_notified = existing.last_notified;
+        }
+        match state.db.notifications().load_update(&updated) {
+            Ok(0) => return internal("Failed to edit load notifications: record not found"),
+            Ok(_) => {}
+            Err(error) => return internal(error.to_string()),
         }
     }
     audit(&state, &admin, "edit load notifications", "info");

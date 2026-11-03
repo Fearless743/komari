@@ -120,10 +120,11 @@ pub(crate) async fn delete(
         Err(response) => return response,
     };
     match state.db.clipboard().delete(id) {
-        Ok(_) => {
+        Ok(true) => {
             audit(&state, &admin, &format!("delete clipboard:{id}"), "warn");
             ok()
         }
+        Ok(false) => internal("Failed to delete clipboard: record not found"),
         Err(error) => internal(format!("Failed to delete clipboard: {error}")),
     }
 }
