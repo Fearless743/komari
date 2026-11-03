@@ -134,14 +134,17 @@ impl ApiState {
     }
 
     fn spawn_presence_sweeper(&self) {
-        let Ok(handle) = tokio::runtime::Handle::try_current() else {
-            return;
-        };
-        let presence = Arc::clone(&self.presence);
         let interval = self.config.presence_sweep_interval;
         if interval.is_zero() {
             return;
         }
+        let Ok(handle) = tokio::runtime::Handle::try_current() else {
+            tracing::warn!(
+                "ApiState constructed outside a Tokio runtime; presence sweeper is disabled"
+            );
+            return;
+        };
+        let presence = Arc::clone(&self.presence);
         handle.spawn(async move {
             let mut ticker = tokio::time::interval(interval);
             ticker.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
@@ -153,13 +156,16 @@ impl ApiState {
     }
 
     fn spawn_report_flusher(&self) {
-        let Ok(handle) = tokio::runtime::Handle::try_current() else {
-            return;
-        };
         let interval = self.config.report_flush_interval;
         if interval.is_zero() {
             return;
         }
+        let Ok(handle) = tokio::runtime::Handle::try_current() else {
+            tracing::warn!(
+                "ApiState constructed outside a Tokio runtime; report flusher is disabled"
+            );
+            return;
+        };
         let cache = Arc::clone(&self.report_cache);
         let db = Arc::clone(&self.db);
         handle.spawn(async move {
@@ -194,13 +200,12 @@ impl ApiState {
     /// The value is read from the database on each upgrade so admin updates
     /// take effect without restarting the API.
     pub fn allow_cors(&self) -> bool {
-        if self.config.allow_cors {
-            return true;
+        match self.db.config().get_as::<bool>(keys::ALLOW_CORS_KEY) {
+            Ok(Some(value)) => value,
+            // Only fall back to the explicit startup value when the database
+            // has no usable row; a persisted `false` always wins.
+            _ => self.config.allow_cors,
         }
-        self.db
-            .config()
-            .get_as_or::<bool>(keys::ALLOW_CORS_KEY, false)
-            .unwrap_or(false)
     }
 
     /// Whether the `Origin` check is disabled.
@@ -217,9 +222,9 @@ impl ApiState {
 }
 
 fn parse_ws_disable_origin(value: &str) -> bool {
-    // Go compares against "true" with `strings.EqualFold`; values like "1"
-    // and "yes" do *not* disable the check.
-    value.trim().eq_ignore_ascii_case("true")
+    // Go compares against "true" with `strings.EqualFold` without trimming;
+    // values like "1", "yes" and " true " do *not* disable the check.
+    value.eq_ignore_ascii_case("true")
 }
 
 #[cfg(test)]
@@ -230,7 +235,7 @@ mod tests {
     fn ws_disable_origin_only_accepts_true() {
         assert!(parse_ws_disable_origin("true"));
         assert!(parse_ws_disable_origin("TRUE"));
-        assert!(parse_ws_disable_origin(" True "));
+        assert!(!parse_ws_disable_origin(" True "));
         assert!(!parse_ws_disable_origin("1"));
         assert!(!parse_ws_disable_origin("yes"));
         assert!(!parse_ws_disable_origin("on"));
