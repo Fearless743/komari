@@ -26,9 +26,8 @@ use std::time::Duration;
 
 use async_trait::async_trait;
 use komari_db::models::EventMessage;
-use serde::{Deserialize, Serialize};
+use serde::Serialize;
 use serde_json::Value;
-
 use tokio::runtime::Handle;
 
 use crate::error::{NotifyError, Result};
@@ -43,10 +42,20 @@ pub const SENSITIVE_FIELDS: &[&str] = &["script", "code"];
 pub const DEFAULT_TIMEOUT: Duration = Duration::from_secs(30);
 
 /// Provider configuration (`javascript.Addition`).
-#[derive(Clone, Default, Serialize, Deserialize)]
-#[serde(default)]
+#[derive(Clone, Default, Serialize)]
 pub struct JavaScriptConfig {
     pub script: String,
+}
+
+fn json_type(value: &Value) -> &'static str {
+    match value {
+        Value::Null => "null",
+        Value::Bool(_) => "boolean",
+        Value::Number(_) => "number",
+        Value::String(_) => "string",
+        Value::Array(_) => "array",
+        Value::Object(_) => "object",
+    }
 }
 
 impl std::fmt::Debug for JavaScriptConfig {
@@ -92,8 +101,39 @@ impl JavaScriptSender {
         self
     }
 
+    /// Parse `addition` like Go's `encoding/json` into `Addition`.
+    ///
+    /// Field names are matched case-insensitively, `null` behaves like the
+    /// zero value and unknown fields are ignored. Type errors name the field
+    /// and the JSON type only, never the value.
     pub fn from_value(value: Value) -> Result<Self> {
-        let config: JavaScriptConfig = crate::provider::deserialize_config("Javascript", value)?;
+        let map = match value {
+            Value::Null => return Ok(Self::new(JavaScriptConfig::default())),
+            Value::Object(map) => map,
+            other => {
+                return Err(NotifyError::InvalidConfig(format!(
+                    "failed to load config for provider Javascript: expected an object, found {}",
+                    json_type(&other)
+                )));
+            }
+        };
+
+        let mut config = JavaScriptConfig::default();
+        for (key, value) in map {
+            if !key.eq_ignore_ascii_case("script") {
+                continue;
+            }
+            config.script = match value {
+                Value::Null => String::new(),
+                Value::String(script) => script,
+                other => {
+                    return Err(NotifyError::InvalidConfig(format!(
+                        "failed to load config for provider Javascript: field script: expected a string, found {}",
+                        json_type(&other)
+                    )));
+                }
+            };
+        }
         Ok(Self::new(config))
     }
 

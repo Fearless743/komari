@@ -159,7 +159,9 @@ impl Runtime {
             Ok(value) => value,
             Err(error) => return Err(runtime_error(&error, &mut self.context)),
         };
-        if value.is_undefined() || value.is_null() {
+        // Go: a missing global is undefined ("not defined"), while `null` is a
+        // present value that fails the callable assertion.
+        if value.is_undefined() {
             return Err(NotifyError::InvalidConfig(format!(
                 "{name} function not defined in script"
             )));

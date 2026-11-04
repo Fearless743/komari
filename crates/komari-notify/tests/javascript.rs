@@ -441,6 +441,15 @@ async fn non_function_send_message_is_reported_like_go() {
         error.to_string().contains("sendMessage is not a function"),
         "{error}"
     );
+
+    // Go only treats `undefined` as "not defined"; `null` is a present,
+    // non-callable value.
+    let sender = text_sender("var sendMessage = null;");
+    let error = sender.init().await.unwrap_err();
+    assert!(
+        error.to_string().contains("sendMessage is not a function"),
+        "{error}"
+    );
 }
 
 #[tokio::test]

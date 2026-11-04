@@ -418,6 +418,40 @@ async fn javascript_provider_loads_user_scripts() {
 }
 
 #[tokio::test]
+async fn javascript_config_accepts_go_json_forms() {
+    // Go's encoding/json matches field names case-insensitively.
+    let provider = load_provider(
+        "Javascript",
+        r#"{"Script":"function sendMessage() { return true; }"}"#,
+    )
+    .await
+    .unwrap();
+    assert_eq!(
+        provider.config()["script"],
+        "function sendMessage() { return true; }"
+    );
+
+    // `null` script is the zero value, which Init rejects as empty.
+    let error = match load_provider("Javascript", r#"{"script":null}"#).await {
+        Ok(_) => panic!("null script must be rejected"),
+        Err(error) => error,
+    };
+    assert!(
+        error.to_string().contains("JavaScript script is empty"),
+        "{error}"
+    );
+
+    // Wrong types fail without echoing the value.
+    let error = match load_provider("Javascript", r#"{"script":12345}"#).await {
+        Ok(_) => panic!("non-string script must be rejected"),
+        Err(error) => error,
+    };
+    let text = error.to_string();
+    assert!(text.contains("number"), "{text}");
+    assert!(!text.contains("12345"), "{text}");
+}
+
+#[tokio::test]
 async fn initialize_defaults_inserts_missing_rows_only() {
     let db = Db::open_in_memory().unwrap();
     db.migrate().unwrap();
