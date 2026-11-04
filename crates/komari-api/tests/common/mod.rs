@@ -16,8 +16,6 @@ use komari_db::{Db, LocalTime};
 use serde_json::Value;
 use tower::ServiceExt;
 
-pub const AUTO_KEY: &str = "0123456789abcdef";
-
 pub fn memory_db() -> Db {
     let db = Db::open_in_memory().expect("open in-memory database");
     db.migrate().expect("migrate database");
@@ -73,14 +71,6 @@ pub fn rpc_app() -> (ApiState, Router) {
     let state = ApiState::with_config(db, default_config());
     let router = komari_api::rpc::rpc_router_with_state(state.clone());
     (state, router)
-}
-
-pub fn set_auto_key(state: &ApiState, key: &str) {
-    state
-        .db
-        .config()
-        .set(komari_config::keys::AUTO_DISCOVERY_KEY_KEY, &key)
-        .expect("store auto discovery key");
 }
 
 pub fn flush(state: &ApiState) -> komari_api::FlushSummary {

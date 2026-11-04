@@ -1,7 +1,6 @@
 //! Agent route handlers.
 
 pub mod basic_info;
-pub mod register;
 pub mod report;
 
 use axum::response::Response;

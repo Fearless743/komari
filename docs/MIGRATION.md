@@ -206,8 +206,7 @@ environment:
 2. 公开接口：`GET /api/version`、`GET /api/public`。
 3. 登录：`POST /api/login`，检查 `session_token` cookie。
 4. 管理员接口：`GET /api/admin/settings/`（需要管理员会话或 API key）。
-5. agent 注册与上报：`POST /api/clients/register`，然后
-   `GET /api/clients/report` WebSocket 或 `POST /api/clients/report`。
+5. agent 上报：`GET /api/clients/report` WebSocket 或 `POST /api/clients/report`。
 6. 浏览器实时数据：`GET /api/clients` WebSocket。
 7. 通知、DDNS、GeoIP：检查日志与数据库写入。
 

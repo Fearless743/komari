@@ -916,7 +916,6 @@ EXPECTED_ADMIN_KEYS = {
     "theme",
     "private_site",
     "api_key",
-    "auto_discovery_key",
     "script_domain",
     "send_ip_addr_to_guest",
     "eula_accepted",

@@ -2,7 +2,6 @@
 //!
 //! This crate implements:
 //!
-//! * `POST /api/clients/register` — auto-discovery registration.
 //! * `GET  /api/clients/report` — persistent WebSocket metric stream.
 //! * `POST /api/clients/report` — one-shot HTTP metric report.
 //! * `POST /api/clients/uploadBasicInfo` — static hardware/OS information.
@@ -67,10 +66,6 @@ use komari_auth::{AuthLayer, RequireRole};
 pub fn client_router() -> Router<ApiState> {
     Router::new()
         .route("/api/clients", get(ws::clients_ws))
-        .route(
-            "/api/clients/register",
-            post(agent::register::register_client),
-        )
         .merge(agent_routes())
 }
 
@@ -99,10 +94,6 @@ pub fn client_router_with_state(state: ApiState) -> Router {
         .layer(AuthLayer::new(auth));
     Router::new()
         .route("/api/clients", get(ws::clients_ws))
-        .route(
-            "/api/clients/register",
-            post(agent::register::register_client),
-        )
         .merge(agent)
         .with_state(state)
 }

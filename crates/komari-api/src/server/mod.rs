@@ -800,10 +800,6 @@ fn seed_site_config_defaults(db: &Db) -> Result<()> {
         (keys::THEME_KEY, json!(default.theme)),
         (keys::PRIVATE_SITE_KEY, json!(default.private_site)),
         (keys::API_KEY_KEY, json!(default.api_key)),
-        (
-            keys::AUTO_DISCOVERY_KEY_KEY,
-            json!(default.auto_discovery_key),
-        ),
         (keys::SCRIPT_DOMAIN_KEY, json!(default.script_domain)),
         (
             keys::SEND_IP_ADDR_TO_GUEST_KEY,

@@ -34,7 +34,6 @@ pub const ALLOW_CORS_KEY: &str = "allow_cors";
 pub const THEME_KEY: &str = "theme";
 pub const PRIVATE_SITE_KEY: &str = "private_site";
 pub const API_KEY_KEY: &str = "api_key";
-pub const AUTO_DISCOVERY_KEY_KEY: &str = "auto_discovery_key";
 pub const SCRIPT_DOMAIN_KEY: &str = "script_domain";
 pub const SEND_IP_ADDR_TO_GUEST_KEY: &str = "send_ip_addr_to_guest";
 pub const EULA_ACCEPTED_KEY: &str = "eula_accepted";

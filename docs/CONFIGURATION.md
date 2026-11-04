@@ -233,7 +233,6 @@ SQLite 连接由 `crates/komari-db/src/db.rs` 的 `DbOptions` 控制；CLI 只�
 | `theme` | string | `"default"` | 当前主题目录名。 |
 | `private_site` | bool | `false` | 私有站点；未登录访问 `/api/*` 返回 401。 |
 | `api_key` | string | `""` | 管理员 API key；长度至少 12 才生效。 |
-| `auto_discovery_key` | string | `""` | agent 自动发现注册 key。 |
 | `script_domain` | string | `""` | 自定义脚本域名。 |
 | `send_ip_addr_to_guest` | bool | `false` | 是否向访客发送 IP 地址。 |
 | `eula_accepted` | bool | `false` | EULA 接受标记。 |

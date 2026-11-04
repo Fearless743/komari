@@ -51,7 +51,7 @@
 | --- | --- | --- | --- |
 | 健康检查 | `GET /ping`（Go 用 `Any`） | 已实现（B04 public router；B09 默认装配） | B04/B09 |
 | 公开 API | `/api/login`、`/api/public`、`/api/nodes`、`/api/version` 等 | 已实现（B04） | B04 |
-| Agent API | `/api/clients/register`、`/api/clients/report`、`/api/clients/uploadBasicInfo` | 已实现（B05/B09） | B05/B09 |
+| Agent API | `/api/clients/report`、`/api/clients/uploadBasicInfo` | 已实现（B05/B09） | B05/B09 |
 | 浏览器 WebSocket | `GET /api/clients` | 已实现（B05/B09） | B05/B09 |
 | 管理 API | `/api/admin/*` | 已实现（B06） | B06 |
 | JSON-RPC | `GET/POST /api/rpc2` | 已实现（B04/B06） | B04/B06 |
@@ -98,7 +98,6 @@
 
 | 方法 | 路径 | 说明 |
 | --- | --- | --- |
-| `POST` | `/api/clients/register` | 自动发现注册；使用 `auto_discovery_key`。 |
 | `GET` | `/api/clients/report` | agent 持久 WebSocket 上报。 |
 | `POST` | `/api/clients/report` | 一次性 HTTP 上报。 |
 | `POST` | `/api/clients/uploadBasicInfo` | 静态硬件/OS/网络信息上报。 |

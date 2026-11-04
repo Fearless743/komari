@@ -7,7 +7,7 @@ use std::time::Duration;
 use axum::extract::FromRef;
 use komari_auth::AuthState;
 use komari_config::keys;
-use komari_db::{Db, DbError};
+use komari_db::Db;
 use komari_ddns::DdnsService;
 use komari_geoip::GeoIpService;
 use komari_jobs::CancelToken;
@@ -294,16 +294,6 @@ impl ApiState {
         &self,
     ) -> Result<crate::cache::FlushSummary, (crate::cache::FlushSummary, String)> {
         self.report_cache.flush(&self.db)
-    }
-
-    /// Read the auto-discovery key from the persisted configuration.
-    ///
-    /// Missing keys are persisted as the empty string, exactly like
-    /// `config.GetAs[string](config.AutoDiscoveryKeyKey, "")`.
-    pub fn auto_discovery_key(&self) -> Result<String, DbError> {
-        self.db
-            .config()
-            .get_as_or(keys::AUTO_DISCOVERY_KEY_KEY, String::new())
     }
 
     /// Whether cross-origin WebSockets are allowed.
