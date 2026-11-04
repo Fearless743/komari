@@ -185,7 +185,71 @@ fn decode_loose<T: DeserializeOwned + Default>(value: &JsonValue) -> Result<T> {
     if value.is_null() {
         return Ok(T::default());
     }
-    Ok(T::deserialize(GoValue(value.clone()))?)
+    match T::deserialize(GoValue(value.clone())) {
+        Ok(decoded) => Ok(decoded),
+        Err(_) => {
+            // Go's fallback decodes into `any` (numbers become float64), then
+            // re-marshals that generic value and unmarshals it into T. The
+            // remarshal turns integral float64 values such as 80.0 into `80`,
+            // which lets them populate integer fields inside structs/slices/
+            // maps. Non-integral values and out-of-range narrow integers still
+            // fail at the final strict unmarshal.
+            let generic = go_generic_value(value);
+            let remarshaled = go_remarshal_value(&generic);
+            Ok(T::deserialize(remarshaled)?)
+        }
+    }
+}
+
+/// Convert a stored JSON value to what Go's `json.Unmarshal(..., &any)` would
+/// produce: every number becomes an `f64`, arrays/maps recurse.
+fn go_generic_value(value: &JsonValue) -> JsonValue {
+    match value {
+        JsonValue::Number(number) => {
+            let float = number.as_f64().unwrap_or_default();
+            JsonValue::Number(serde_json::Number::from_f64(float).unwrap_or_else(|| 0.into()))
+        }
+        JsonValue::Array(values) => JsonValue::Array(values.iter().map(go_generic_value).collect()),
+        JsonValue::Object(values) => JsonValue::Object(
+            values
+                .iter()
+                .map(|(key, value)| (key.clone(), go_generic_value(value)))
+                .collect(),
+        ),
+        other => other.clone(),
+    }
+}
+
+/// Approximate `json.Marshal(any)` followed by `json.Unmarshal(..., &T)`:
+/// integral floats are emitted as integers when they fit, while fractions and
+/// out-of-range values stay floating point.
+fn go_remarshal_value(value: &JsonValue) -> JsonValue {
+    match value {
+        JsonValue::Number(number) => {
+            let Some(float) = number.as_f64() else {
+                return value.clone();
+            };
+            if float.is_finite() && float.fract() == 0.0 {
+                if (-9_223_372_036_854_775_808.0..9_223_372_036_854_775_808.0).contains(&float) {
+                    return JsonValue::from(float as i64);
+                }
+                if (0.0..18_446_744_073_709_551_616.0).contains(&float) {
+                    return JsonValue::from(float as u64);
+                }
+            }
+            JsonValue::Number(serde_json::Number::from_f64(float).unwrap_or_else(|| 0.into()))
+        }
+        JsonValue::Array(values) => {
+            JsonValue::Array(values.iter().map(go_remarshal_value).collect())
+        }
+        JsonValue::Object(values) => JsonValue::Object(
+            values
+                .iter()
+                .map(|(key, value)| (key.clone(), go_remarshal_value(value)))
+                .collect(),
+        ),
+        other => other.clone(),
+    }
 }
 
 /// Top-level deserializer mirroring Go's `convertAndSet`.
@@ -252,16 +316,28 @@ fn go_u64(value: &JsonValue) -> Option<u64> {
 }
 
 fn go_bytes(value: &JsonValue) -> Option<Vec<u8>> {
-    use base64::Engine;
     let text = value.as_str()?;
-    // Go's `json.Unmarshal` base64-decodes strings into `[]byte`; when the
-    // string is not valid base64, `convertAndSet` reaches the reflect
-    // string->[]byte conversion and keeps the raw bytes.
-    Some(
-        base64::engine::general_purpose::STANDARD
-            .decode(text)
-            .unwrap_or_else(|_| text.as_bytes().to_vec()),
-    )
+    // Go's `json.Unmarshal` base64-decodes strings into `[]byte` using
+    // `base64.StdEncoding`: CR/LF are ignored and non-zero trailing bits are
+    // accepted. When decoding genuinely fails, `convertAndSet` reaches the
+    // reflect string->[]byte conversion and keeps the raw bytes.
+    Some(go_base64_decode(text).unwrap_or_else(|| text.as_bytes().to_vec()))
+}
+
+fn go_base64_decode(text: &str) -> Option<Vec<u8>> {
+    use base64::alphabet;
+    use base64::engine::Engine;
+    use base64::engine::general_purpose::{GeneralPurpose, GeneralPurposeConfig};
+
+    let cleaned: String = text
+        .chars()
+        .filter(|character| !matches!(character, '\r' | '\n'))
+        .collect();
+    let engine = GeneralPurpose::new(
+        &alphabet::STANDARD,
+        GeneralPurposeConfig::new().with_decode_allow_trailing_bits(true),
+    );
+    engine.decode(cleaned.as_bytes()).ok()
 }
 
 /// Sequence access for a base64/raw string decoded into bytes. Only `u8`

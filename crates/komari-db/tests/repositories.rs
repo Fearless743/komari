@@ -4,6 +4,8 @@ mod support;
 
 use std::collections::HashMap;
 
+use serde::Deserialize;
+
 use komari_db::models::{
     Client, Clipboard, DdnsSyncHistory, GPURecord, LoadNotification, Log, OfflineNotification,
     Provider, Record, User,
@@ -726,6 +728,87 @@ fn config_get_as_decodes_base64_for_byte_targets() {
     );
     // Only []byte targets reinterpret strings as bytes.
     assert!(config.get_as::<Vec<i64>>("raw_bytes").is_err());
+}
+
+#[derive(Debug, Default, Deserialize, PartialEq)]
+struct LooseStruct {
+    count: i64,
+    ratio: f64,
+    small: i8,
+}
+
+#[test]
+fn config_get_as_remarshals_compound_integral_floats_like_go() {
+    let db = memory_db();
+    let config = db.config();
+
+    // Go's first strict unmarshal fails on 80.0 into an integer field; the
+    // generic remarshal turns it into `80`, so the second unmarshal succeeds.
+    config
+        .set_raw("struct", r#"{"count":80.0,"ratio":80,"small":80.0}"#)
+        .unwrap();
+    assert_eq!(
+        config.get_as::<LooseStruct>("struct").unwrap(),
+        Some(LooseStruct {
+            count: 80,
+            ratio: 80.0,
+            small: 80,
+        })
+    );
+
+    config.set_raw("slice", "[80.0,81.0]").unwrap();
+    assert_eq!(
+        config.get_as::<Vec<i64>>("slice").unwrap(),
+        Some(vec![80, 81])
+    );
+
+    config.set_raw("map", r#"{"a":80.0,"b":81.0}"#).unwrap();
+    let mut expected = HashMap::new();
+    expected.insert("a".to_owned(), 80_i64);
+    expected.insert("b".to_owned(), 81_i64);
+    assert_eq!(
+        config.get_as::<HashMap<String, i64>>("map").unwrap(),
+        Some(expected)
+    );
+
+    // Fractions and out-of-range narrow integers still fail after remarshal.
+    config
+        .set_raw("fraction", r#"{"count":80.5,"ratio":80,"small":80}"#)
+        .unwrap();
+    assert!(config.get_as::<LooseStruct>("fraction").is_err());
+    config
+        .set_raw("narrow", r#"{"count":80,"ratio":80,"small":300.0}"#)
+        .unwrap();
+    assert!(config.get_as::<LooseStruct>("narrow").is_err());
+    config.set_raw("slice_fraction", "[80.5]").unwrap();
+    assert!(config.get_as::<Vec<i64>>("slice_fraction").is_err());
+}
+
+#[test]
+fn config_get_as_base64_matches_go_std_encoding() {
+    let db = memory_db();
+    let config = db.config();
+
+    // Go's base64.StdEncoding ignores CR/LF.
+    config.set_raw("crlf", "\"aG\\r\\nk=\"").unwrap();
+    assert_eq!(
+        config.get_as::<Vec<u8>>("crlf").unwrap(),
+        Some(b"hi".to_vec())
+    );
+
+    // StdEncoding is non-strict: non-zero trailing bits are accepted.
+    config.set_raw("trailing_bits", "\"aGl=\"").unwrap();
+    assert_eq!(
+        config.get_as::<Vec<u8>>("trailing_bits").unwrap(),
+        Some(b"hi".to_vec())
+    );
+
+    // Genuinely invalid base64 still falls back to the raw string bytes.
+    config.set_raw("invalid", "\"aGk\"").unwrap();
+    assert_eq!(
+        config.get_as::<Vec<u8>>("invalid").unwrap(),
+        Some(b"aGk".to_vec())
+    );
 }
 
 #[test]
