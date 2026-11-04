@@ -487,13 +487,14 @@ fn native_set_timeout(
     args: &[JsValue],
     context: &mut Context,
 ) -> JsResult<JsValue> {
-    let callback = args
+    // Go's setTimeout silently ignores a non-callable first argument.
+    let Some(callback) = args
         .first()
         .and_then(JsValue::as_object)
         .and_then(|object| JsFunction::from_object(object.clone()))
-        .ok_or_else(|| {
-            JsNativeError::typ().with_message("setTimeout requires a callback function")
-        })?;
+    else {
+        return Ok(JsValue::undefined());
+    };
 
     let delay = match args.get(1) {
         Some(value) => {

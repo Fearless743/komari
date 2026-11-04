@@ -298,6 +298,69 @@ async fn fetch_rejects_with_a_string_like_go() {
 }
 
 #[tokio::test]
+async fn set_timeout_ignores_non_callable_arguments() {
+    // Go's setTimeout only calls the argument when it is callable.
+    let sender = text_sender(
+        r#"
+        function sendMessage() {
+            setTimeout(42, 10);
+            setTimeout(null, 10);
+            setTimeout(undefined, 10);
+            return true;
+        }
+        "#,
+    );
+
+    sender.send_text("hello", "title").await.unwrap();
+}
+
+#[tokio::test]
+async fn fetch_uses_the_first_value_of_a_repeated_header() {
+    let transport = Arc::new(MockHttp::new(vec![
+        HttpResponse::new(200, b"ok".to_vec())
+            .with_header("Set-Cookie", "a")
+            .with_header("Set-Cookie", "b"),
+    ]));
+    let sender = sender(
+        r#"
+        async function sendMessage() {
+            const response = await fetch("https://hook.example/multi");
+            return response.headers["Set-Cookie"] === "a"
+                && response.headers.get("set-cookie") === "a";
+        }
+        "#,
+        transport,
+    );
+
+    sender.send_text("hello", "title").await.unwrap();
+}
+
+#[tokio::test]
+async fn fetch_json_parse_error_rejects_with_a_string() {
+    let transport = Arc::new(MockHttp::new(vec![HttpResponse::new(
+        200,
+        b"not json".to_vec(),
+    )]));
+    let sender = sender(
+        r#"
+        async function sendMessage() {
+            const response = await fetch("https://hook.example/bad-json");
+            try {
+                await response.json();
+                return false;
+            } catch (error) {
+                return typeof error === "string"
+                    && error.indexOf("Failed to parse JSON: ") === 0;
+            }
+        }
+        "#,
+        transport,
+    );
+
+    sender.send_text("hello", "title").await.unwrap();
+}
+
+#[tokio::test]
 async fn fetch_uses_the_wire_reason_phrase_when_available() {
     let transport = Arc::new(MockHttp::new(vec![
         HttpResponse::new(202, b"ok".to_vec()).with_status_text("Custom Reason"),

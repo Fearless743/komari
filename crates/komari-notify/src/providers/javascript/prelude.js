@@ -15,7 +15,11 @@
   function headersFrom(pairs) {
     var headers = {};
     for (var i = 0; i < pairs.length; i += 1) {
-      headers[pairs[i][0]] = pairs[i][1];
+      // Go sets `headers.Set(key, values[0])`: the first value of a repeated
+      // header wins.
+      if (!Object.prototype.hasOwnProperty.call(headers, pairs[i][0])) {
+        headers[pairs[i][0]] = pairs[i][1];
+      }
     }
     Object.defineProperty(headers, "get", {
       enumerable: false,
