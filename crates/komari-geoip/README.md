@@ -18,8 +18,9 @@ keyed by provider name and address, exactly like Go's
 
 Go's `go-cache` does not impose a capacity limit; entries expire by TTL only.
 This crate follows the same policy: there is no entry-count cap and no
-oldest-entry eviction. Expired entries are removed lazily on lookup or
-`cache_len()`. `with_cache_ttl(Duration::ZERO)` disables caching.
+oldest-entry eviction. A background janitor (`spawn_janitor`, one-hour interval
+by default) removes expired entries, and lookups/`cache_len()` also purge
+lazily. `with_cache_ttl(Duration::ZERO)` disables caching.
 
 ## Providers
 
