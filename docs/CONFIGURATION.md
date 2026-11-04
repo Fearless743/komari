@@ -13,11 +13,10 @@
 
 > **当前实现边界**
 >
-> 本基线的 `komari server` 只解析配置并打印启动信息，HTTP 监听、WebSocket、
-> CORS 和 cloudflared 启动尚未装配（分别由 B04/B05/B06 及 B13/B14 服务器装配负责）。
-> 下文中标注“已解析”的配置项已经进入 `Config`，但其运行时效果要等对应模块合并后
-> 才会生效；标注“已实现”的模块可以直接使用。部署现状见
-> [DEPLOYMENT.md](DEPLOYMENT.md)，模块状态见 [PARITY.md](PARITY.md)。
+> 本基线的 `komari server` 已装配 HTTP 监听、WebSocket、CORS、后台任务和
+> GeoIP/DDNS/通知/OAuth 服务；cloudflared 仍只解析配置，不启动隧道进程。
+> 下文中标注“已解析”的配置项已经进入 `Config`；标注“已实现”的模块可以直接使用。
+> 部署现状见 [DEPLOYMENT.md](DEPLOYMENT.md)，模块状态见 [PARITY.md](PARITY.md)。
 
 ## 1. 配置优先级
 
@@ -45,9 +44,9 @@ CLI 的 `--database` 与 `--db-file` 是同一个参数，`--db-file` 是可见�
 | `KOMARI_LOG_LEVEL` | `--log-level` | 开发构建 `debug`，否则 `info` | `trace`、`debug`、`info`、`warn`、`error`、`off`；另接受别名 `warning`、`none`。 |
 | `KOMARI_THEME` | `--theme` | `default` | 启动配置中的主题名。实际站点主题以数据库 `configs.theme` 为准。 |
 | `KOMARI_ALLOW_CORS` | `--allow-cors[=BOOL]` | `false` | 启动配置中的 CORS 开关。运行时 CORS 由持久化 `allow_cors` 控制。 |
-| `KOMARI_ENABLE_CLOUDFLARED` | `--enable-cloudflared[=BOOL]` | `false` | 是否启用 cloudflared。当前只解析，尚未启动隧道进程。 |
+| `KOMARI_ENABLE_CLOUDFLARED` | `--enable-cloudflared[=BOOL]` | `false` | 是否启用 cloudflared；环境变量只接受大小写不敏感的 `true`。当前只解析，尚未启动隧道进程。 |
 | `KOMARI_CLOUDFLARED_TOKEN` | 无 | 未设置 | cloudflared tunnel token。当前只解析，尚未使用。 |
-| `KOMARI_WS_DISABLE_ORIGIN` | `--ws-disable-origin[=BOOL]` | `false` | 是否关闭 WebSocket Origin 校验。当前只解析，WS 由 B05/B14 装配。 |
+| `KOMARI_WS_DISABLE_ORIGIN` | `--ws-disable-origin[=BOOL]` | `false` | 是否关闭 WebSocket Origin 校验；环境变量只接受大小写不敏感的 `true`。 |
 | `KOMARI_BODY_LIMIT` | `--body-limit <BYTES>` | `16777216`（16 MiB） | 普通 HTTP 请求体上限（字节），必须为正整数。`/api/admin/upload/backup` 使用独立的 2 GiB 上限。 |
 
 ### 编译期与测试变量
@@ -76,7 +75,7 @@ CLI 的 `--database` 与 `--db-file` 是同一个参数，`--db-file` 是可见�
 
 - 环境变量：`1` / `true` / `yes` / `on` 为真，`0` / `false` / `no` / `off` 为假；
   大小写不敏感，前后空白会被忽略。
-- 例外：`KOMARI_WS_DISABLE_ORIGIN` 与 Go 的 `ws.CheckOrigin` 一致，只接受大小写
+- 例外：`KOMARI_WS_DISABLE_ORIGIN` 与 `KOMARI_ENABLE_CLOUDFLARED` 只接受大小写
   不敏感的 `true`；`1`、`yes`、`on`、` true ` 以及其他值都视为 `false`，且不会
   产生配置错误。
 - CLI flag：clap 的 `BoolValueParser` **只接受小写 `true` / `false`**；
@@ -201,7 +200,8 @@ SQLite 连接由 `crates/komari-db/src/db.rs` 的 `DbOptions` 控制；CLI 只�
   校验。
 - 预期行为：为 `true` 时跳过 Origin 校验；否则要求 `Origin` 的 host 与请求
   `Host` 一致。浏览器 WebSocket 还会在 `allow_cors=true` 时直接放行。
-- 当前只有配置解析；具体升级逻辑由 B05（agent/browser WS）和 B14（页面）装配。
+- 该值在启动时解析为 `Config`，运行时不重新读取环境变量；`--ws-disable-origin=false`
+  不会被残留的 `KOMARI_WS_DISABLE_ORIGIN=true` 覆盖。
 
 ### cloudflared
 
@@ -297,8 +297,8 @@ Time: {{time}}
 - `ip-api` 使用 `http://ip-api.com/json/<ip>`；`ipinfo` 使用
   `https://ipinfo.io/<ip>/json`；`geojs` 使用
   `https://get.geojs.io/v1/ip/geo/<ip>.json`。
-- 查询结果缓存 48 小时，与 Go 的 `go-cache` 一致没有容量上限；过期条目按需
-  清理。
+- 查询结果缓存 48 小时，与 Go 的 `go-cache` 一致没有容量上限；后台 janitor
+  每小时清理一次过期条目，查询时也会惰性清理。
 - provider 初始化失败或 `geo_ip_enabled=false` 时回退到 empty provider，
   查询返回空 `GeoInfo`，不会 panic。
 - GeoIP 没有 `KOMARI_*` 环境变量，全部通过数据库配置。
