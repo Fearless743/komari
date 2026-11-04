@@ -52,6 +52,23 @@ received empty `key`/`value` columns from an older additive migration) is
 converted into key/value form with the original table kept as
 `configs_legacy_backup`.
 
+### Historical migrations (Go `MergeDatabase` parity)
+
+Very old databases are upgraded in the same transaction as the schema repair,
+before the single-row `configs` table is converted:
+
+| Era | Migration |
+| --- | --- |
+| pre-0.0.5 | `client_infos` is merged into `clients` by UUID. The static fields from Go `common.ClientInfo` are copied, unknown UUIDs are skipped, and the old table is renamed to `client_infos_backup` (created only once). |
+| pre-1.0.2 OIDC | When `oidc_providers` does not exist, `o_auth_client_id` / `o_auth_client_secret` become the `github` provider with `addition = {"client_id":...,"client_secret":...}`. Legacy single-row `configs` are forced to `o_auth_provider = "github"`, matching Go. |
+| pre-1.0.2 notifications | When `message_sender_providers` does not exist, `notification_method = "telegram"` / `"email"` creates the corresponding provider. Telegram keeps Go's `bot_token`, `chat_id`, `endpoint` shape (default endpoint `https://api.telegram.org/bot`); email keeps `host`, `port`, `username`, `password`, `sender`, `receiver`, `use_ssl`. |
+
+The moved OAuth/notification columns are not copied into the key/value
+`configs` table, matching Go's current `config.Legacy` model; they remain
+available in `configs_legacy_backup` for manual recovery. Every step checks for
+the target table/backup first, so re-running `migrate()` is a no-op. Any error
+rolls the whole transaction back, leaving the original database untouched.
+
 `clients`, `users`, `sessions`, `records`, `gpu_records`, `logs`, `clipboards`,
 `offline_notifications`, `load_notifications`, `oidc_providers`,
 `message_sender_providers`, `ddns_providers`, `ddns_sync_history`,
@@ -286,11 +303,14 @@ real configuration values.
 - The percentile-based record compaction (`records` -> `records_long_term`) is
   not ported yet; the tables and queries are available, so callers can read
   long-term data written by the Go backend.
-- The legacy `client_infos` merge is not performed automatically; databases
-  from before that rename should be opened once with the Go backend first.
-- The pre-1.0.2 migrations that moved OAuth/notification settings out of the
-  old `configs` columns are not re-run; databases from that era should be
-  opened once with the Go backend first.
+- The pre-0.0.5 `client_infos` merge and the pre-1.0.2 OAuth/notification
+  migrations are performed automatically in the same transaction as the rest
+  of `migrate()`. `client_infos_backup` and `configs_legacy_backup` are kept for
+  recovery; remove them manually after verifying the migrated data.
+- The old OAuth/notification credential columns are deliberately not copied
+  into the new key/value `configs` table. They remain in
+  `configs_legacy_backup` (if that table was created) so an operator can
+  recover them; this is the only place the legacy secrets survive.
 - `ConfigRepo::get_as<T>` applies the same fallbacks as Go `config.GetAs`:
   `null` becomes the type's zero value, integers/floats are converted between
   numeric target types, and base64 strings decode to `Vec<u8>`. Out-of-range
