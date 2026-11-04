@@ -138,6 +138,9 @@ jobs:
         with:
           name: komari-theme
           path: .komari-theme
+          # `.komari-theme` starts with a dot; upload-artifact@v4 skips hidden
+          # files unless this is enabled.
+          include-hidden-files: true
           if-no-files-found: error
 
   build:
