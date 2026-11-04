@@ -387,12 +387,10 @@ fn fire_timers(context: &mut Context) -> Result<()> {
 // ---------------------------------------------------------------------------
 
 fn install_globals(context: &mut Context) -> JsResult<()> {
+    // Go's setupGlobals only defines console.log and console.error.
     let console = JsObject::with_object_proto(context.intrinsics());
     for (name, function) in [
         ("log", NativeFunction::from_fn_ptr(native_console_log)),
-        ("info", NativeFunction::from_fn_ptr(native_console_log)),
-        ("debug", NativeFunction::from_fn_ptr(native_console_debug)),
-        ("warn", NativeFunction::from_fn_ptr(native_console_warn)),
         ("error", NativeFunction::from_fn_ptr(native_console_error)),
     ] {
         console.set(
@@ -403,23 +401,6 @@ fn install_globals(context: &mut Context) -> JsResult<()> {
         )?;
     }
     context.register_global_property(js_string!("console"), console, Attribute::all())?;
-
-    let process = JsObject::with_object_proto(context.intrinsics());
-    process.set(
-        js_string!("env"),
-        JsObject::with_object_proto(context.intrinsics()),
-        false,
-        context,
-    )?;
-    process.set(js_string!("argv"), JsArray::new(context), false, context)?;
-    process.set(js_string!("platform"), js_string!("komari"), false, context)?;
-    process.set(
-        js_string!("version"),
-        js_string!(env!("CARGO_PKG_VERSION")),
-        false,
-        context,
-    )?;
-    context.register_global_property(js_string!("process"), process, Attribute::all())?;
 
     context.register_global_callable(
         js_string!("__komari_http"),
@@ -435,11 +416,6 @@ fn install_globals(context: &mut Context) -> JsResult<()> {
         js_string!("setTimeout"),
         2,
         NativeFunction::from_fn_ptr(native_set_timeout),
-    )?;
-    context.register_global_callable(
-        js_string!("clearTimeout"),
-        1,
-        NativeFunction::from_fn_ptr(native_clear_timeout),
     )?;
 
     Ok(())
@@ -463,24 +439,6 @@ fn native_console_log(
     context: &mut Context,
 ) -> JsResult<JsValue> {
     tracing::info!(target: "komari_notify::javascript", "{}", console_text(args, context));
-    Ok(JsValue::undefined())
-}
-
-fn native_console_debug(
-    _this: &JsValue,
-    args: &[JsValue],
-    context: &mut Context,
-) -> JsResult<JsValue> {
-    tracing::debug!(target: "komari_notify::javascript", "{}", console_text(args, context));
-    Ok(JsValue::undefined())
-}
-
-fn native_console_warn(
-    _this: &JsValue,
-    args: &[JsValue],
-    context: &mut Context,
-) -> JsResult<JsValue> {
-    tracing::warn!(target: "komari_notify::javascript", "{}", console_text(args, context));
     Ok(JsValue::undefined())
 }
 
@@ -552,43 +510,17 @@ fn native_set_timeout(
         None => 0,
     };
 
-    let id = ACTIVE.with(|cell| -> JsResult<u64> {
+    ACTIVE.with(|cell| -> JsResult<()> {
         let mut guard = cell.borrow_mut();
         let state = guard.as_mut().ok_or_else(unavailable)?;
-        let id = state.allocate();
         state.timers.push(Timer {
-            id,
             deadline: Instant::now() + Duration::from_millis(delay),
             callback,
         });
-        Ok(id)
+        Ok(())
     })?;
 
-    Ok(JsValue::from(id as i32))
-}
-
-fn native_clear_timeout(
-    _this: &JsValue,
-    args: &[JsValue],
-    context: &mut Context,
-) -> JsResult<JsValue> {
-    let Some(id) = args
-        .first()
-        .map(|value| value.to_number(context))
-        .transpose()?
-    else {
-        return Ok(JsValue::undefined());
-    };
-    if !id.is_finite() || id < 0.0 {
-        return Ok(JsValue::undefined());
-    }
-    let id = id as u64;
-    ACTIVE.with(|cell| {
-        let mut guard = cell.borrow_mut();
-        if let Some(state) = guard.as_mut() {
-            state.timers.retain(|timer| timer.id != id);
-        }
-    });
+    // Go's setTimeout returns undefined.
     Ok(JsValue::undefined())
 }
 

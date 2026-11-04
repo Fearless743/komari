@@ -553,22 +553,42 @@ async fn rejected_promise_does_not_leak_the_secret() {
 }
 
 #[tokio::test]
-async fn require_supports_goja_builtins_and_rejects_unknown_modules() {
+async fn require_throws_invalid_module_for_every_name() {
+    // Go enables goja_nodejs's registry without registering any native module,
+    // so every `require` call fails with "Invalid module".
     let sender = text_sender(
         r#"
         function sendMessage() {
-            const consoleModule = require("console");
-            const processModule = require("process");
-            consoleModule.log("script log");
-            let unknown = false;
-            try {
-                require("fs");
-            } catch (error) {
-                unknown = String(error.message).indexOf("Cannot find module 'fs'") >= 0;
+            const names = ["console", "process", "fs", "./local"];
+            for (let index = 0; index < names.length; index += 1) {
+                let message = null;
+                try {
+                    require(names[index]);
+                } catch (error) {
+                    message = String(error.message);
+                }
+                if (message !== "Invalid module") return false;
             }
-            return typeof consoleModule.log === "function"
-                && typeof processModule.version === "string"
-                && unknown;
+            return true;
+        }
+        "#,
+    );
+
+    sender.send_text("hello", "title").await.unwrap();
+}
+
+#[tokio::test]
+async fn injected_globals_match_the_go_runtime() {
+    let sender = text_sender(
+        r#"
+        function sendMessage() {
+            return typeof console.log === "function"
+                && typeof console.error === "function"
+                && typeof console.info === "undefined"
+                && typeof console.warn === "undefined"
+                && typeof globalThis.process === "undefined"
+                && typeof clearTimeout === "undefined"
+                && setTimeout(function () {}, 0) === undefined;
         }
         "#,
     );

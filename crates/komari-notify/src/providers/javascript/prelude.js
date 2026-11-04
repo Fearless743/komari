@@ -188,17 +188,9 @@
 
   globalThis.XMLHttpRequest = XMLHttpRequest;
 
-  // goja_nodejs exposes `require` but registers no native modules by default.
-  // Only the modules that make sense without a file system are provided; the
-  // rest fail with the same message goja produces.
-  globalThis.require = function require(name) {
-    var moduleName = String(name);
-    if (moduleName === "console") {
-      return globalThis.console;
-    }
-    if (moduleName === "process") {
-      return globalThis.process;
-    }
-    throw new Error("Cannot find module '" + moduleName + "'");
+  // goja_nodejs registers no native modules, so every `require` call fails.
+  // Go's provider only enables the registry; it never registers a module.
+  globalThis.require = function require() {
+    throw new Error("Invalid module");
   };
 })();

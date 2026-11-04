@@ -28,7 +28,6 @@ pub(super) enum NetEvent {
 
 /// A timer scheduled with `setTimeout`.
 pub(super) struct Timer {
-    pub id: u64,
     pub deadline: Instant,
     pub callback: JsFunction,
 }
