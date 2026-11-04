@@ -453,6 +453,50 @@ fn from_app_config_maps_the_cloudflared_gate() {
 
 #[cfg(unix)]
 #[tokio::test]
+async fn tunnel_exit_triggers_a_fast_graceful_shutdown_and_an_error() {
+    let dir = TempDir::new().expect("temp dir");
+    write_mock_script(dir.path(), "#!/bin/sh\nsleep 0.1\nexit 3\n");
+    let config = ServerConfig {
+        enable_cloudflared: true,
+        cloudflared_token: Some("test-token".to_owned()),
+        shutdown_timeout: Duration::from_secs(2),
+        ..server_config(&dir)
+    };
+    let server = ServerBuilder::new(config)
+        .with_db(memory_db())
+        .skip_services()
+        .build()
+        .await
+        .expect("build server");
+    let cloudflared = server
+        .cloudflared()
+        .expect("tunnel should be configured")
+        .clone();
+    let listener = TcpListener::bind("127.0.0.1:0")
+        .await
+        .expect("bind random port");
+
+    let started = tokio::time::Instant::now();
+    let result = tokio::time::timeout(
+        Duration::from_secs(2),
+        server.serve_with_shutdown(listener, std::future::pending()),
+    )
+    .await
+    .expect("server should shut down before the timeout");
+    let elapsed = started.elapsed();
+
+    let error = result.expect_err("cloudflared exit must fail the server");
+    assert!(error.to_string().contains("cloudflared"), "{error}");
+    assert!(
+        elapsed < Duration::from_secs(1),
+        "tunnel exit should drain immediately, took {elapsed:?}"
+    );
+    assert!(cloudflared.has_exited());
+    assert_eq!(cloudflared.exit_info().and_then(|info| info.code), Some(3));
+}
+
+#[cfg(unix)]
+#[tokio::test]
 async fn server_shutdown_stops_the_configured_tunnel() {
     let dir = TempDir::new().expect("temp dir");
     write_mock_script(dir.path(), "#!/bin/sh\nwhile :; do sleep 1; done\n");

@@ -484,7 +484,9 @@ impl Cloudflared {
             .stdin(std::process::Stdio::null())
             .stdout(std::process::Stdio::piped())
             .stderr(std::process::Stdio::piped())
-            .kill_on_drop(false);
+            // If the supervisor task is aborted (for example while the Tokio
+            // runtime is shutting down), Tokio still kills the child.
+            .kill_on_drop(true);
         let mut child = command.spawn().map_err(|source| CloudflaredError::Spawn {
             path: binary_path.clone(),
             source,

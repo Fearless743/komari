@@ -550,45 +550,62 @@ impl Server {
         // `Server` implements `Drop`, so the router is moved out instead of
         // destructuring `self`.
         let router = std::mem::replace(&mut self.router, Router::new());
-        // Signal the select branch only after the caller's shutdown future
-        // completes. The timeout must not start when the server starts.
-        let (shutdown_tx, shutdown_rx) = tokio::sync::oneshot::channel();
-        let shutdown = async move {
-            shutdown.await;
-            let _ = shutdown_tx.send(());
+        // Both the caller's shutdown future and a cloudflared exit feed the
+        // same watch channel. Axum's graceful-shutdown future waits on it, so
+        // a tunnel exit stops accepting connections immediately instead of
+        // waiting for the timeout to expire.
+        let (shutdown_tx, shutdown_rx) = tokio::sync::watch::channel(None::<ShutdownReason>);
+        let cloudflared = self.cloudflared.clone();
+        let trigger = async move {
+            let reason = tokio::select! {
+                () = shutdown => ShutdownReason::Caller,
+                () = wait_for_cloudflared(cloudflared) => ShutdownReason::Cloudflared,
+            };
+            let _ = shutdown_tx.send(Some(reason));
         };
         let serve = axum::serve(
             listener,
             router.into_make_service_with_connect_info::<SocketAddr>(),
         )
-        .with_graceful_shutdown(shutdown)
+        .with_graceful_shutdown(trigger)
         .into_future();
         tokio::pin!(serve);
-        let cloudflared = self.cloudflared.clone();
+        let mut reason_rx = shutdown_rx.clone();
         let result = tokio::select! {
             result = &mut serve => result.context("HTTP server failed"),
-            _ = shutdown_rx => {
-                match tokio::time::timeout(self.config.shutdown_timeout, &mut serve).await {
-                    Ok(result) => result.context("HTTP server failed"),
-                    Err(_) => {
-                        warn!(
-                            timeout = ?self.config.shutdown_timeout,
-                            "graceful shutdown timed out; forcing shutdown"
-                        );
-                        Ok(())
-                    }
+            _ = reason_rx.changed() => {
+                let reason = *reason_rx.borrow();
+                if let Some(reason) = reason {
+                    info!(?reason, "shutdown requested");
                 }
-            }
-            _ = wait_for_cloudflared(cloudflared) => {
-                warn!("cloudflared exited; shutting down the server");
-                match tokio::time::timeout(self.config.shutdown_timeout, &mut serve).await {
-                    Ok(result) => result.context("HTTP server failed"),
+                // Go's OnShutdown kills cloudflared before shutting the HTTP
+                // server down.
+                if let Some(cloudflared) = &self.cloudflared {
+                    cloudflared.request_kill();
+                }
+                let drained =
+                    tokio::time::timeout(self.config.shutdown_timeout, &mut serve).await;
+                match drained {
+                    Ok(result) => {
+                        let result = result.context("HTTP server failed");
+                        match reason {
+                            Some(ShutdownReason::Cloudflared) => Err(anyhow::anyhow!(
+                                "cloudflared exited; shutting down the server"
+                            )),
+                            _ => result,
+                        }
+                    }
                     Err(_) => {
                         warn!(
                             timeout = ?self.config.shutdown_timeout,
                             "graceful shutdown timed out; forcing shutdown"
                         );
-                        Ok(())
+                        match reason {
+                            Some(ShutdownReason::Cloudflared) => Err(anyhow::anyhow!(
+                                "cloudflared exited; graceful shutdown timed out"
+                            )),
+                            _ => Ok(()),
+                        }
                     }
                 }
             }
@@ -618,6 +635,12 @@ impl Drop for Server {
         self.state.shutdown_background();
         self.background.cancel();
     }
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum ShutdownReason {
+    Caller,
+    Cloudflared,
 }
 
 async fn wait_for_cloudflared(cloudflared: Option<Cloudflared>) {
