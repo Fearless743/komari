@@ -394,12 +394,27 @@ async fn registry_exposes_all_go_providers_and_defaults() {
 }
 
 #[tokio::test]
-async fn javascript_provider_is_explicitly_unsupported() {
+async fn javascript_provider_loads_user_scripts() {
+    let provider = load_provider(
+        "Javascript",
+        r#"{"script":"function sendMessage(message, title) { return true; }"}"#,
+    )
+    .await
+    .unwrap();
+    assert_eq!(provider.name(), "Javascript");
+    provider.send_text("hello", "title").await.unwrap();
+
+    // Go's Init rejects scripts without a callable sendMessage.
     let error = match load_provider("Javascript", r#"{"script":"void 0"}"#).await {
-        Ok(_) => panic!("Javascript provider must be unsupported"),
+        Ok(_) => panic!("scripts without sendMessage must be rejected"),
         Err(error) => error,
     };
-    assert!(matches!(error, NotifyError::Unsupported(_)));
+    assert!(
+        error
+            .to_string()
+            .contains("sendMessage function not defined in script"),
+        "{error}"
+    );
 }
 
 #[tokio::test]
