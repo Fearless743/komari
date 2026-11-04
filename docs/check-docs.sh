@@ -100,6 +100,11 @@ for var in "${envs[@]}"; do
       need crates/komari-web/build.rs "$var"
       continue
       ;;
+    KOMARI_GO_REPO)
+      # B23 differential harness input, not a backend config key.
+      need docs/DIFFERENTIAL.md "$var"
+      continue
+      ;;
     KOMARI_WEB_DIST|KOMARI_WEB_DIR)
       # Deprecated B10 variables; docs must mark them as such.
       need docs/CONFIGURATION.md "$var"

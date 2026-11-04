@@ -24,7 +24,7 @@ DEFAULT_THEME_DIR ?=
 VERSION ?= $(shell git describe --tags --always --dirty 2>/dev/null || echo dev)
 VERSION_HASH ?= $(shell git rev-parse HEAD 2>/dev/null || echo unknown)
 
-.PHONY: all help fmt fmt-check clippy test check build release clean version
+.PHONY: all help fmt fmt-check clippy test check build release clean version differential e2e
 
 all: check
 
@@ -39,6 +39,8 @@ help:
 	@echo "  make release    Release build with version injection into $(OUT_DIR)/"
 	@echo "  make clean      Remove build output"
 	@echo "  make version    Print the version that would be injected"
+	@echo "  make differential  Go vs Rust differential test"
+	@echo "  make e2e        Frontend E2E smoke test"
 	@echo ""
 	@echo "Variables:"
 	@echo "  DEFAULT_THEME_DIR=/path/to/defaultTheme  Embed a real B14 theme"
@@ -76,6 +78,12 @@ release:
 clean:
 	$(CARGO) clean
 	rm -rf "$(OUT_DIR)"
+
+differential:
+	./scripts/differential-test.sh
+
+e2e:
+	./scripts/frontend-e2e.sh
 
 version:
 	@echo "version: $(VERSION)"
