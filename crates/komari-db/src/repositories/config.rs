@@ -3,8 +3,9 @@
 use std::collections::HashMap;
 
 use rusqlite::params;
+use serde::Deserializer;
 use serde::Serialize;
-use serde::de::DeserializeOwned;
+use serde::de::{self, DeserializeOwned, DeserializeSeed, SeqAccess, Visitor};
 use serde_json::Value as JsonValue;
 
 use super::{query_all, query_optional};
@@ -184,40 +185,383 @@ fn decode_loose<T: DeserializeOwned + Default>(value: &JsonValue) -> Result<T> {
     if value.is_null() {
         return Ok(T::default());
     }
+    Ok(T::deserialize(GoValue(value.clone()))?)
+}
 
-    if let Ok(decoded) = serde_json::from_value(value.clone()) {
-        return Ok(decoded);
+/// Top-level deserializer mirroring Go's `convertAndSet`.
+///
+/// Go first tries `json.Unmarshal` into `T`, then falls back to decoding the
+/// value as `any` (so JSON numbers become `float64`) and applying reflect-style
+/// conversions. Scalar numeric targets reach `reflect.SetInt`/`SetUint`; the
+/// methods below reproduce those conversions. Compound targets keep serde's
+/// normal deserialization.
+struct GoValue(JsonValue);
+
+/// Convert a JSON number to `int64` the way Go does on amd64.
+///
+/// In-range floats truncate toward zero. Out-of-range values (and NaN) become
+/// `i64::MIN`, which is what Go's `int64(float64)` produces for values that do
+/// not fit.
+fn go_float_to_i64(value: f64) -> i64 {
+    let truncated = value.trunc();
+    if truncated.is_nan()
+        || truncated < -9_223_372_036_854_775_808.0
+        || truncated >= 9_223_372_036_854_775_808.0
+    {
+        i64::MIN
+    } else {
+        truncated as i64
+    }
+}
+
+/// Convert a JSON number to `uint64` the way Go does on amd64.
+///
+/// Negative in-range values wrap through their `int64` representation (so
+/// `-1.0` becomes `u64::MAX`); values outside `[0, 2^64)` become `2^63`, the
+/// same result as Go's `uint64(float64)` for those inputs.
+fn go_float_to_u64(value: f64) -> u64 {
+    if value < 9_223_372_036_854_775_808.0 {
+        go_float_to_i64(value) as u64
+    } else if value < 18_446_744_073_709_551_616.0 {
+        value.trunc() as u64
+    } else {
+        1_u64 << 63
+    }
+}
+
+fn go_i64(value: &JsonValue) -> Option<i64> {
+    let number = value.as_number()?;
+    if let Some(integer) = number.as_i64() {
+        return Some(integer);
+    }
+    if let Some(integer) = number.as_u64() {
+        return Some(go_float_to_i64(integer as f64));
+    }
+    Some(go_float_to_i64(number.as_f64()?))
+}
+
+fn go_u64(value: &JsonValue) -> Option<u64> {
+    let number = value.as_number()?;
+    if let Some(integer) = number.as_u64() {
+        return Some(integer);
+    }
+    if let Some(integer) = number.as_i64() {
+        return Some(go_float_to_u64(integer as f64));
+    }
+    Some(go_float_to_u64(number.as_f64()?))
+}
+
+fn go_bytes(value: &JsonValue) -> Option<Vec<u8>> {
+    use base64::Engine;
+    let text = value.as_str()?;
+    // Go's `json.Unmarshal` base64-decodes strings into `[]byte`; when the
+    // string is not valid base64, `convertAndSet` reaches the reflect
+    // string->[]byte conversion and keeps the raw bytes.
+    Some(
+        base64::engine::general_purpose::STANDARD
+            .decode(text)
+            .unwrap_or_else(|_| text.as_bytes().to_vec()),
+    )
+}
+
+/// Sequence access for a base64/raw string decoded into bytes. Only `u8`
+/// elements are accepted, so `Vec<u8>` succeeds while `Vec<i64>` and other
+/// sequence targets still reject the string like Go's remarshal fallback.
+struct ByteSeqAccess {
+    bytes: std::vec::IntoIter<u8>,
+}
+
+impl<'de> SeqAccess<'de> for ByteSeqAccess {
+    type Error = serde_json::Error;
+
+    fn next_element_seed<T>(
+        &mut self,
+        seed: T,
+    ) -> std::result::Result<Option<T::Value>, Self::Error>
+    where
+        T: DeserializeSeed<'de>,
+    {
+        let Some(byte) = self.bytes.next() else {
+            return Ok(None);
+        };
+        seed.deserialize(ByteValue(byte)).map(Some)
     }
 
-    if let Some(number) = value.as_f64() {
-        if !number.is_finite() {
-            return Ok(serde_json::from_value(value.clone())?);
-        }
-        // Go's convertAndSet truncates floats when the target is an integer.
-        let truncated = number.trunc();
-        if truncated >= i64::MIN as f64 && truncated <= i64::MAX as f64 {
-            if let Ok(decoded) = serde_json::from_value(JsonValue::from(truncated as i64)) {
-                return Ok(decoded);
+    fn size_hint(&self) -> Option<usize> {
+        Some(self.bytes.len())
+    }
+}
+
+struct ByteValue(u8);
+
+impl<'de> Deserializer<'de> for ByteValue {
+    type Error = serde_json::Error;
+
+    fn deserialize_u8<V>(self, visitor: V) -> std::result::Result<V::Value, Self::Error>
+    where
+        V: Visitor<'de>,
+    {
+        visitor.visit_u8(self.0)
+    }
+
+    fn deserialize_any<V>(self, _visitor: V) -> std::result::Result<V::Value, Self::Error>
+    where
+        V: Visitor<'de>,
+    {
+        Err(de::Error::custom("expected a byte value"))
+    }
+
+    serde::forward_to_deserialize_any! {
+        bool i8 i16 i32 i64 i128 u16 u32 u64 u128 f32 f64 char str string
+        bytes byte_buf option unit unit_struct newtype_struct seq tuple
+        tuple_struct map struct enum identifier ignored_any
+    }
+}
+
+macro_rules! go_signed {
+    ($method:ident, $visit:ident, $ty:ty, $convert:ident) => {
+        fn $method<V>(self, visitor: V) -> std::result::Result<V::Value, Self::Error>
+        where
+            V: Visitor<'de>,
+        {
+            match $convert(&self.0) {
+                Some(value) => visitor.$visit(value as $ty),
+                None => self.0.$method(visitor),
             }
         }
-        if truncated >= 0.0 && truncated <= u64::MAX as f64 {
-            if let Ok(decoded) = serde_json::from_value(JsonValue::from(truncated as u64)) {
-                return Ok(decoded);
+    };
+}
+
+macro_rules! go_unsigned {
+    ($method:ident, $visit:ident, $ty:ty, $convert:ident) => {
+        fn $method<V>(self, visitor: V) -> std::result::Result<V::Value, Self::Error>
+        where
+            V: Visitor<'de>,
+        {
+            match $convert(&self.0) {
+                Some(value) => visitor.$visit(value as $ty),
+                None => self.0.$method(visitor),
             }
+        }
+    };
+}
+
+/// Narrow integers go through Go's generic `any` path, where every JSON number
+/// is a `float64` first. That matters for values outside `i64`/`u64` range.
+fn go_narrow_i64(value: &JsonValue) -> Option<i64> {
+    value.as_f64().map(go_float_to_i64)
+}
+
+fn go_narrow_u64(value: &JsonValue) -> Option<u64> {
+    value.as_f64().map(go_float_to_u64)
+}
+
+impl<'de> Deserializer<'de> for GoValue {
+    type Error = serde_json::Error;
+
+    go_signed!(deserialize_i8, visit_i8, i8, go_narrow_i64);
+    go_signed!(deserialize_i16, visit_i16, i16, go_narrow_i64);
+    go_signed!(deserialize_i32, visit_i32, i32, go_narrow_i64);
+    go_signed!(deserialize_i64, visit_i64, i64, go_i64);
+    go_signed!(deserialize_i128, visit_i128, i128, go_i64);
+
+    go_unsigned!(deserialize_u8, visit_u8, u8, go_narrow_u64);
+    go_unsigned!(deserialize_u16, visit_u16, u16, go_narrow_u64);
+    go_unsigned!(deserialize_u32, visit_u32, u32, go_narrow_u64);
+    go_unsigned!(deserialize_u64, visit_u64, u64, go_u64);
+    go_unsigned!(deserialize_u128, visit_u128, u128, go_u64);
+
+    fn deserialize_f32<V>(self, visitor: V) -> std::result::Result<V::Value, Self::Error>
+    where
+        V: Visitor<'de>,
+    {
+        match self.0.as_f64() {
+            Some(value) => visitor.visit_f32(value as f32),
+            None => self.0.deserialize_f32(visitor),
         }
     }
 
-    // Go's `encoding/json` decodes a JSON string into `[]byte` using base64.
-    if let Some(text) = value.as_str() {
-        use base64::Engine;
-        if let Ok(bytes) = base64::engine::general_purpose::STANDARD.decode(text) {
-            let array = JsonValue::Array(bytes.iter().copied().map(JsonValue::from).collect());
-            if let Ok(decoded) = serde_json::from_value(array) {
-                return Ok(decoded);
-            }
+    fn deserialize_f64<V>(self, visitor: V) -> std::result::Result<V::Value, Self::Error>
+    where
+        V: Visitor<'de>,
+    {
+        match self.0.as_f64() {
+            Some(value) => visitor.visit_f64(value),
+            None => self.0.deserialize_f64(visitor),
         }
     }
 
-    // Surface serde's original error for incompatible values.
-    Ok(serde_json::from_value(value.clone())?)
+    fn deserialize_seq<V>(self, visitor: V) -> std::result::Result<V::Value, Self::Error>
+    where
+        V: Visitor<'de>,
+    {
+        // Go's `encoding/json` decodes a base64 string into `[]byte`. The
+        // byte-only SeqAccess keeps other sequence targets (`Vec<i64>`,
+        // `Vec<String>`, ...) from misreading the string as bytes.
+        if let Some(bytes) = go_bytes(&self.0) {
+            return visitor.visit_seq(ByteSeqAccess {
+                bytes: bytes.into_iter(),
+            });
+        }
+        self.0.deserialize_seq(visitor)
+    }
+
+    fn deserialize_bytes<V>(self, visitor: V) -> std::result::Result<V::Value, Self::Error>
+    where
+        V: Visitor<'de>,
+    {
+        match go_bytes(&self.0) {
+            Some(bytes) => visitor.visit_byte_buf(bytes),
+            None => self.0.deserialize_bytes(visitor),
+        }
+    }
+
+    fn deserialize_byte_buf<V>(self, visitor: V) -> std::result::Result<V::Value, Self::Error>
+    where
+        V: Visitor<'de>,
+    {
+        match go_bytes(&self.0) {
+            Some(bytes) => visitor.visit_byte_buf(bytes),
+            None => self.0.deserialize_byte_buf(visitor),
+        }
+    }
+
+    fn deserialize_any<V>(self, visitor: V) -> std::result::Result<V::Value, Self::Error>
+    where
+        V: Visitor<'de>,
+    {
+        self.0.deserialize_any(visitor)
+    }
+
+    fn deserialize_bool<V>(self, visitor: V) -> std::result::Result<V::Value, Self::Error>
+    where
+        V: Visitor<'de>,
+    {
+        self.0.deserialize_bool(visitor)
+    }
+
+    fn deserialize_char<V>(self, visitor: V) -> std::result::Result<V::Value, Self::Error>
+    where
+        V: Visitor<'de>,
+    {
+        self.0.deserialize_char(visitor)
+    }
+
+    fn deserialize_str<V>(self, visitor: V) -> std::result::Result<V::Value, Self::Error>
+    where
+        V: Visitor<'de>,
+    {
+        self.0.deserialize_str(visitor)
+    }
+
+    fn deserialize_string<V>(self, visitor: V) -> std::result::Result<V::Value, Self::Error>
+    where
+        V: Visitor<'de>,
+    {
+        self.0.deserialize_string(visitor)
+    }
+
+    fn deserialize_option<V>(self, visitor: V) -> std::result::Result<V::Value, Self::Error>
+    where
+        V: Visitor<'de>,
+    {
+        self.0.deserialize_option(visitor)
+    }
+
+    fn deserialize_unit<V>(self, visitor: V) -> std::result::Result<V::Value, Self::Error>
+    where
+        V: Visitor<'de>,
+    {
+        self.0.deserialize_unit(visitor)
+    }
+
+    fn deserialize_unit_struct<V>(
+        self,
+        name: &'static str,
+        visitor: V,
+    ) -> std::result::Result<V::Value, Self::Error>
+    where
+        V: Visitor<'de>,
+    {
+        self.0.deserialize_unit_struct(name, visitor)
+    }
+
+    fn deserialize_newtype_struct<V>(
+        self,
+        name: &'static str,
+        visitor: V,
+    ) -> std::result::Result<V::Value, Self::Error>
+    where
+        V: Visitor<'de>,
+    {
+        self.0.deserialize_newtype_struct(name, visitor)
+    }
+
+    fn deserialize_map<V>(self, visitor: V) -> std::result::Result<V::Value, Self::Error>
+    where
+        V: Visitor<'de>,
+    {
+        self.0.deserialize_map(visitor)
+    }
+
+    fn deserialize_struct<V>(
+        self,
+        name: &'static str,
+        fields: &'static [&'static str],
+        visitor: V,
+    ) -> std::result::Result<V::Value, Self::Error>
+    where
+        V: Visitor<'de>,
+    {
+        self.0.deserialize_struct(name, fields, visitor)
+    }
+
+    fn deserialize_enum<V>(
+        self,
+        name: &'static str,
+        variants: &'static [&'static str],
+        visitor: V,
+    ) -> std::result::Result<V::Value, Self::Error>
+    where
+        V: Visitor<'de>,
+    {
+        self.0.deserialize_enum(name, variants, visitor)
+    }
+
+    fn deserialize_tuple<V>(
+        self,
+        len: usize,
+        visitor: V,
+    ) -> std::result::Result<V::Value, Self::Error>
+    where
+        V: Visitor<'de>,
+    {
+        self.0.deserialize_tuple(len, visitor)
+    }
+
+    fn deserialize_tuple_struct<V>(
+        self,
+        name: &'static str,
+        len: usize,
+        visitor: V,
+    ) -> std::result::Result<V::Value, Self::Error>
+    where
+        V: Visitor<'de>,
+    {
+        self.0.deserialize_tuple_struct(name, len, visitor)
+    }
+
+    fn deserialize_identifier<V>(self, visitor: V) -> std::result::Result<V::Value, Self::Error>
+    where
+        V: Visitor<'de>,
+    {
+        self.0.deserialize_identifier(visitor)
+    }
+
+    fn deserialize_ignored_any<V>(self, visitor: V) -> std::result::Result<V::Value, Self::Error>
+    where
+        V: Visitor<'de>,
+    {
+        self.0.deserialize_ignored_any(visitor)
+    }
 }

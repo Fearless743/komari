@@ -293,6 +293,9 @@ real configuration values.
   opened once with the Go backend first.
 - `ConfigRepo::get_as<T>` applies the same fallbacks as Go `config.GetAs`:
   `null` becomes the type's zero value, integers/floats are converted between
-  numeric target types, and base64 strings decode to `Vec<u8>`. Out-of-range
-  narrow integer targets and negative values converted to unsigned targets
-  return an error instead of Go's reflect-level truncation/wrapping.
+  numeric target types, and base64 strings decode to `Vec<u8>`. Scalar integer
+  targets follow Go's reflect semantics: floats truncate toward zero, narrow
+  integers wrap modulo 2^bits (so `300.0` read as `i8` is `44`), and negative
+  values converted to unsigned targets wrap (so `-1.0` read as `u64` is
+  `u64::MAX`). Out-of-range float-to-integer conversions use Go's amd64 results
+  (`i64::MIN` for signed, `2^63` for unsigned) instead of returning an error.

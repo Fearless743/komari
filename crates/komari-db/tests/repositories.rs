@@ -601,13 +601,144 @@ fn config_get_as_uses_go_style_loose_conversions() {
         config.get_as::<Vec<u8>>("bytes").unwrap(),
         Some(b"hi".to_vec())
     );
+}
 
-    // Out-of-range narrow integers / unsigned targets are documented as errors
-    // rather than Go's reflect-level truncation.
-    config.set_raw("too_big", "300.0").unwrap();
-    assert!(config.get_as::<i8>("too_big").is_err());
-    config.set_raw("negative", "-1.0").unwrap();
-    assert!(config.get_as::<u64>("negative").is_err());
+#[test]
+fn config_get_as_wraps_narrow_integers_like_go_reflect() {
+    let db = memory_db();
+    let config = db.config();
+
+    // Go decodes the generic value as float64, truncates to int64, then
+    // `reflect.SetInt` narrows modulo 2^bits.
+    config.set_raw("i8_float", "300.0").unwrap();
+    assert_eq!(config.get_as::<i8>("i8_float").unwrap(), Some(44));
+    config.set_raw("i8_integer", "300").unwrap();
+    assert_eq!(config.get_as::<i8>("i8_integer").unwrap(), Some(44));
+    config.set_raw("i16", "65535.0").unwrap();
+    assert_eq!(config.get_as::<i16>("i16").unwrap(), Some(-1));
+    config.set_raw("i32", "4294967296.0").unwrap();
+    assert_eq!(config.get_as::<i32>("i32").unwrap(), Some(0));
+
+    config.set_raw("u8", "256.0").unwrap();
+    assert_eq!(config.get_as::<u8>("u8").unwrap(), Some(0));
+    config.set_raw("u16", "65537.0").unwrap();
+    assert_eq!(config.get_as::<u16>("u16").unwrap(), Some(1));
+    config.set_raw("u32", "4294967296.0").unwrap();
+    assert_eq!(config.get_as::<u32>("u32").unwrap(), Some(0));
+}
+
+#[test]
+fn config_get_as_wraps_negative_values_to_unsigned_like_go() {
+    let db = memory_db();
+    let config = db.config();
+
+    config.set_raw("u8", "-1.0").unwrap();
+    assert_eq!(config.get_as::<u8>("u8").unwrap(), Some(u8::MAX));
+    config.set_raw("u16", "-2.0").unwrap();
+    assert_eq!(config.get_as::<u16>("u16").unwrap(), Some(u16::MAX - 1));
+    config.set_raw("u32", "-1.0").unwrap();
+    assert_eq!(config.get_as::<u32>("u32").unwrap(), Some(u32::MAX));
+    config.set_raw("u64", "-1.0").unwrap();
+    assert_eq!(config.get_as::<u64>("u64").unwrap(), Some(u64::MAX));
+}
+
+#[test]
+fn config_get_as_matches_go_for_out_of_range_floats() {
+    let db = memory_db();
+    let config = db.config();
+
+    // Go's amd64 float->int conversion yields i64::MIN for out-of-range
+    // values, and uint64 conversion yields 2^63.
+    config.set_raw("i64", "1e20").unwrap();
+    assert_eq!(config.get_as::<i64>("i64").unwrap(), Some(i64::MIN));
+    config.set_raw("i8", "1e20").unwrap();
+    assert_eq!(config.get_as::<i8>("i8").unwrap(), Some(0));
+    config.set_raw("u64", "1e20").unwrap();
+    assert_eq!(config.get_as::<u64>("u64").unwrap(), Some(1_u64 << 63));
+    config.set_raw("u8", "1e20").unwrap();
+    assert_eq!(config.get_as::<u8>("u8").unwrap(), Some(0));
+}
+
+#[test]
+fn config_get_as_keeps_in_range_integers_exact() {
+    let db = memory_db();
+    let config = db.config();
+
+    // 2^53 + 1 is not representable as f64, but Go's initial
+    // `json.Unmarshal` into int64 keeps it exact.
+    config.set_raw("i64", "9007199254740993").unwrap();
+    assert_eq!(
+        config.get_as::<i64>("i64").unwrap(),
+        Some(9_007_199_254_740_993)
+    );
+    config.set_raw("u64", "18446744073709551615").unwrap();
+    assert_eq!(config.get_as::<u64>("u64").unwrap(), Some(u64::MAX));
+}
+
+#[test]
+fn config_get_as_truncates_negative_floats_toward_zero() {
+    let db = memory_db();
+    let config = db.config();
+
+    config.set_raw("i64", "-1.9").unwrap();
+    assert_eq!(config.get_as::<i64>("i64").unwrap(), Some(-1));
+    config.set_raw("i8", "-1.9").unwrap();
+    assert_eq!(config.get_as::<i8>("i8").unwrap(), Some(-1));
+    config.set_raw("u64", "-0.5").unwrap();
+    assert_eq!(config.get_as::<u64>("u64").unwrap(), Some(0));
+}
+
+#[test]
+fn config_get_as_converts_numbers_to_f32_and_f64() {
+    let db = memory_db();
+    let config = db.config();
+
+    config.set_raw("f32", "1.5").unwrap();
+    assert_eq!(config.get_as::<f32>("f32").unwrap(), Some(1.5_f32));
+    config.set_raw("f64", "18446744073709551615").unwrap();
+    assert_eq!(
+        config.get_as::<f64>("f64").unwrap(),
+        Some(18_446_744_073_709_551_616.0)
+    );
+}
+
+#[test]
+fn config_get_as_decodes_base64_for_byte_targets() {
+    let db = memory_db();
+    let config = db.config();
+
+    config.set_raw("bytes", "\"aGVsbG8=\"").unwrap();
+    assert_eq!(
+        config.get_as::<Vec<u8>>("bytes").unwrap(),
+        Some(b"hello".to_vec())
+    );
+    config.set_raw("null_bytes", "null").unwrap();
+    assert_eq!(
+        config.get_as::<Vec<u8>>("null_bytes").unwrap(),
+        Some(Vec::new())
+    );
+    // Go falls back to reflect's string->[]byte conversion when base64
+    // decoding fails, so invalid input is kept verbatim.
+    config.set_raw("raw_bytes", "\"not base64!\"").unwrap();
+    assert_eq!(
+        config.get_as::<Vec<u8>>("raw_bytes").unwrap(),
+        Some(b"not base64!".to_vec())
+    );
+    // Only []byte targets reinterpret strings as bytes.
+    assert!(config.get_as::<Vec<i64>>("raw_bytes").is_err());
+}
+
+#[test]
+fn config_get_as_still_rejects_incompatible_scalar_types() {
+    let db = memory_db();
+    let config = db.config();
+
+    config.set_raw("string", "\"not-a-number\"").unwrap();
+    assert!(config.get_as::<i64>("string").is_err());
+    config.set_raw("bool", "true").unwrap();
+    assert!(config.get_as::<i64>("bool").is_err());
+    config.set_raw("number", "42").unwrap();
+    assert!(config.get_as::<String>("number").is_err());
 }
 
 #[test]
