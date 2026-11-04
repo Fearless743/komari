@@ -12,7 +12,7 @@
 #   scripts/differential-test.sh --keep
 #   scripts/differential-test.sh --go-repo /path/to/go/komari
 #   scripts/differential-test.sh --go-bin /path/to/komari --rust-bin target/debug/komari
-#   scripts/differential-test.sh --skip-build --go-port 18080 --rust-port 18081
+#   scripts/differential-test.sh --skip-build --go-bin /path/to/komari --go-port 18080
 #
 # Environment:
 #   KOMARI_GO_REPO       Go reference checkout (auto-detected)
@@ -22,9 +22,13 @@
 #   KOMARI_ADMIN_USER    Test administrator name (default: admin)
 #   KOMARI_ADMIN_PASS    Test administrator password (default: testpass)
 #
-# Exit status is non-zero when an unexpected difference or a one-sided endpoint
-# remains. Known differences (DF-xxx) are documented in docs/DIFFERENTIAL.md
-# and whitelisted in scripts/differential-known-differences.json.
+# Exit status:
+#   0 = only matches and registered known differences
+#   1 = unexpected difference / one-sided endpoint / invariant failure
+#   2 = setup failure (build, dirty source, port, readiness)
+#
+# Known differences (DF-xxx) are documented in docs/DIFFERENTIAL.md and
+# whitelisted in scripts/differential-known-differences.json.
 
 set -euo pipefail
 
@@ -42,6 +46,7 @@ KEEP=0
 SKIP_BUILD=0
 NO_SEED=0
 STRICT=0
+ALLOW_DIRTY=0
 REPORT_OUT=""
 WORKDIR_OVERRIDE=""
 
@@ -103,6 +108,10 @@ while [[ $# -gt 0 ]]; do
       STRICT=1
       shift
       ;;
+    --allow-dirty)
+      ALLOW_DIRTY=1
+      shift
+      ;;
     -h|--help)
       usage
       exit 0
@@ -124,7 +133,9 @@ require_command() {
 
 require_command curl
 require_command python3
-require_command cargo
+if [[ "$SKIP_BUILD" -eq 0 ]]; then
+  require_command cargo
+fi
 if [[ -z "$GO_BIN" && "$SKIP_BUILD" -eq 0 ]]; then
   require_command go
 fi
@@ -181,6 +192,10 @@ fi
 if [[ -n "$WORKDIR_OVERRIDE" ]]; then
   WORK="$WORKDIR_OVERRIDE"
   mkdir -p "$WORK"
+  if [[ -d "$WORK/go/data" || -d "$WORK/rust/data" ]]; then
+    echo "warning: --workdir reuse: clearing previous test databases under $WORK" >&2
+    rm -rf "$WORK/go/data" "$WORK/rust/data"
+  fi
   KEEP=1
 else
   WORK="$(mktemp -d "${TMPDIR:-/tmp}/komari-diff.XXXXXX")"
@@ -227,24 +242,27 @@ trap cleanup EXIT INT TERM
 
 if [[ -z "$GO_BIN" ]]; then
   if [[ "$SKIP_BUILD" -eq 1 ]]; then
-    GO_BIN="$GO_REPO/komari"
-    if [[ ! -x "$GO_BIN" ]]; then
-      echo "error: --skip-build requires $GO_BIN to exist, or pass --go-bin" >&2
-      exit 2
-    fi
-  else
-    echo "building Go reference backend from $GO_REPO ..."
-    (
-      cd "$GO_REPO"
-      go build -o "$WORK/bin/komari-go" .
-    )
-    GO_BIN="$WORK/bin/komari-go"
+    echo "error: --skip-build requires an explicit --go-bin (or KOMARI_GO_BIN)." >&2
+    echo "       Refusing to use a possibly stale $GO_REPO/komari binary." >&2
+    exit 2
   fi
+  echo "building Go reference backend from $GO_REPO ..."
+  if ! (
+    cd "$GO_REPO"
+    go build -o "$WORK/bin/komari-go" .
+  ); then
+    echo "error: Go reference build failed (repo: $GO_REPO)" >&2
+    exit 2
+  fi
+  GO_BIN="$WORK/bin/komari-go"
 fi
 
 if [[ "$SKIP_BUILD" -eq 0 ]]; then
   echo "building Rust backend (cargo build -p komari-cli) ..."
-  cargo build -p komari-cli
+  if ! cargo build -p komari-cli; then
+    echo "error: Rust backend build failed" >&2
+    exit 2
+  fi
 fi
 
 if [[ ! -x "$RUST_BIN" ]]; then
@@ -262,6 +280,49 @@ RUST_BIN="$(cd -- "$(dirname -- "$RUST_BIN")" && pwd)/$(basename -- "$RUST_BIN")
 GO_BIN="$(cd -- "$(dirname -- "$GO_BIN")" && pwd)/$(basename -- "$GO_BIN")"
 
 # ---------------------------------------------------------------------------
+# Provenance (source revisions, dirty state, binary hashes)
+# ---------------------------------------------------------------------------
+
+git_rev() {
+  local repo="$1"
+  if [[ -n "$repo" && -d "$repo/.git" ]] || [[ -n "$repo" && -f "$repo/.git" ]]; then
+    git -C "$repo" rev-parse HEAD 2>/dev/null || true
+  fi
+}
+
+git_dirty() {
+  local repo="$1"
+  if [[ -n "$repo" && ( -d "$repo/.git" || -f "$repo/.git" ) ]]; then
+    if [[ -n "$(git -C "$repo" status --porcelain 2>/dev/null)" ]]; then
+      echo 1
+    else
+      echo 0
+    fi
+  else
+    echo 0
+  fi
+}
+
+GO_REV="$(git_rev "$GO_REPO")"
+RUST_REV="$(git_rev "$ROOT_DIR")"
+GO_DIRTY="$(git_dirty "$GO_REPO")"
+RUST_DIRTY="$(git_dirty "$ROOT_DIR")"
+
+if [[ "$GO_DIRTY" == "1" || "$RUST_DIRTY" == "1" ]]; then
+  if [[ "$ALLOW_DIRTY" -eq 1 ]]; then
+    echo "warning: dirty source tree (go_dirty=$GO_DIRTY rust_dirty=$RUST_DIRTY); --allow-dirty set" >&2
+  else
+    echo "error: dirty source tree (go_dirty=$GO_DIRTY rust_dirty=$RUST_DIRTY)." >&2
+    echo "       Commit/stash changes or pass --allow-dirty for an exploratory run." >&2
+    exit 2
+  fi
+fi
+
+require_command sha256sum
+GO_SHA256="$(sha256sum "$GO_BIN" | awk '{print $1}')"
+RUST_SHA256="$(sha256sum "$RUST_BIN" | awk '{print $1}')"
+
+# ---------------------------------------------------------------------------
 # Ports and readiness
 # ---------------------------------------------------------------------------
 
@@ -276,13 +337,22 @@ PY
 }
 
 if [[ -z "$GO_PORT" ]]; then
-  GO_PORT="$(pick_port)"
+  if ! GO_PORT="$(pick_port)"; then
+    echo "error: failed to allocate a free Go port" >&2
+    exit 2
+  fi
 fi
 if [[ -z "$RUST_PORT" ]]; then
-  RUST_PORT="$(pick_port)"
+  if ! RUST_PORT="$(pick_port)"; then
+    echo "error: failed to allocate a free Rust port" >&2
+    exit 2
+  fi
 fi
 while [[ "$RUST_PORT" == "$GO_PORT" ]]; do
-  RUST_PORT="$(pick_port)"
+  if ! RUST_PORT="$(pick_port)"; then
+    echo "error: failed to allocate a free Rust port" >&2
+    exit 2
+  fi
 done
 
 wait_ready() {
@@ -315,7 +385,7 @@ echo "starting Go backend on 127.0.0.1:$GO_PORT (workdir $WORK/go) ..."
   KOMARI_LISTEN="127.0.0.1:$GO_PORT" \
   KOMARI_LOG_LEVEL=error \
   TZ=UTC \
-  "$GO_BIN" server
+  exec "$GO_BIN" server
 ) >"$WORK/go/server.log" 2>&1 &
 GO_PID=$!
 
@@ -328,12 +398,18 @@ echo "starting Rust backend on 127.0.0.1:$RUST_PORT (workdir $WORK/rust) ..."
   KOMARI_LISTEN="127.0.0.1:$RUST_PORT" \
   KOMARI_LOG_LEVEL=error \
   TZ=UTC \
-  "$RUST_BIN" server
+  exec "$RUST_BIN" server
 ) >"$WORK/rust/server.log" 2>&1 &
 RUST_PID=$!
 
-wait_ready "Go" "$GO_PORT" "$GO_PID" "$WORK/go/server.log"
-wait_ready "Rust" "$RUST_PORT" "$RUST_PID" "$WORK/rust/server.log"
+if ! wait_ready "Go" "$GO_PORT" "$GO_PID" "$WORK/go/server.log"; then
+  echo "error: Go server did not become ready (port $GO_PORT)" >&2
+  exit 2
+fi
+if ! wait_ready "Rust" "$RUST_PORT" "$RUST_PID" "$WORK/rust/server.log"; then
+  echo "error: Rust server did not become ready (port $RUST_PORT)" >&2
+  exit 2
+fi
 
 # ---------------------------------------------------------------------------
 # Compare
@@ -348,7 +424,19 @@ COMPARE_ARGS=(
   --admin-pass "$ADMIN_PASS"
   --rules "$ROOT_DIR/scripts/differential-known-differences.json"
   --report "$WORK/report.json"
+  --go-bin "$GO_BIN"
+  --rust-bin "$RUST_BIN"
+  --go-rev "$GO_REV"
+  --rust-rev "$RUST_REV"
+  --go-sha256 "$GO_SHA256"
+  --rust-sha256 "$RUST_SHA256"
 )
+if [[ "$GO_DIRTY" == "1" ]]; then
+  COMPARE_ARGS+=(--go-dirty)
+fi
+if [[ "$RUST_DIRTY" == "1" ]]; then
+  COMPARE_ARGS+=(--rust-dirty)
+fi
 if [[ "$NO_SEED" -eq 1 ]]; then
   COMPARE_ARGS+=(--no-seed)
 fi

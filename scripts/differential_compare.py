@@ -8,7 +8,8 @@ This script is the worker behind ``scripts/differential-test.sh``.  It:
 * logs in as the administrator on both backends;
 * replays the same request matrix against both servers;
 * normalizes volatile values (session tokens, admin UUIDs, build metadata,
-  JSON object/array ordering, integer/float spelling);
+  JSON object key ordering, integer/float spelling) while preserving array
+  order for nodes/records;
 * compares status, selected headers and JSON bodies; and
 * reports ``一致`` / ``已知差异`` / ``差异`` / ``仅一侧`` and exits non-zero when
   an unexpected difference remains.
@@ -27,7 +28,8 @@ import re
 import sqlite3
 import sys
 import urllib.parse
-from datetime import datetime, timezone
+import uuid as uuidlib
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any
 
@@ -85,7 +87,7 @@ def build_cases(visible_uuid: str, hidden_uuid: str) -> list[dict[str, Any]]:
             "id": "login_bad_password",
             "method": "POST",
             "path": "/api/login",
-            "json": {"username": "admin", "password": "definitely-wrong"},
+            "json": {"username": "{{admin_user}}", "password": "definitely-wrong"},
         },
         {
             "id": "login",
@@ -103,6 +105,14 @@ def build_cases(visible_uuid: str, hidden_uuid: str) -> list[dict[str, Any]]:
             "method": "GET",
             "path": "/api/admin/settings",
             "auth": True,
+            "follow_redirects": False,
+        },
+        {
+            "id": "admin_settings_post_no_slash",
+            "method": "POST",
+            "path": "/api/admin/settings",
+            "auth": True,
+            "json": {},
             "follow_redirects": False,
         },
         {"id": "recent_seeded", "method": "GET", "path": f"/api/recent/{visible_uuid}"},
@@ -139,17 +149,21 @@ def build_cases(visible_uuid: str, hidden_uuid: str) -> list[dict[str, Any]]:
 # ---------------------------------------------------------------------------
 
 
-def seed_database(path: Path, visible_uuid: str, hidden_uuid: str, now: str) -> None:
-    """Insert one visible and one hidden client plus one record/GPU record.
+def seed_database(
+    path: Path, visible_uuid: str, hidden_uuid: str, times: list[str]
+) -> None:
+    """Insert clients, three differently-timed records and two GPU devices.
 
-    The same SQL and the same timestamp are used for both backends, so the
-    differential test exercises real serialization instead of only empty
-    collections.
+    The same SQL and the same timestamps are used for both backends, so the
+    differential test exercises real serialization and array ordering instead
+    of only empty collections.
     """
 
     connection = sqlite3.connect(str(path), timeout=15)
     try:
         connection.execute("PRAGMA busy_timeout=5000")
+        connection.execute("DELETE FROM records WHERE client = ?", (visible_uuid,))
+        connection.execute("DELETE FROM gpu_records WHERE client = ?", (visible_uuid,))
         client_sql = """
         INSERT OR REPLACE INTO clients (
             uuid, token, name, cpu_name, virtualization, arch, cpu_cores, os,
@@ -246,44 +260,81 @@ def seed_database(path: Path, visible_uuid: str, hidden_uuid: str, now: str) -> 
                 "2026-01-01 00:00:00.0000000",
             ),
         )
+
+        record_sql = """
+        INSERT INTO records (
+            client, time, cpu, gpu, ram, ram_total, swap, swap_total, load,
+            temp, disk, disk_total, net_in, net_out, net_total_up,
+            net_total_down, process, connections, connections_udp
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        """
+        samples = [
+            (11.5, 1000, 0.1, 30, 1000, 10, 20, 100, 200, 1, 2, 1),
+            (12.5, 2000, 0.2, 40, 2000, 100, 200, 1000, 2000, 10, 5, 1),
+            (13.5, 3000, 0.3, 50, 3000, 1000, 2000, 10000, 20000, 20, 10, 2),
+        ]
+        for timestamp, (
+            cpu,
+            ram,
+            load,
+            temp,
+            disk,
+            net_in,
+            net_out,
+            net_total_up,
+            net_total_down,
+            process,
+            connections,
+            connections_udp,
+        ) in zip(times, samples):
+            connection.execute(
+                record_sql,
+                (
+                    visible_uuid,
+                    timestamp,
+                    cpu,
+                    0,
+                    ram,
+                    8589934592,
+                    0,
+                    2147483648,
+                    load,
+                    temp,
+                    disk,
+                    107374182400,
+                    net_in,
+                    net_out,
+                    net_total_up,
+                    net_total_down,
+                    process,
+                    connections,
+                    connections_udp,
+                ),
+            )
+
+        gpu_sql = """
+        INSERT INTO gpu_records (
+            client, time, device_index, device_name, mem_total, mem_used,
+            utilization, temperature
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+        """
+        for index, timestamp in enumerate(times):
+            connection.execute(
+                gpu_sql,
+                (
+                    visible_uuid,
+                    timestamp,
+                    0,
+                    "Test GPU 0",
+                    8589934592,
+                    1024,
+                    40 + index * 10,
+                    60,
+                ),
+            )
         connection.execute(
-            """
-            INSERT INTO records (
-                client, time, cpu, gpu, ram, ram_total, swap, swap_total, load,
-                temp, disk, disk_total, net_in, net_out, net_total_up,
-                net_total_down, process, connections, connections_udp
-            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-            """,
-            (
-                visible_uuid,
-                now,
-                12.5,
-                0,
-                1024,
-                8589934592,
-                0,
-                2147483648,
-                0.5,
-                40,
-                2048,
-                107374182400,
-                100,
-                200,
-                1000,
-                2000,
-                10,
-                5,
-                1,
-            ),
-        )
-        connection.execute(
-            """
-            INSERT INTO gpu_records (
-                client, time, device_index, device_name, mem_total, mem_used,
-                utilization, temperature
-            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?)
-            """,
-            (visible_uuid, now, 0, "Test GPU", 8589934592, 1024, 50, 60),
+            gpu_sql,
+            (visible_uuid, times[-1], 1, "Test GPU 1", 4294967296, 2048, 70, 65),
         )
         connection.commit()
     finally:
@@ -409,8 +460,8 @@ def canonical(value: Any) -> Any:
     """Normalize JSON for comparison.
 
     * object keys are sorted by rebuilding the dict;
-    * arrays are sorted by their canonical JSON (request/response ordering is
-      explicitly out of scope for this harness);
+    * arrays keep their order: node/record ordering is part of the contract
+      (only object keys are order-insensitive);
     * integral floats become ints (Go emits ``80`` for ``float64(80)`` while
       Rust emits ``80.0``).
     """
@@ -418,8 +469,7 @@ def canonical(value: Any) -> Any:
     if isinstance(value, dict):
         return {key: canonical(value[key]) for key in sorted(value)}
     if isinstance(value, list):
-        items = [canonical(item) for item in value]
-        return sorted(items, key=lambda item: json.dumps(item, sort_keys=True, ensure_ascii=False))
+        return [canonical(item) for item in value]
     if isinstance(value, float):
         if value.is_integer():
             return int(value)
@@ -467,6 +517,56 @@ def path_matches(pattern: str, path: str) -> bool:
         return match(pattern_index + 1, path_index + 1)
 
     return match(0, 0)
+
+
+def get_path(value: Any, path: str) -> Any:
+    """Read a simple dotted path; return ``None`` when absent."""
+
+    node = value
+    for part in split_path(path):
+        if part.startswith("["):
+            return None
+        if not isinstance(node, dict) or part not in node:
+            return None
+        node = node[part]
+    return node
+
+
+def valid_value(kind: str, value: Any) -> bool:
+    """Validate volatile values before they are ignored or marked known."""
+
+    if kind == "uuid":
+        if not isinstance(value, str) or not value:
+            return False
+        try:
+            uuidlib.UUID(value)
+        except ValueError:
+            return False
+        return True
+    if kind == "session_token":
+        return isinstance(value, str) and len(value) >= 16
+    if kind == "non_empty_string":
+        return isinstance(value, str) and value != ""
+    return True
+
+
+def validate_volatile_paths(
+    case_rule: dict[str, Any],
+    go_value: Any,
+    rust_value: Any,
+    collector: "DiffCollector",
+) -> None:
+    """Reject missing/malformed tokens and UUIDs instead of silently skipping."""
+
+    for path, kind in case_rule.get("validators", {}).items():
+        go_field = get_path(go_value, path)
+        rust_field = get_path(rust_value, path)
+        if not valid_value(kind, go_field) or not valid_value(kind, rust_field):
+            collector.add_diff(
+                f"{path} (invalid {kind})",
+                go_field,
+                rust_field,
+            )
 
 
 def rule_entry(value: Any) -> dict[str, str]:
@@ -626,10 +726,28 @@ def compare_case(
                     "status",
                     go_record["status"],
                     rust_record["status"],
-                    rule_entry(case_rule.get("reason", "Known status difference.")),
+                    {
+                        "id": str(case_rule.get("id", "")),
+                        "reason": str(case_rule.get("reason", "Known status difference.")),
+                    },
                 )
             else:
                 collector.add_diff("status", go_record["status"], rust_record["status"])
+        go_location = go_record["headers"].get("location")
+        rust_location = rust_record["headers"].get("location")
+        if go_location != rust_location:
+            if case_rule.get("known_location"):
+                collector.add_known(
+                    "location",
+                    go_location,
+                    rust_location,
+                    {
+                        "id": str(case_rule.get("id", "")),
+                        "reason": str(case_rule.get("reason", "Known location difference.")),
+                    },
+                )
+            else:
+                collector.add_diff("location", go_location, rust_location)
         return {
             "id": case["id"],
             "method": case["method"],
@@ -677,6 +795,12 @@ def compare_case(
         collector.add_diff("set-cookie", go_cookie, rust_cookie)
 
     if go_record["is_json"] and rust_record["is_json"]:
+        validate_volatile_paths(
+            case_rule,
+            go_record["json"],
+            rust_record["json"],
+            collector,
+        )
         compare_values(
             go_record["json"],
             rust_record["json"],
@@ -743,6 +867,165 @@ def redact_record(record: dict[str, Any], case_rule: dict[str, Any]) -> dict[str
 # ---------------------------------------------------------------------------
 
 
+EXPECTED_ADMIN_KEYS = {
+    "sitename",
+    "description",
+    "allow_cors",
+    "theme",
+    "private_site",
+    "api_key",
+    "auto_discovery_key",
+    "script_domain",
+    "send_ip_addr_to_guest",
+    "eula_accepted",
+    "base_scripts_url",
+    "geo_ip_enabled",
+    "geo_ip_provider",
+    "ddns_enabled",
+    "ddns_provider",
+    "ddns_sync_interval",
+    "o_auth_enabled",
+    "o_auth_provider",
+    "disable_password_login",
+    "custom_head",
+    "custom_body",
+    "notification_enabled",
+    "notification_method",
+    "notification_template",
+    "expire_notification_enabled",
+    "expire_notification_lead_days",
+    "login_notification",
+    "traffic_limit_percentage",
+    "record_enabled",
+    "record_preserve_time",
+}
+
+
+def case_json(results: list[dict[str, Any]], case_id: str, side: str) -> Any:
+    for result in results:
+        if result["id"] == case_id:
+            return result[side].get("json")
+    return None
+
+
+def run_invariants(
+    results: list[dict[str, Any]], visible_uuid: str, hidden_uuid: str
+) -> list[dict[str, Any]]:
+    """Assertions that check semantics, not only Go/Rust equality."""
+
+    invariants: list[dict[str, Any]] = []
+
+    def check(name: str, ok: bool, detail: str = "") -> None:
+        invariants.append({"name": name, "ok": bool(ok), "detail": detail})
+
+    for side in ("go", "rust"):
+        guest = case_json(results, "nodes_guest", side) or {}
+        guest_nodes = guest.get("data") if isinstance(guest, dict) else None
+        check(
+            f"{side}: guest /api/nodes hides the hidden node",
+            isinstance(guest_nodes, list)
+            and len(guest_nodes) == 1
+            and guest_nodes[0].get("uuid") == visible_uuid,
+            f"nodes={guest_nodes}",
+        )
+
+        admin = case_json(results, "nodes_admin", side) or {}
+        admin_nodes = admin.get("data") if isinstance(admin, dict) else None
+        admin_uuids = {
+            node.get("uuid") for node in admin_nodes or [] if isinstance(node, dict)
+        }
+        check(
+            f"{side}: admin /api/nodes includes both nodes",
+            admin_uuids == {visible_uuid, hidden_uuid},
+            f"uuids={sorted(admin_uuids)}",
+        )
+
+        public = case_json(results, "public", side) or {}
+        description = public.get("data", {}).get("description") if isinstance(public, dict) else None
+        check(
+            f"{side}: /api/public uses the Go default description",
+            description == "A simple server monitor tool.",
+            f"description={description!r}",
+        )
+
+        records = case_json(results, "records_seeded", side) or {}
+        data = records.get("data") if isinstance(records, dict) else None
+        record_rows = data.get("records") if isinstance(data, dict) else None
+        check(
+            f"{side}: seeded records count is 3",
+            isinstance(record_rows, list) and len(record_rows) == 3 and data.get("count") == 3,
+            f"count={data.get('count') if isinstance(data, dict) else None}",
+        )
+        times = [row.get("time") for row in record_rows or [] if isinstance(row, dict)]
+        check(
+            f"{side}: seeded records keep ascending time order",
+            times == sorted(times),
+            f"times={times}",
+        )
+        gpu_devices = data.get("gpu_devices") if isinstance(data, dict) else None
+        device0 = (gpu_devices or {}).get("0", {}).get("records", []) if isinstance(gpu_devices, dict) else []
+        device1 = (gpu_devices or {}).get("1", {}).get("records", []) if isinstance(gpu_devices, dict) else []
+        check(
+            f"{side}: GPU aggregation has device 0 (3) and device 1 (1)",
+            isinstance(gpu_devices, dict)
+            and set(gpu_devices) == {"0", "1"}
+            and len(device0) == 3
+            and len(device1) == 1
+            and data.get("has_gpu_data") is True,
+            f"devices={sorted(gpu_devices) if isinstance(gpu_devices, dict) else gpu_devices}",
+        )
+
+        cpu = case_json(results, "records_seeded_cpu", side) or {}
+        cpu_data = cpu.get("data") if isinstance(cpu, dict) else None
+        check(
+            f"{side}: load_type=cpu returns 3 filtered records",
+            isinstance(cpu_data, dict)
+            and cpu_data.get("count") == 3
+            and len(cpu_data.get("records") or []) == 3
+            and cpu_data.get("load_type") == "cpu",
+            f"count={cpu_data.get('count') if isinstance(cpu_data, dict) else None}",
+        )
+
+        settings = case_json(results, "admin_settings", side) or {}
+        settings_data = settings.get("data") if isinstance(settings, dict) else None
+        check(
+            f"{side}: admin settings contains the full Go default key set",
+            isinstance(settings_data, dict)
+            and EXPECTED_ADMIN_KEYS <= set(settings_data),
+            f"missing={sorted(EXPECTED_ADMIN_KEYS - set(settings_data or {}))}",
+        )
+
+        for case_id in ("recent_hidden_guest", "records_hidden_guest"):
+            denied = case_json(results, case_id, side) or {}
+            check(
+                f"{side}: {case_id} denies hidden nodes",
+                denied.get("status") == "error"
+                and denied.get("message") == "UUID is required",
+                f"body={denied}",
+            )
+
+        me = case_json(results, "me_admin", side) or {}
+        check(
+            f"{side}: admin session is logged in",
+            me.get("logged_in") is True and me.get("username") == "admin",
+            f"body={me}",
+        )
+
+    return invariants
+
+
+def substitute_tokens(value: Any, admin_user: str, admin_pass: str) -> Any:
+    if isinstance(value, str):
+        return value.replace("{{admin_user}}", admin_user).replace(
+            "{{admin_pass}}", admin_pass
+        )
+    if isinstance(value, dict):
+        return {key: substitute_tokens(item, admin_user, admin_pass) for key, item in value.items()}
+    if isinstance(value, list):
+        return [substitute_tokens(item, admin_user, admin_pass) for item in value]
+    return value
+
+
 def main(argv: list[str]) -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--go-base", required=True)
@@ -757,6 +1040,14 @@ def main(argv: list[str]) -> int:
     parser.add_argument("--report", type=Path, required=True)
     parser.add_argument("--no-seed", action="store_true")
     parser.add_argument("--strict", action="store_true", help="Treat known differences as failures.")
+    parser.add_argument("--go-bin", default="")
+    parser.add_argument("--rust-bin", default="")
+    parser.add_argument("--go-rev", default="")
+    parser.add_argument("--rust-rev", default="")
+    parser.add_argument("--go-sha256", default="")
+    parser.add_argument("--rust-sha256", default="")
+    parser.add_argument("--go-dirty", action="store_true")
+    parser.add_argument("--rust-dirty", action="store_true")
     args = parser.parse_args(argv)
 
     rules = json.loads(args.rules.read_text(encoding="utf-8"))
@@ -765,17 +1056,21 @@ def main(argv: list[str]) -> int:
         if not args.go_db or not args.rust_db:
             print("error: --go-db/--rust-db are required unless --no-seed is used", file=sys.stderr)
             return 2
-        now = datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M:%S.0000000")
+        now = datetime.now(timezone.utc)
+        times = [
+            (now - timedelta(minutes=2 - index)).strftime("%Y-%m-%d %H:%M:%S.0000000")
+            for index in range(3)
+        ]
         for label, path in (("go", args.go_db), ("rust", args.rust_db)):
             if not path.is_file():
                 print(f"error: {label} database does not exist: {path}", file=sys.stderr)
                 return 2
             try:
-                seed_database(path, args.visible_uuid, args.hidden_uuid, now)
+                seed_database(path, args.visible_uuid, args.hidden_uuid, times)
             except sqlite3.Error as error:
                 print(f"error: failed to seed {label} database {path}: {error}", file=sys.stderr)
                 return 2
-        print(f"seeded both databases (record time {now})")
+        print(f"seeded both databases (record times {', '.join(times)})")
 
     cases = build_cases(args.visible_uuid, args.hidden_uuid)
     results: list[dict[str, Any]] = []
@@ -801,6 +1096,8 @@ def main(argv: list[str]) -> int:
     all_diffs = [item for result in results for item in result["diffs"]]
     all_only = [item for result in results for item in result["only"]]
     all_known = [item for result in results for item in result["known"]]
+    invariants = run_invariants(results, args.visible_uuid, args.hidden_uuid)
+    invariant_failures = [item for item in invariants if not item["ok"]]
 
     if charset_cases:
         all_known.append(
@@ -813,18 +1110,51 @@ def main(argv: list[str]) -> int:
             }
         )
 
+    match_cases = sum(
+        1
+        for result in results
+        if not result["diffs"] and not result["only"] and not result["known"]
+    )
+    known_cases = sum(
+        1
+        for result in results
+        if result["known"] and not result["diffs"] and not result["only"]
+    )
+    diff_cases = sum(1 for result in results if result["diffs"] or result["only"])
+
     summary = {
         "cases": len(results),
-        "match": sum(1 for result in results if not result["diffs"] and not result["only"] and not result["known"]),
-        "known": len(all_known),
-        "diff": len(all_diffs),
-        "only": len(all_only),
+        "match_cases": match_cases,
+        "known_cases": known_cases,
+        "diff_cases": diff_cases,
+        "known_findings": len(all_known),
+        "diff_findings": len(all_diffs),
+        "only_findings": len(all_only),
+        "invariants": len(invariants),
+        "invariant_failures": len(invariant_failures),
     }
 
     report = {
         "go_base": args.go_base,
         "rust_base": args.rust_base,
+        "provenance": {
+            "go": {
+                "base": args.go_base,
+                "bin": args.go_bin,
+                "rev": args.go_rev,
+                "dirty": bool(args.go_dirty),
+                "sha256": args.go_sha256,
+            },
+            "rust": {
+                "base": args.rust_base,
+                "bin": args.rust_bin,
+                "rev": args.rust_rev,
+                "dirty": bool(args.rust_dirty),
+                "sha256": args.rust_sha256,
+            },
+        },
         "summary": summary,
+        "invariants": invariants,
         "unexpected_differences": all_diffs,
         "only_one_side": all_only,
         "known_differences": all_known,
@@ -836,10 +1166,24 @@ def main(argv: list[str]) -> int:
     print()
     print("=" * 72)
     print(
-        f"cases={summary['cases']}  一致={summary['match']}  已知差异={summary['known']}  "
-        f"差异={summary['diff']}  仅一侧={summary['only']}"
+        "cases={cases}  match_cases={match_cases}  known_cases={known_cases}  "
+        "diff_cases={diff_cases}  known_findings={known_findings}  "
+        "diff_findings={diff_findings}  only_findings={only_findings}  "
+        "invariant_failures={invariant_failures}".format(**summary)
     )
     print(f"report: {args.report}")
+    print(
+        "provenance: go={}@{} (dirty={}, sha256={}) rust={}@{} (dirty={}, sha256={})".format(
+            args.go_bin,
+            args.go_rev,
+            args.go_dirty,
+            args.go_sha256,
+            args.rust_bin,
+            args.rust_rev,
+            args.rust_dirty,
+            args.rust_sha256,
+        )
+    )
 
     if all_known:
         print("\n已知差异:")
@@ -859,7 +1203,12 @@ def main(argv: list[str]) -> int:
         for item in all_only:
             print(f"  - {item['path']} only in {item['side']}: {item['value']}")
 
-    if all_diffs or all_only:
+    if invariant_failures:
+        print("\n不变量失败:")
+        for item in invariant_failures:
+            print(f"  - {item['name']}: {item['detail']}")
+
+    if all_diffs or all_only or invariant_failures:
         return 1
     if args.strict and all_known:
         return 1
@@ -874,19 +1223,16 @@ def run_case(
 ) -> dict[str, Any]:
     body = None
     if "json" in case:
-        payload = json.loads(
-            json.dumps(case["json"]).replace("{{admin_user}}", args.admin_user).replace(
-                "{{admin_pass}}", args.admin_pass
-            )
-        )
+        payload = substitute_tokens(case["json"], args.admin_user, args.admin_pass)
         body = json.dumps(payload).encode("utf-8")
 
+    side = "go" if base == args.go_base else "rust"
     record = request(
         base,
         case["method"],
         case["path"],
         body=body,
-        cookie=cookies["go"] if base == args.go_base and case.get("auth") else cookies["rust"] if case.get("auth") else None,
+        cookie=cookies[side] if case.get("auth") else None,
         follow_redirects=case.get("follow_redirects", True),
     )
     decoded = decode_response(record)
@@ -894,7 +1240,6 @@ def run_case(
     if case.get("capture_session"):
         set_cookie = record["headers"].get("set-cookie", "")
         match = re.search(r"session_token=([^;]+)", set_cookie)
-        side = "go" if base == args.go_base else "rust"
         cookies[side] = match.group(1) if match else None
 
     return decoded

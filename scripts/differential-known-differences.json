@@ -1,12 +1,25 @@
 {
-  "version": 1,
+  "version": 2,
   "notes": [
     "Machine-readable whitelist for scripts/differential-test.sh.",
     "DF-xxx are differential-harness identifiers documented in docs/DIFFERENTIAL.md.",
-    "The authoritative D-xxx registry remains docs/parity-deviations.md; this file does not assign D numbers."
+    "DF-001 (default description), DF-002 (startup config seeding) and DF-003",
+    "(settings trailing slash) were fixed in business code and retired; their",
+    "numbers are not reused. Only DF-004/DF-005/DF-006 remain.",
+    "The authoritative D-xxx registry remains docs/parity-deviations.md; this",
+    "file does not assign D numbers."
   ],
+  "retired": {
+    "DF-001": "Fixed: both backends now use komari_config::DEFAULT_DESCRIPTION.",
+    "DF-002": "Fixed: server startup seeds every SiteConfig default key.",
+    "DF-003": "Fixed: /api/admin/settings redirects 301/307 before auth."
+  },
   "cases": {
     "version": {
+      "validators": {
+        "data.version": "non_empty_string",
+        "data.hash": "non_empty_string"
+      },
       "known_paths": {
         "data.version": {
           "id": "DF-004",
@@ -19,6 +32,10 @@
       }
     },
     "rpc_version": {
+      "validators": {
+        "result.version": "non_empty_string",
+        "result.hash": "non_empty_string"
+      },
       "known_paths": {
         "result.version": {
           "id": "DF-004",
@@ -30,57 +47,16 @@
         }
       }
     },
-    "public": {
-      "known_paths": {
-        "data.description": {
-          "id": "DF-001",
-          "reason": "Fresh-install default description: Go seeds config.Legacy's `A simple server monitor tool.` at startup; Rust writes its /api/public fallback `Komari Monitor, a simple server monitoring tool.` lazily."
-        }
-      }
-    },
-    "rpc_public_info": {
-      "known_paths": {
-        "result.description": {
-          "id": "DF-001",
-          "reason": "Same fresh-install default-description difference as /api/public; the RPC returns database.GetPublicInfo()."
-        }
-      }
-    },
-    "admin_settings": {
-      "object_path": "data",
-      "known_paths": {
-        "data.description": {
-          "id": "DF-001",
-          "reason": "Fresh-install default description differs; see the /api/public entry."
-        }
-      },
-      "known_go_only_keys": [
-        "api_key",
-        "auto_discovery_key",
-        "base_scripts_url",
-        "ddns_enabled",
-        "ddns_sync_interval",
-        "eula_accepted",
-        "expire_notification_enabled",
-        "expire_notification_lead_days",
-        "login_notification",
-        "notification_enabled",
-        "notification_method",
-        "notification_template",
-        "script_domain",
-        "send_ip_addr_to_guest",
-        "traffic_limit_percentage"
-      ]
-    },
     "admin_settings_no_slash": {
-      "status_only": true,
-      "known_status": [
-        301,
-        200
-      ],
-      "reason": "DF-003: Gin redirects GET /api/admin/settings to /api/admin/settings/ (301); axum serves both paths directly (200)."
+      "status_only": true
+    },
+    "admin_settings_post_no_slash": {
+      "status_only": true
     },
     "me_admin": {
+      "validators": {
+        "uuid": "uuid"
+      },
       "known_paths": {
         "uuid": {
           "id": "DF-006",
@@ -89,6 +65,9 @@
       }
     },
     "rpc_me_admin": {
+      "validators": {
+        "result.uuid": "uuid"
+      },
       "known_paths": {
         "result.uuid": {
           "id": "DF-006",
@@ -97,6 +76,9 @@
       }
     },
     "login": {
+      "validators": {
+        "data.set-cookie.session_token": "session_token"
+      },
       "ignore_paths": [
         "data.set-cookie.session_token"
       ]
