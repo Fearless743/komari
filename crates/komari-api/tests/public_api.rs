@@ -11,6 +11,7 @@ use axum::extract::ConnectInfo;
 use axum::http::header::{CONTENT_TYPE, COOKIE, LOCATION, SET_COOKIE};
 use axum::http::{HeaderMap, Method, Request, StatusCode};
 use futures_util::StreamExt;
+use image::GenericImageView;
 use komari_api::{
     ApiConfig, ApiState, Report, client_router, public_router, public_router_with_state,
 };
@@ -39,6 +40,8 @@ fn state() -> ApiState {
         report_flush_interval: Duration::ZERO,
         // Keep the MJPEG test fast; production defaults to 2 seconds.
         mjpeg_frame_interval: Duration::from_millis(10),
+        // Never touch the network in tests; the bitmap fallback is used.
+        mjpeg_font_download: false,
         ..ApiConfig::default()
     };
     ApiState::with_config(memory_db(), config)
@@ -1133,7 +1136,12 @@ async fn private_site_blocks_guest_api_paths_but_allows_public_prefixes() {
 
 #[tokio::test]
 async fn mjpeg_streams_multipart_jpeg_frames_until_the_client_disconnects() {
-    let state = state();
+    // Keep `data/font.ttf` out of the picture so the deterministic bitmap
+    // fallback is used even on a developer machine with a downloaded font.
+    let data_dir = tempfile::tempdir().expect("temp data dir");
+    let state = state().with_web_assets(Arc::new(komari_web::WebAssets::with_data_dir(
+        data_dir.path(),
+    )));
     let uuid = create_client(&state, "visible", false);
     let mut record = Record::new(uuid);
     record.cpu = 12.3;
@@ -1191,11 +1199,49 @@ async fn mjpeg_streams_multipart_jpeg_frames_until_the_client_disconnects() {
             &[0xFF, 0xD8, 0xFF],
             "frame {frame_number} JPEG SOI magic"
         );
+        let image = image::load_from_memory(&frame[header_end..]).expect("decode JPEG frame");
+        // One visible node and the bitmap fallback: Go's
+        // `renderStatusTableWithBasicFont` adds 30 px for the warning line.
+        assert_eq!(image.dimensions(), (1280, 252));
     }
 
     // Dropping the body cancels the `unfold` stream; there is no detached
     // rendering task left behind.
     drop(stream);
+}
+
+#[tokio::test]
+async fn mjpeg_accepts_lang_and_tz_offset_query_parameters() {
+    let data_dir = tempfile::tempdir().expect("temp data dir");
+    let state = state().with_web_assets(Arc::new(komari_web::WebAssets::with_data_dir(
+        data_dir.path(),
+    )));
+    create_client(&state, "visible", false);
+
+    for uri in [
+        "/api/mjpeg_live?lang=zh_cn&tz_offset=8",
+        "/api/mjpeg_live?lang=en&tz_offset=-5",
+        "/api/mjpeg_live?lang=zh&tz_offset=not-a-number",
+    ] {
+        let response = app(&state)
+            .oneshot(get(uri))
+            .await
+            .expect("router response");
+        assert_eq!(response.status(), StatusCode::OK, "{uri}");
+        let mut stream = response.into_body().into_data_stream();
+        let frame = tokio::time::timeout(Duration::from_secs(2), stream.next())
+            .await
+            .expect("frame within timeout")
+            .expect("stream item")
+            .expect("frame bytes");
+        let header_end = frame
+            .windows(4)
+            .position(|window| window == b"\r\n\r\n")
+            .expect("multipart header terminator")
+            + 4;
+        assert_eq!(&frame[header_end..header_end + 3], &[0xFF, 0xD8, 0xFF]);
+        drop(stream);
+    }
 }
 
 fn now_unix() -> i64 {
