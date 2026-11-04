@@ -20,7 +20,7 @@
 | 公开 API / JSON-RPC | `komari-api` | **待实现（B04）** | 当前只有占位 `lib.rs`。 |
 | Agent API / WebSocket | `komari-api` | **待合并（B05）** | 截至 B11 基线（`main@0382eb3`）未合并；实现状态以本表为准。 |
 | 管理 API | `komari-api` | **待实现（B06）** | `/api/admin/*` 尚未移植。 |
-| 通知 | `komari-notify` | **已合并（B07）** | 7 个原生 provider + empty；Javascript 不支持；provider 脱敏（D-011）已合并。 |
+| 通知 | `komari-notify` | **已合并（B07/B16）** | 8 个 provider（含 `Javascript`，`boa_engine` 执行用户脚本）；provider 脱敏（D-011）已合并。 |
 | GeoIP | `komari-geoip` | **已合并（B08）** | mmdb/ip-api/ipinfo/geojs/empty，48h 缓存。 |
 | DDNS | `komari-ddns` | **已合并（随 B08 分支）** | cloudflare/webhook/empty、重试、历史。 |
 | 记录维护 | `komari-jobs` | **已合并** | 保留期清理、15 分钟压缩、VACUUM/checkpoint。 |
@@ -53,7 +53,7 @@
 
 | 编号 | 主题 | 类型 | 影响 | 迁移建议 |
 | --- | --- | --- | --- | --- |
-| D-001 | Javascript 通知 provider 不支持 | 有意差异 | `notification_method=Javascript` 无法发送 | 改用原生 provider 或 webhook。 |
+| D-001 | Javascript 通知 provider 已实现 | 已解决（B16） | 由 `boa_engine` 执行脚本；与 Go 的细微差异见登记 | 无需改用其他 provider。 |
 | D-002 | DDNS 删除记录是 Rust 扩展 | 非 Go 扩展 | 仅 cloudflare 支持；empty 报错 | 不依赖该能力；回退 Go 时改用 provider API。 |
 | D-003 | 旧库历史迁移不自动执行 | 兼容性限制 | 极老库可能缺 OAuth/通知配置或旧客户端信息 | 先用 Go 启动一次，备份后切换。 |
 | D-004 | GeoIP 缓存上限 10,000 | 有意差异 | 大量唯一 IP 时更早淘汰、增加上游查询 | 通常无需处理；需要时调大常量重建。 |
@@ -72,14 +72,15 @@ D 条目、不占号**；若后续需要正式登记，使用 `D-012` / `D-013`�
 
 ### 按影响分类
 
-- **会阻断功能**：D-001（仅 Javascript 通知）、D-003（仅极老数据库）。
+- **会阻断功能**：D-003（仅极老数据库）。
 - **行为差异但通常可接受**：D-002、D-004、D-005、D-006、D-008、D-010。
 - **安全/API 契约相关**：D-009、D-011。
 - **数据质量相关**：D-007。
+- **已解决**：D-001（B16 补齐 `Javascript` provider）。
 
 ### 迁移时的最低检查
 
-1. 通知不使用 `Javascript`（D-001）。
+1. 通知可以使用 `Javascript`（D-001 已解决），脚本语义见 D-001 登记。
 2. DDNS 不依赖删除记录（D-002）。
 3. 极老数据库先用 Go 启动一次（D-003）。
 4. 跨版本脚本使用 `true`/`false` 布尔值（D-005）。
@@ -146,7 +147,8 @@ cargo test -p komari-jobs
 - 截至 B11 基线（`main@0382eb3`），B05 的 agent API 未合并；本文件不把它算作
   “已合并”。
 - MySQL 未实现；Go 的 MySQL 分支也被注释，生产应使用 SQLite。
-- `Javascript` 通知 provider 是唯一明确不支持的原生 provider。
+- `Javascript` 通知 provider 已由 `boa_engine` 实现（B16）；与 Go `goja` 的细微
+  差异登记在 D-001。
 - 极老数据库的历史迁移需要 Go 版协助。
 - B14 的 `komari-web` 已合并（默认主题嵌入、静态/SPA/主题路由），但仍需服务器
   装配 `routes_for` / `serve_fallback`。

@@ -256,7 +256,7 @@ systemctl start komari
 
 | 编号 | 影响 | 迁移建议 |
 | --- | --- | --- |
-| D-001 | `Javascript` 通知 provider 不可用 | 改用 telegram/bark/webhook/email 等原生 provider。 |
+| D-001 | `Javascript` 通知 provider 已可用（`boa_engine`） | 无需改用其他 provider；脚本运行语义见 [parity-deviations.md](parity-deviations.md) D-001。 |
 | D-002 | DDNS `delete_record` 是 Rust 扩展 | 不要依赖 Go 提供该能力；仅 cloudflare 实现。 |
 | D-003 | 旧库历史迁移不自动执行 | 极老数据库先用 Go 启动一次。 |
 | D-004 | GeoIP 缓存上限 10,000 | 大量唯一 IP 时可能增加上游查询。 |

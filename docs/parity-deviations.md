@@ -18,16 +18,30 @@
 
 基线：`main@0382eb3`（B07/B08/B10/B13/B14）；本文件由 B11 统一维护。
 
-## D-001 通知 Javascript provider 不支持
+## D-001 通知 Javascript provider（已实现，保留编号）
 
-- **Rust**：`komari-notify` 注册了 `Javascript` provider，但 `init`/`send` 返回
-  `NotifyError::Unsupported`，不会执行脚本。
-- **Go**：通过 `goja` 执行用户脚本，支持自定义通知逻辑。
-- **原因**：Rust 没有与 `goja` 语义完全一致的嵌入式 JS 运行时，避免静默降级。
-- **影响**：`notification_method=Javascript` 时通知发送失败；其他 provider 不受影响。
-- **迁移**：改用 `telegram`、`bark`、`webhook`、`email`、`Server酱³`、
-  `Server酱Turbo` 等原生 provider；需要自定义逻辑时用 webhook 转发到外部服务。
-- **状态**：有意差异，待 B07 对等验收确认。
+- **状态**：已解决（B16）。编号保留，以下为与 Go 的剩余细微差异。
+- **Rust**：`komari-notify` 的 `Javascript` provider 使用 `boa_engine`（纯 Rust
+  ECMAScript 引擎）执行用户脚本，语义对齐 Go 的 `goja` 实现：
+  `sendMessage(message, title)` 必需（boolean 或 Promise），`sendEvent(event)`
+  可选且缺失时回退到文本格式；注入 `fetch`、`XMLHttpRequest`、`console`、
+  `setTimeout`/`clearTimeout`、`require('console'|'process')`；单次调用 30 秒超时。
+- **Go**：通过 `goja` + `goja_nodejs/require` 执行同一份脚本。
+- **剩余差异**：
+  - 每次发送都会新建运行时（Go 每个 provider 实例复用同一个 VM），因此脚本
+    顶层状态不会跨消息保留；
+  - `require` 只解析 `console` 与 `process`，不提供文件系统模块（goja 默认也
+    未注册原生模块，行为等价）；
+  - 错误只返回错误类型与入口函数名，不回显 Go 的完整错误消息，避免脚本字面量中的
+    token 进入 API/日志；
+  - 每个栈帧有 20,000,000 次循环迭代上限，避免死循环长期占用阻塞线程；
+  - `XMLHttpRequest` 的 `readyState` 2/3 在响应到达时与 4 一起触发（Go 按网络
+    阶段触发）；同步模式通过 Tokio 运行时阻塞等待；
+  - `setTimeout` 只在顶层 Promise 仍 pending 时触发（Go 的 goroutine 在返回后
+    仍会执行）。
+- **影响**：`notification_method=Javascript` 现在可以正常发送；不再需要改用
+  其他 provider。
+- **迁移**：无。使用自定义脚本的部署可直接沿用 Go 版脚本。
 
 ## D-002 DDNS 记录删除是 Rust 扩展
 
