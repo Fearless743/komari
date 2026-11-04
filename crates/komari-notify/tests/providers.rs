@@ -529,6 +529,33 @@ async fn email_body_is_quoted_printable_and_subject_is_rfc2047() {
 }
 
 #[tokio::test]
+async fn email_long_subject_keeps_go_q_encoding_word_splits() {
+    let sender = EmailSender::with_transport(
+        EmailConfig {
+            host: "smtp.example".to_owned(),
+            port: 587,
+            username: "user".to_owned(),
+            password: "pass".to_owned(),
+            sender: "bot@example.com".to_owned(),
+            receiver: "a@example.com".to_owned(),
+            ..EmailConfig::default()
+        },
+        Arc::new(MockEmail::new()),
+    );
+    let envelope = sender
+        .build_envelope("body", "状态提醒状态提醒状态提醒")
+        .unwrap();
+    let raw = envelope.raw_text();
+    let expected = "Subject: =?UTF-8?q?=E7=8A=B6=E6=80=81=E6=8F=90=E9=86=92=E7=8A=B6=E6=80=81=E6=8F=90?= \
+                    =?UTF-8?q?=E9=86=92=E7=8A=B6=E6=80=81=E6=8F=90=E9=86=92?=\r\n";
+    assert!(raw.contains(expected), "unexpected subject header: {raw}");
+    assert!(
+        !raw.contains("?b?"),
+        "subject must not use B-encoding: {raw}"
+    );
+}
+
+#[tokio::test]
 async fn email_ascii_subject_is_left_unencoded_like_go() {
     let sender = EmailSender::with_transport(
         EmailConfig {

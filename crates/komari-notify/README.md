@@ -100,6 +100,8 @@ port，路径/query 隐藏。`HttpRequest` 的 `Debug` 不显示请求体和敏�
   (`=?UTF-8?q?...?=`, spaces as `_`, non-ASCII bytes as uppercase hex) and are
   written pre-encoded so lettre does not re-encode them as B-encoded words.
   ASCII-only subjects are left unencoded, matching `mime.QEncoding.Encode`.
+  Like Go, each encoded word carries at most 63 content characters, words are
+  joined by a single space, and multi-byte runes are never split.
 * `notifier::load::run_all_load_tasks` is a direct evaluation helper. Go's
   `LoadNotificationService` interval tickers / `Reload` / `stopChan` are not
   started implicitly; the caller owns periodic scheduling (as with offline,
