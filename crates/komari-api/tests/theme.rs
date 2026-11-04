@@ -144,9 +144,19 @@ fn raw_upload(archive: &[u8]) -> Request<Body> {
 struct FakeFetcher {
     downloads: Mutex<HashMap<String, Result<Vec<u8>, String>>>,
     releases: Mutex<HashMap<String, Result<String, String>>>,
+    download_calls: Mutex<Vec<String>>,
+    release_calls: Mutex<Vec<String>>,
 }
 
 impl FakeFetcher {
+    fn downloaded(&self) -> Vec<String> {
+        self.download_calls.lock().unwrap().clone()
+    }
+
+    fn released(&self) -> Vec<String> {
+        self.release_calls.lock().unwrap().clone()
+    }
+
     fn download(mut self, url: &str, data: Vec<u8>) -> Self {
         self.downloads
             .get_mut()
@@ -183,6 +193,7 @@ impl FakeFetcher {
 #[async_trait]
 impl ThemeFetcher for FakeFetcher {
     async fn download(&self, url: &str) -> Result<Vec<u8>, ThemeFetchError> {
+        self.download_calls.lock().unwrap().push(url.to_owned());
         match self.downloads.lock().unwrap().get(url) {
             Some(Ok(data)) => Ok(data.clone()),
             Some(Err(error)) => Err(ThemeFetchError::new(error.clone())),
@@ -194,6 +205,7 @@ impl ThemeFetcher for FakeFetcher {
 
     async fn github_release(&self, owner: &str, repo: &str) -> Result<String, ThemeFetchError> {
         let key = format!("{owner}/{repo}");
+        self.release_calls.lock().unwrap().push(key.clone());
         match self.releases.lock().unwrap().get(&key) {
             Some(Ok(url)) => Ok(url.clone()),
             Some(Err(error)) => Err(ThemeFetchError::new(error.clone())),
@@ -337,6 +349,73 @@ async fn theme_upload_rejects_missing_required_fields_and_unsafe_short() {
         "{body}"
     );
     assert!(!directory.path().join("evil").exists());
+}
+
+#[tokio::test]
+async fn theme_upload_returns_go_shaped_configuration() {
+    let directory = tempfile::tempdir().unwrap();
+    let (state, app) = theme_app(directory.path(), Arc::new(FakeFetcher::default()));
+    set_api_key(&state, API_KEY);
+
+    // Missing configuration -> Go's zero-value object.
+    let archive = raw_zip_config(r#"{"name":"No Config","short":"noconfig"}"#, &[]);
+    let (status, body) = call(&app, multipart_upload(&archive, "noconfig.zip")).await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    assert_eq!(
+        body["data"]["configuration"],
+        json!({"type": "", "icon": "", "name": null, "data": null})
+    );
+
+    // Partial configuration keeps the remaining zero values.
+    let archive = raw_zip_config(
+        r#"{"name":"Partial","short":"partial","configuration":{"type":"managed","data":[1]}}"#,
+        &[],
+    );
+    let (status, body) = call(&app, multipart_upload(&archive, "partial.zip")).await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    assert_eq!(
+        body["data"]["configuration"],
+        json!({"type": "managed", "icon": "", "name": null, "data": [1]})
+    );
+
+    // Non-object configuration is a JSON error, like Go's struct decoder.
+    for configuration in [r#""managed""#, "[]", "1", "true"] {
+        let config = format!(r#"{{"name":"Bad","short":"bad","configuration":{configuration}}}"#);
+        let archive = raw_zip_config(&config, &[]);
+        let (status, body) = call(&app, multipart_upload(&archive, "bad.zip")).await;
+        assert_eq!(status, StatusCode::BAD_REQUEST, "{configuration}: {body}");
+        assert!(
+            body["message"]
+                .as_str()
+                .unwrap()
+                .contains("主题配置格式错误"),
+            "{configuration}: {body}"
+        );
+        assert!(!directory.path().join("theme/bad").exists());
+    }
+}
+
+#[tokio::test]
+async fn theme_upload_accepts_whitespace_name_and_null_strings() {
+    let directory = tempfile::tempdir().unwrap();
+    let (state, app) = theme_app(directory.path(), Arc::new(FakeFetcher::default()));
+    set_api_key(&state, API_KEY);
+
+    // Go only checks `name == ""`, so a whitespace-only name is accepted; JSON
+    // nulls in string fields decode to the zero value.
+    let archive = raw_zip_config(
+        r#"{"name":" ","short":"blank","description":null,"version":null,"author":null,"url":null,"preview":null,"configuration":null}"#,
+        &[],
+    );
+    let (status, body) = call(&app, multipart_upload(&archive, "blank.zip")).await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    assert_eq!(body["data"]["name"], " ");
+    assert_eq!(body["data"]["description"], "");
+    assert_eq!(body["data"]["version"], "");
+    assert_eq!(
+        body["data"]["configuration"],
+        json!({"type": "", "icon": "", "name": null, "data": null})
+    );
 }
 
 #[tokio::test]
@@ -711,6 +790,143 @@ async fn theme_update_downloads_from_original_url() {
     assert_eq!(
         std::fs::read_to_string(directory.path().join("theme/alpha/dist/index.html")).unwrap(),
         "<html>theme</html>"
+    );
+}
+
+#[tokio::test]
+async fn theme_update_resolves_github_original_url_to_latest_release() {
+    let directory = tempfile::tempdir().unwrap();
+    let fetcher = Arc::new(
+        FakeFetcher::default()
+            .release("owner", "repo", REMOTE_URL)
+            .download(REMOTE_URL, theme_zip("alpha", "4.0.0", &[])),
+    );
+    let (state, app) = theme_app(directory.path(), fetcher.clone());
+    set_api_key(&state, API_KEY);
+    write_theme(
+        directory.path(),
+        "alpha",
+        json!({"name": "Alpha", "short": "alpha", "version": "1.0.0", "url": "https://github.com/owner/repo"}),
+    );
+
+    let (status, body) = call(
+        &app,
+        authenticated(
+            Method::POST,
+            "/api/admin/theme/update",
+            json!({"short": "alpha"}).to_string(),
+        ),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    assert_eq!(body["data"]["version"], "4.0.0");
+    assert_eq!(fetcher.released(), vec!["owner/repo"]);
+    assert_eq!(fetcher.downloaded(), vec![REMOTE_URL]);
+}
+
+#[tokio::test]
+async fn theme_update_resolves_explicit_github_url_to_latest_release() {
+    let directory = tempfile::tempdir().unwrap();
+    let fetcher = Arc::new(
+        FakeFetcher::default()
+            .release("owner", "repo", REMOTE_URL)
+            .download(REMOTE_URL, theme_zip("alpha", "4.1.0", &[])),
+    );
+    let (state, app) = theme_app(directory.path(), fetcher.clone());
+    set_api_key(&state, API_KEY);
+    write_theme(
+        directory.path(),
+        "alpha",
+        json!({"name": "Alpha", "short": "alpha", "version": "1.0.0"}),
+    );
+
+    let (status, body) = call(
+        &app,
+        authenticated(
+            Method::POST,
+            "/api/admin/theme/update",
+            json!({"short": "alpha", "url": "https://github.com/owner/repo.git"}).to_string(),
+        ),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    assert_eq!(body["data"]["version"], "4.1.0");
+    assert_eq!(fetcher.released(), vec!["owner/repo"]);
+    assert_eq!(fetcher.downloaded(), vec![REMOTE_URL]);
+}
+
+#[tokio::test]
+async fn theme_update_falls_back_to_git_owner_after_original_url_failure() {
+    let directory = tempfile::tempdir().unwrap();
+    let fetcher = Arc::new(
+        FakeFetcher::default()
+            .download_error(
+                "https://themes.example/broken.zip",
+                "下载主题文件失败，HTTP状态码: 500",
+            )
+            .release("owner", "repo", REMOTE_URL)
+            .download(REMOTE_URL, theme_zip("alpha", "5.0.0", &[])),
+    );
+    let (state, app) = theme_app(directory.path(), fetcher.clone());
+    set_api_key(&state, API_KEY);
+    write_theme(
+        directory.path(),
+        "alpha",
+        json!({"name": "Alpha", "short": "alpha", "version": "1.0.0", "url": "https://themes.example/broken.zip"}),
+    );
+
+    let (status, body) = call(
+        &app,
+        authenticated(
+            Method::POST,
+            "/api/admin/theme/update",
+            json!({"short": "alpha", "git_owner": "owner", "git_repo": "repo"}).to_string(),
+        ),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    assert_eq!(body["data"]["version"], "5.0.0");
+    assert_eq!(fetcher.released(), vec!["owner/repo"]);
+    assert_eq!(
+        fetcher.downloaded(),
+        vec!["https://themes.example/broken.zip", REMOTE_URL]
+    );
+}
+
+#[tokio::test]
+async fn theme_update_falls_back_to_new_url_after_original_url_failure() {
+    let directory = tempfile::tempdir().unwrap();
+    let fetcher = Arc::new(
+        FakeFetcher::default()
+            .download_error(
+                "https://themes.example/broken.zip",
+                "下载主题文件失败，HTTP状态码: 500",
+            )
+            .download(REMOTE_URL, theme_zip("alpha", "5.1.0", &[])),
+    );
+    let (state, app) = theme_app(directory.path(), fetcher.clone());
+    set_api_key(&state, API_KEY);
+    write_theme(
+        directory.path(),
+        "alpha",
+        json!({"name": "Alpha", "short": "alpha", "version": "1.0.0", "url": "https://themes.example/broken.zip"}),
+    );
+
+    let (status, body) = call(
+        &app,
+        authenticated(
+            Method::POST,
+            "/api/admin/theme/update",
+            json!({"short": "alpha", "url": REMOTE_URL}).to_string(),
+        ),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    assert_eq!(body["data"]["version"], "5.1.0");
+    assert!(fetcher.released().is_empty());
+    assert_eq!(
+        fetcher.downloaded(),
+        vec!["https://themes.example/broken.zip", REMOTE_URL]
     );
 }
 
