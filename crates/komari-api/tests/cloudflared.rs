@@ -21,6 +21,7 @@ use tokio::sync::oneshot;
 struct MockDownloader {
     bytes: Vec<u8>,
     fail: bool,
+    partial_failure: bool,
     calls: Arc<AtomicUsize>,
 }
 
@@ -29,6 +30,7 @@ impl MockDownloader {
         Self {
             bytes: bytes.into(),
             fail: false,
+            partial_failure: false,
             calls: Arc::new(AtomicUsize::new(0)),
         }
     }
@@ -37,6 +39,16 @@ impl MockDownloader {
         Self {
             bytes: Vec::new(),
             fail: true,
+            partial_failure: false,
+            calls: Arc::new(AtomicUsize::new(0)),
+        }
+    }
+
+    fn partial_failure() -> Self {
+        Self {
+            bytes: Vec::new(),
+            fail: false,
+            partial_failure: true,
             calls: Arc::new(AtomicUsize::new(0)),
         }
     }
@@ -56,6 +68,18 @@ impl Downloader for MockDownloader {
                 message: "mock download failure".to_owned(),
             });
         }
+        if self.partial_failure {
+            tokio::fs::write(dest, b"partial bytes")
+                .await
+                .map_err(|source| CloudflaredError::Install {
+                    path: dest.to_path_buf(),
+                    source,
+                })?;
+            return Err(CloudflaredError::Download {
+                url: url.to_owned(),
+                message: "connection dropped after partial write".to_owned(),
+            });
+        }
         tokio::fs::write(dest, &self.bytes)
             .await
             .map_err(|source| CloudflaredError::Install {
@@ -71,6 +95,8 @@ fn config(dir: &TempDir, downloader: MockDownloader) -> CloudflaredConfig {
         .with_downloader(Arc::new(downloader))
 }
 
+const RELEASE_PREFIX: &str = "https://github.com/cloudflare/cloudflared/releases/latest/download/";
+
 #[test]
 fn selects_linux_assets_for_every_architecture() {
     let expected = [
@@ -85,11 +111,7 @@ fn selects_linux_assets_for_every_architecture() {
         assert_eq!(target.arch, arch);
         assert_eq!(target.archive, ArchiveFormat::Raw);
         assert_eq!(target.file_name(), "cloudflared");
-        assert!(
-            target.url.ends_with(asset),
-            "{} should end with {asset}",
-            target.url
-        );
+        assert_eq!(target.url, format!("{RELEASE_PREFIX}{asset}"));
     }
 }
 
@@ -102,7 +124,7 @@ fn selects_windows_assets_and_exe_name() {
         let target = target_for("windows", arch).expect("supported windows target");
         assert_eq!(target.file_name(), "cloudflared.exe");
         assert_eq!(target.archive, ArchiveFormat::Raw);
-        assert!(target.url.ends_with(asset), "{}", target.url);
+        assert_eq!(target.url, format!("{RELEASE_PREFIX}{asset}"));
     }
 }
 
@@ -115,7 +137,7 @@ fn selects_darwin_tgz_assets() {
         let target = target_for("darwin", arch).expect("supported darwin target");
         assert_eq!(target.archive, ArchiveFormat::TarGz);
         assert_eq!(target.file_name(), "cloudflared");
-        assert!(target.url.ends_with(asset), "{}", target.url);
+        assert_eq!(target.url, format!("{RELEASE_PREFIX}{asset}"));
     }
 }
 
@@ -180,6 +202,46 @@ async fn download_failure_is_reported() {
         other => panic!("unexpected error: {other:?}"),
     }
     assert!(!dir.path().join("cloudflared").exists());
+}
+
+#[tokio::test]
+async fn partial_download_failure_removes_temporary_files() {
+    let dir = TempDir::new().expect("temp dir");
+    let downloader = MockDownloader::partial_failure();
+    let config = config(&dir, downloader);
+
+    let error = install_binary(&config, &config.target.clone().expect("target"))
+        .await
+        .expect_err("partial download failure");
+
+    assert!(
+        matches!(error, CloudflaredError::Download { .. }),
+        "{error:?}"
+    );
+    assert!(!dir.path().join("cloudflared").exists());
+    assert!(!dir.path().join(".cloudflared.download").exists());
+}
+
+#[tokio::test]
+async fn failed_archive_extraction_removes_temporary_files() {
+    let dir = TempDir::new().expect("temp dir");
+    let target = target_for("darwin", "arm64").expect("darwin target");
+    let downloader = MockDownloader::bytes(b"this is not a gzip archive");
+    let config = CloudflaredConfig::new(dir.path(), "test-token")
+        .with_target(target.clone())
+        .with_downloader(Arc::new(downloader));
+
+    let error = install_binary(&config, &target)
+        .await
+        .expect_err("invalid archive");
+
+    assert!(
+        matches!(error, CloudflaredError::Archive { .. }),
+        "{error:?}"
+    );
+    assert!(!dir.path().join("cloudflared").exists());
+    assert!(!dir.path().join(".cloudflared.download").exists());
+    assert!(!dir.path().join("cloudflared.extracted").exists());
 }
 
 #[tokio::test]

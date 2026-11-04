@@ -595,7 +595,18 @@ impl Server {
         tokio::pin!(serve);
         let mut reason_rx = shutdown_rx.clone();
         let result = tokio::select! {
-            result = &mut serve => result.context("HTTP server failed"),
+            result = &mut serve => {
+                let result = result.context("HTTP server failed");
+                // Axum can finish draining before this task observes the
+                // watch change; the recorded reason still decides the exit
+                // status.
+                match *shutdown_rx.borrow() {
+                    Some(ShutdownReason::Cloudflared) => Err(anyhow::anyhow!(
+                        "cloudflared exited; shutting down the server"
+                    )),
+                    _ => result,
+                }
+            }
             _ = reason_rx.changed() => {
                 let reason = *reason_rx.borrow();
                 if let Some(reason) = reason {

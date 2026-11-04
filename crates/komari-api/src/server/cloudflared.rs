@@ -349,10 +349,14 @@ pub async fn install_binary(
     let _ = tokio::fs::remove_file(&download_path).await;
 
     info!(url = target.url, "downloading cloudflared");
-    config
+    if let Err(error) = config
         .downloader
         .download_to(target.url, &download_path)
-        .await?;
+        .await
+    {
+        let _ = tokio::fs::remove_file(&download_path).await;
+        return Err(error);
+    }
 
     let install_result = match target.archive {
         ArchiveFormat::Raw => tokio::fs::rename(&download_path, &binary_path)
@@ -377,6 +381,20 @@ pub async fn install_binary(
 }
 
 fn extract_tgz_binary(archive_path: &Path, binary_path: &Path) -> Result<(), CloudflaredError> {
+    let extracted_path = binary_path.with_extension("extracted");
+    let _ = std::fs::remove_file(&extracted_path);
+    let result = extract_tgz_binary_into(archive_path, binary_path, &extracted_path);
+    if result.is_err() {
+        let _ = std::fs::remove_file(&extracted_path);
+    }
+    result
+}
+
+fn extract_tgz_binary_into(
+    archive_path: &Path,
+    binary_path: &Path,
+    extracted_path: &Path,
+) -> Result<(), CloudflaredError> {
     let file = std::fs::File::open(archive_path).map_err(|source| CloudflaredError::Archive {
         path: archive_path.to_path_buf(),
         source,
@@ -389,8 +407,6 @@ fn extract_tgz_binary(archive_path: &Path, binary_path: &Path) -> Result<(), Clo
             source,
         })?;
 
-    let extracted_path = binary_path.with_extension("extracted");
-    let _ = std::fs::remove_file(&extracted_path);
     for entry in entries {
         let mut entry = entry.map_err(|source| CloudflaredError::Archive {
             path: archive_path.to_path_buf(),
@@ -404,12 +420,12 @@ fn extract_tgz_binary(archive_path: &Path, binary_path: &Path) -> Result<(), Clo
             continue;
         }
         let mut output =
-            std::fs::File::create(&extracted_path).map_err(|source| CloudflaredError::Install {
-                path: extracted_path.clone(),
+            std::fs::File::create(extracted_path).map_err(|source| CloudflaredError::Install {
+                path: extracted_path.to_path_buf(),
                 source,
             })?;
         io::copy(&mut entry, &mut output).map_err(|source| CloudflaredError::Install {
-            path: extracted_path.clone(),
+            path: extracted_path.to_path_buf(),
             source,
         })?;
         drop(output);
