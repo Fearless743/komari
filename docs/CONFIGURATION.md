@@ -1,6 +1,6 @@
 # Komari Rust 配置参考
 
-本文档描述 `komari-rs` 当前基线（B11，已合并 `main@0382eb3`）实际读取的启动配置、
+本文档描述 `komari-rs` 当前基线（第二轮合并后，B01–B21）实际读取的启动配置、
 命令行参数和持久化设置。所有键名、默认值和路径均与代码逐项核对：
 
 - 启动配置：`crates/komari-config/src/config.rs`、`crates/komari-config/src/keys.rs`
@@ -242,7 +242,7 @@ SQLite 连接由 `crates/komari-db/src/db.rs` 的 `DbOptions` 控制；CLI 只�
 | `geo_ip_provider` | string | `"ipinfo"` | GeoIP provider，见第 8 节。 |
 | `ddns_enabled` | bool | `false` | DDNS 总开关。 |
 | `ddns_provider` | string | `"none"` | DDNS provider，见第 9 节。 |
-| `ddns_sync_interval` | int | `10` | DDNS 同步间隔，单位分钟。Go 调度器对 `<= 0` 回退到 10；Rust 的周期调度尚未装配。 |
+| `ddns_sync_interval` | int | `10` | DDNS 同步间隔，单位分钟。Go 调度器对 `<= 0` 回退到 10；Rust 后台任务同样回退到 10 分钟。 |
 | `o_auth_enabled` | bool | `false` | OAuth 登录开关。 |
 | `o_auth_provider` | string | `"github"` | OAuth provider，见第 10 节。 |
 | `disable_password_login` | bool | `false` | 禁用密码登录；启用前必须已有 SSO 绑定账户。 |
@@ -318,7 +318,7 @@ Time: {{time}}
 | --- | --- |
 | `ddns_enabled` | `true` / `false`，默认 `false` |
 | `ddns_provider` | `none`、`cloudflare`、`webhook`、`empty`，默认 `none` |
-| `ddns_sync_interval` | 分钟，默认 `10`；Go 调度器对 `<= 0` 回退到 10，Rust 周期调度待装配 |
+| `ddns_sync_interval` | 分钟，默认 `10`；`<= 0` 回退到 10，Rust 后台任务按此间隔同步 |
 
 provider 配置存放在 `ddns_providers` 表：
 
@@ -423,7 +423,7 @@ provider 配置存放在 `message_sender_providers` 表（`name` + `addition` JS
 
 | 键 | 默认值 | 说明 |
 | --- | --- | --- |
-| `record_enabled` | `true` | 是否记录监控数据。Go 版关闭后会清空记录；Rust 的清空调度待服务器装配，`komari-jobs` 只负责保留期清理和压缩。 |
+| `record_enabled` | `true` | 是否记录监控数据。关闭后 Rust 后台任务每分钟清空 `records`/`gpu_records`，与 Go 一致；`komari-jobs` 负责保留期清理和压缩。 |
 | `record_preserve_time` | `720` | 记录保留小时数；`komari-jobs` 清理和压缩使用。 |
 
 `komari-jobs` 已实现：
@@ -457,16 +457,16 @@ komari server \
   --log-level info
 ```
 
-### 只读检查配置
+### 启动服务
 
-当前 `server` 子命令不会监听端口，可以用它检查解析结果：
+`server` 子命令会打开数据库、装配路由并监听端口：
 
 ```sh
 komari server --listen 127.0.0.1:25774 --database /tmp/komari.db --log-level debug
 ```
 
-stderr 会打印 `startup configuration`，包含最终生效的监听地址、数据库文件、
-主题、CORS、日志级别等。
+stderr 会先打印 `startup configuration`，包含最终生效的监听地址、数据库文件、
+主题、CORS、日志级别等，随后打印 `Komari HTTP server assembled` 并开始监听。
 
 ## 14. 自检
 

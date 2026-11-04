@@ -4,12 +4,11 @@
 迁移的核心原则是：**同一个 SQLite 文件、同一个数据目录、同一个监听端口
 `25774`**。Rust 版读取 Go/GORM 生成的 schema，不要求导出/导入。
 
-> **当前实现边界（B11 基线）**
+> **当前实现边界**
 >
-> `komari server` 目前只解析配置并打印启动信息，HTTP/API/Web/WS/OAuth 尚未装配
-> （B04/B05/B06，以及 B13 OAuth HTTP/B14 静态路由的服务器装配）。因此本指南的
-> “切换二进制”步骤只在数据/服务层面成立；在 HTTP 层合并前，生产流量应继续由
-> Go 版承载。模块状态见 [PARITY.md](PARITY.md)。
+> 第二轮合并后（B01–B21），`komari server` 已装配 HTTP/API/Web/WS/OAuth、静态
+> 资源和后台任务，可以直接替换 Go 二进制。迁移前仍应备份数据库并在演练环境验证；
+> 模块状态见 [PARITY.md](PARITY.md)。
 
 ## 1. 迁移前检查
 
@@ -170,7 +169,7 @@ journalctl -u komari -f
 - `startup configuration`，其中 `db_file` 指向现有数据库；
 - `Starting server on 0.0.0.0:25774 ...`。
 
-> 当前基线只打印最后一行，不会真正 bind 端口；HTTP 层合并后才会监听。
+> 当前二进制会真正 bind 端口并提供完整 HTTP/WebSocket 服务。
 
 ### Docker / Compose
 
@@ -201,7 +200,7 @@ environment:
 
 ## 6. 切换后验证
 
-在 HTTP 层可用后，按以下顺序验证：
+切换后按以下顺序验证：
 
 1. 健康检查：`curl -fsS http://127.0.0.1:25774/ping` 返回 `pong`。
 2. 公开接口：`GET /api/version`、`GET /api/public`。
@@ -212,10 +211,10 @@ environment:
 6. 浏览器实时数据：`GET /api/clients` WebSocket。
 7. 通知、DDNS、GeoIP：检查日志与数据库写入。
 
-当前基线可验证的部分：
+本地快速验证：
 
 ```sh
-# 配置解析
+# 启动完整服务
 komari server --database /path/to/komari.db --log-level debug
 
 # 数据库 schema
@@ -261,27 +260,29 @@ systemctl start komari
 | --- | --- | --- |
 | D-001 | `Javascript` 通知 provider 已可用（`boa_engine`） | 无需改用其他 provider；脚本运行语义见 [parity-deviations.md](parity-deviations.md) D-001。 |
 | D-002 | DDNS `delete_record` 是 Rust 扩展 | 不要依赖 Go 提供该能力；仅 cloudflare 实现。 |
-| D-003 | 旧库历史迁移（已合并） | 直接切换即可；迁移失败会回滚。 |
-| D-004 | GeoIP 缓存上限 10,000 | 大量唯一 IP 时可能增加上游查询。 |
-| D-005 | `KOMARI_WS_DISABLE_ORIGIN` 接受更多布尔字面量 | 回退 Go 时统一写 `true`/`false`。 |
-| D-006 | 邮件主题 RFC 2047 编码 Q vs B | 解码后语义相同，通常无需处理。 |
-| D-007 | 配置数值越界时严格报错 | 修正 `configs` 中的异常数值。 |
+| D-003 | 旧库历史迁移（已合并 B20） | 直接切换即可；迁移失败会回滚。 |
+| D-004 | GeoIP 缓存上限（已解决 B21） | 已移除上限，无需处理。 |
+| D-005 | `KOMARI_WS_DISABLE_ORIGIN` 字面量（已解决 B21） | 已与 Go 一致，无需处理。 |
+| D-006 | 邮件主题 Q vs B 编码（已解决 B21） | 已改为 Go 兼容 Q-encoding。 |
+| D-007 | 配置数值越界（已解决 B21） | 已按 Go reflect 语义截断/回绕。 |
 | D-008 | CLI 布尔 flag 只接受 `true`/`false` | 把 `--flag=1`/`--flag=TRUE` 改为 `--flag` 或 `--flag=true`。 |
-| D-009 | DDNS provider 配置脱敏 | B06 的 GET/list 必须调用 `redact_addition`；写路径保留原值。 |
+| D-009 | DDNS provider 配置脱敏 | 管理 API GET/list 已接入；写路径保留原值。 |
 | D-010 | GeoIP mmdb 初始化只在缺失时下载 | 需要更新时走管理端 `update_database`。 |
-| D-011 | 通知 provider 配置脱敏 | 已合并（B07）；B06 的 GET/list 接入 `redact_addition`，写路径保留原值。 |
+| D-011 | 通知 provider 配置脱敏 | 管理 API GET/list 已接入；写路径保留原值。 |
+| D-012 | cloudflared macOS 解包 `.tgz` | macOS 切换前删除旧 `data/cloudflared`。 |
+| D-013 | cloudflared 严格检查 HTTP 状态码 | 确保可访问 GitHub Releases。 |
+| D-014 | cloudflared 意外退出优雅关闭 | 退出码仍为 1；需要立即退出时缩短 `shutdown_timeout`。 |
+| D-015 | `KOMARI_ENABLE_CLOUDFLARED` 字面量（已解决 B15） | 已与 Go 一致，无需处理。 |
+| D-016 | MJPEG 直接读仓储层而非 RPC | 无需操作。 |
+| D-017 | MJPEG 文本度量偏移 1–2 px | 像素级比对时以 Go 为准。 |
+| D-018 | MJPEG JPEG 字节差异 | 逐字节比对时以 Go 为准。 |
+| D-019 | MJPEG 字体下载测试开关 | 生产默认行为与 Go 一致。 |
+| D-020 | 主题上传接受 multipart | 回退 Go 时外部脚本改发原始 ZIP。 |
+| D-021 | 主题下载/安装额外硬化 | 超大主题需调高常量重建。 |
+| D-022 | 复合目标中的 `Vec<u8>` 不解 base64 | 避免该形状，或先按顶层 `Vec<u8>` 读取。 |
 
-此外，以下模块的 HTTP 装配尚未完成，不能视为已迁移：
-
-- B04：public API、JSON-RPC、`/ping`；
-- B05：agent API 与浏览器 WebSocket（截至 B11 基线未合并）；
-- B06：admin API；
-- B13：crate 已合并（provider/回调/账户绑定），但 OAuth HTTP 登录/绑定路由仍需
-  服务器装配；
-- B14：crate 已合并，但静态路由仍需 HTTP server 装配；隐藏节点过滤由 B14/B06 接入。
-
-MJPEG（`/api/mjpeg_live`）已由 B18 补齐，不再属于上述未完成范围；布局、字体
-下载/回退、`lang`/`tz_offset` 与 Go 对齐。
+Public/Agent/Admin/RPC/OAuth/静态路由、MJPEG 和浏览器/agent WebSocket 均已由
+B04/B05/B06/B09/B18 装配，可以直接切换。
 
 ## 9. 前端静态资源
 
@@ -312,13 +313,8 @@ cd ../komari && go build -o komari
 - `custom_head` / `custom_body` / `sitename` / `description` 单次替换；
 - 临时分享 token 的 `temp_key` cookie 注入。
 
-但 `komari server` 尚未装配 `routes_for` / `serve_fallback`，所以当前二进制仍不会
-通过 HTTP 提供页面。服务器装配前：
-
-- 生产页面继续由 Go 版提供；
-- B04/B05/B06 合并前，`/api`、`/ping` 也仍由 Go 提供。不要把这些路径反代到
-  尚未实现 HTTP 层的 Rust 二进制；
-- 如果只是把前端静态文件独立托管，`/api`、`/ping` 的反代目标仍应是 Go 后端。
+`komari server` 已装配 `routes_for` / `serve_fallback`，会通过 HTTP 提供页面、
+主题资源、`/api` 和 `/ping`；不需要再单独托管前端或把 API 反代回 Go。
 
 `KOMARI_THEME` 只影响启动配置；主题文件由 `komari-web` 按数据库 `theme` 选择，
 `KOMARI_DEFAULT_THEME_DIR` 是编译期嵌入路径。
@@ -343,7 +339,8 @@ cd ../komari && go build -o komari
 - [ ] Rust 二进制使用正确的 `KOMARI_VERSION` / `KOMARI_VERSION_HASH` 构建。
 - [ ] `WorkingDirectory` 与 `KOMARI_DB_FILE` 指向原数据目录。
 - [ ] 端口仍为 `25774`，反向代理的 WebSocket/body/timeout 配置未变。
-- [ ] **基线可验证项**：配置解析、`komari-db` schema/compat 测试、CLI 辅助命令。
-- [ ] **HTTP 层合并后验证**：`/ping`、登录、agent 上报、管理接口、通知/DDNS。
-- [ ] 已阅读 [parity-deviations.md](parity-deviations.md) 并接受 D-001..D-011。
+- [ ] **服务验证**：`/ping`、登录、agent 上报、管理接口、WebSocket、OAuth、静态页面、
+  MJPEG、通知/DDNS。
+- [ ] `komari-db` schema/compat 测试和 CLI 辅助命令验证通过。
+- [ ] 已阅读 [parity-deviations.md](parity-deviations.md) 并接受 D-001..D-022。
 - [ ] 回退步骤已在演练环境验证。
