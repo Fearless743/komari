@@ -300,8 +300,8 @@ scripts/differential-test.sh --keep --report-out /tmp/b23-diff-report.json
 | 仅一侧 | 0 |
 | 退出码 | 0 |
 
-报告：`/tmp/b23-diff-report.json`（本次运行使用 `--keep`，现场在
-`/tmp/komari-diff.wwfYDl/`；重新运行会生成新的临时目录）。
+报告：`/tmp/b23-diff-report.json`（用 `--report-out` 指定；重新运行会生成新的
+临时目录，`--keep` 可保留现场）。
 
 ### 6.2 前端 E2E
 
