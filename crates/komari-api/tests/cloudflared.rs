@@ -11,6 +11,7 @@ use komari_api::server::{
     ArchiveFormat, BackgroundConfig, Cloudflared, CloudflaredConfig, CloudflaredError, Downloader,
     ServerBuilder, ServerConfig, install_binary, target_for,
 };
+use komari_config::Config;
 use komari_db::Db;
 use tempfile::TempDir;
 use tokio::net::TcpListener;
@@ -396,12 +397,67 @@ async fn server_without_a_token_does_not_start_a_tunnel() {
     assert!(server.cloudflared().is_none());
 }
 
+#[tokio::test]
+async fn server_with_cloudflared_disabled_ignores_the_token() {
+    let dir = TempDir::new().expect("temp dir");
+    let config = ServerConfig {
+        enable_cloudflared: false,
+        cloudflared_token: Some("test-token".to_owned()),
+        ..server_config(&dir)
+    };
+    let server = ServerBuilder::new(config)
+        .with_db(memory_db())
+        .skip_services()
+        .build()
+        .await
+        .expect("build server");
+
+    assert!(server.cloudflared().is_none());
+}
+
+#[tokio::test]
+async fn server_with_enabled_cloudflared_and_empty_token_does_not_start() {
+    for token in [None, Some(String::new()), Some("   ".to_owned())] {
+        let dir = TempDir::new().expect("temp dir");
+        let config = ServerConfig {
+            enable_cloudflared: true,
+            cloudflared_token: token,
+            ..server_config(&dir)
+        };
+        let server = ServerBuilder::new(config)
+            .with_db(memory_db())
+            .skip_services()
+            .build()
+            .await
+            .expect("build server");
+
+        assert!(server.cloudflared().is_none());
+    }
+}
+
+#[test]
+fn from_app_config_maps_the_cloudflared_gate() {
+    let mut app = Config::default();
+    app.enable_cloudflared = true;
+    app.cloudflared_token = Some("app-token".to_owned());
+
+    let server = ServerConfig::from_app_config(&app);
+    assert!(server.enable_cloudflared);
+    assert_eq!(server.cloudflared_token.as_deref(), Some("app-token"));
+
+    app.enable_cloudflared = false;
+    let server = ServerConfig::from_app_config(&app);
+    assert!(!server.enable_cloudflared);
+    assert_eq!(server.cloudflared_token.as_deref(), Some("app-token"));
+}
+
 #[cfg(unix)]
 #[tokio::test]
 async fn server_shutdown_stops_the_configured_tunnel() {
     let dir = TempDir::new().expect("temp dir");
     write_mock_script(dir.path(), "#!/bin/sh\nwhile :; do sleep 1; done\n");
     let config = ServerConfig {
+        enable_cloudflared: true,
         cloudflared_token: Some("test-token".to_owned()),
         ..server_config(&dir)
     };

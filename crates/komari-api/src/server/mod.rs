@@ -88,11 +88,13 @@ pub struct ServerConfig {
     pub database_path: PathBuf,
     /// Data directory containing themes, favicon and `backup.zip`.
     pub data_dir: PathBuf,
-    /// Start a `cloudflared` tunnel when this token is non-empty.
+    /// Go-compatible `KOMARI_ENABLE_CLOUDFLARED` switch. A tunnel only starts
+    /// when this is `true` **and** [`Self::cloudflared_token`] is non-empty.
     ///
-    /// The binary is installed into [`Self::data_dir`]. Go additionally
-    /// requires `KOMARI_ENABLE_CLOUDFLARED=true`; see
-    /// [`ServerConfig::from_app_config`].
+    /// [`ServerBuilder::with_cloudflared`] is an explicit bypass for tests and
+    /// custom assemblies.
+    pub enable_cloudflared: bool,
+    /// Tunnel token. The binary is installed into [`Self::data_dir`].
     pub cloudflared_token: Option<String>,
     pub theme: String,
     pub api: ApiConfig,
@@ -113,6 +115,7 @@ impl Default for ServerConfig {
             listen: DEFAULT_LISTEN.to_owned(),
             database_path: PathBuf::from(DEFAULT_DB_FILE),
             data_dir: PathBuf::from("data"),
+            enable_cloudflared: false,
             cloudflared_token: None,
             theme: "default".to_owned(),
             api: ApiConfig::default(),
@@ -136,6 +139,7 @@ impl ServerConfig {
             listen: config.listen.clone(),
             database_path,
             data_dir,
+            enable_cloudflared: config.enable_cloudflared,
             cloudflared_token: config.cloudflared_token.clone(),
             theme: config.theme.clone(),
             api: ApiConfig {
@@ -386,11 +390,19 @@ impl ServerBuilder {
         }
 
         let cloudflared_config = self.cloudflared.or_else(|| {
-            config
-                .cloudflared_token
-                .as_deref()
-                .filter(|token| !token.trim().is_empty())
-                .map(|token| CloudflaredConfig::new(config.data_dir.clone(), token))
+            (config.enable_cloudflared
+                && !config
+                    .cloudflared_token
+                    .as_deref()
+                    .unwrap_or("")
+                    .trim()
+                    .is_empty())
+            .then(|| {
+                CloudflaredConfig::new(
+                    config.data_dir.clone(),
+                    config.cloudflared_token.as_deref().unwrap_or_default(),
+                )
+            })
         });
         let cloudflared = match cloudflared_config {
             Some(cloudflared) => Some(

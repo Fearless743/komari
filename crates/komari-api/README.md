@@ -151,11 +151,11 @@ assembly starts a tunnel when `ServerConfig::cloudflared_token` is non-empty;
 
 Known differences from Go:
 
-- Go requires `KOMARI_ENABLE_CLOUDFLARED=true` **and** a token. Rust only
-  checks that the token is non-empty; `--enable-cloudflared` remains parsed for
-  configuration compatibility.
-- An unexpected `cloudflared` exit is logged with its exit code and triggers a
-  graceful server shutdown instead of calling `os.Exit(1)` from library code.
+- Go and Rust both require `KOMARI_ENABLE_CLOUDFLARED=true` **and** a non-empty
+  token. `ServerBuilder::with_cloudflared` is an explicit bypass for tests.
+- An unexpected `cloudflared` exit is logged with its exit code, triggers a
+  graceful server shutdown and makes `serve` return an error (CLI exit code 1)
+  instead of calling `os.Exit(1)` from library code.
 - stdout/stderr are forwarded line by line through `tracing` with a
   `[cloudflared]` prefix, and the token is redacted defensively.
 - Existing `data/cloudflared[.exe]` files are reused without re-downloading;

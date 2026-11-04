@@ -44,8 +44,8 @@ CLI 的 `--database` 与 `--db-file` 是同一个参数，`--db-file` 是可见�
 | `KOMARI_LOG_LEVEL` | `--log-level` | 开发构建 `debug`，否则 `info` | `trace`、`debug`、`info`、`warn`、`error`、`off`；另接受别名 `warning`、`none`。 |
 | `KOMARI_THEME` | `--theme` | `default` | 启动配置中的主题名。实际站点主题以数据库 `configs.theme` 为准。 |
 | `KOMARI_ALLOW_CORS` | `--allow-cors[=BOOL]` | `false` | 启动配置中的 CORS 开关。运行时 CORS 由持久化 `allow_cors` 控制。 |
-| `KOMARI_ENABLE_CLOUDFLARED` | `--enable-cloudflared[=BOOL]` | `false` | Go 兼容开关；Rust 服务器实际以 `KOMARI_CLOUDFLARED_TOKEN` 非空作为启动条件。 |
-| `KOMARI_CLOUDFLARED_TOKEN` | 无 | 未设置 | cloudflared tunnel token；非空时下载并启动隧道。 |
+| `KOMARI_ENABLE_CLOUDFLARED` | `--enable-cloudflared[=BOOL]` | `false` | 是否启用 cloudflared；为 `true` 且 token 非空时启动隧道。 |
+| `KOMARI_CLOUDFLARED_TOKEN` | 无 | 未设置 | cloudflared tunnel token；仅在 `KOMARI_ENABLE_CLOUDFLARED=true` 时使用。 |
 | `KOMARI_WS_DISABLE_ORIGIN` | `--ws-disable-origin[=BOOL]` | `false` | 是否关闭 WebSocket Origin 校验。当前只解析，WS 由 B05/B14 装配。 |
 | `KOMARI_BODY_LIMIT` | `--body-limit <BYTES>` | `16777216`（16 MiB） | 普通 HTTP 请求体上限（字节），必须为正整数。`/api/admin/upload/backup` 使用独立的 2 GiB 上限。 |
 
@@ -199,8 +199,9 @@ SQLite 连接由 `crates/komari-db/src/db.rs` 的 `DbOptions` 控制；CLI 只�
 
 ### cloudflared
 
-- `KOMARI_CLOUDFLARED_TOKEN` 没有对应 CLI 参数；token 非空时服务器启动隧道，
-  为空时不下载也不启动。
+- `KOMARI_CLOUDFLARED_TOKEN` 没有对应 CLI 参数；只有
+  `KOMARI_ENABLE_CLOUDFLARED=true` 且 token 非空时服务器才启动隧道，否则不下载
+  也不启动。
 - 首次启动按平台/架构从 GitHub Releases 下载到 `data/cloudflared`
   （Windows 为 `data/cloudflared.exe`），非 Windows 设置为 `0755`；文件已存在时
   直接复用，不重复下载。macOS 下载的 `.tgz` 会在安装时解包。
@@ -209,8 +210,8 @@ SQLite 连接由 `crates/komari-db/src/db.rs` 的 `DbOptions` 控制；CLI 只�
   `Debug` 输出或错误信息中。
 - 服务器优雅关闭时终止子进程。与 Go 直接 `os.Exit(1)` 不同，Rust 在隧道进程
   意外退出时记录退出码并触发服务器优雅关闭，不会在库内直接退出进程。
-- Go 还要求 `KOMARI_ENABLE_CLOUDFLARED=true`；Rust 服务器装配只检查 token
-  是否非空，`--enable-cloudflared` 仍被解析但不再作为额外门控。
+- 启动门控与 Go 一致：`KOMARI_ENABLE_CLOUDFLARED=true` 且 token 非空。
+  `ServerBuilder::with_cloudflared` 可在测试或自定义装配中显式绕过该门控。
 
 ## 7. 持久化站点设置（`configs` 表）
 
