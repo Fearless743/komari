@@ -187,6 +187,27 @@ impl JavaScriptSender {
     /// The limit wraps the whole call, including synchronous script code that
     /// never yields to the promise loop. Go only enforces it while polling a
     /// Promise; a synchronous infinite loop there hangs forever.
+    /// JSON object passed to `sendEvent`, matching `json.Marshal(EventMessage)`.
+    ///
+    /// `EventMessage.Time` is a plain `time.Time` in Go, so it marshals as
+    /// RFC 3339 with nanoseconds and the application offset; a nil `Clients`
+    /// slice marshals as `null`. `komari-db` cannot distinguish an empty slice
+    /// from a nil one, so an empty list is sent as `null` like Go's nil slice.
+    pub fn event_json(event: &EventMessage) -> Value {
+        let clients = if event.clients.is_empty() {
+            Value::Null
+        } else {
+            serde_json::to_value(&event.clients).unwrap_or(Value::Null)
+        };
+        serde_json::json!({
+            "event": &event.event,
+            "clients": clients,
+            "time": event.time.to_rfc3339_nano(),
+            "message": &event.message,
+            "emoji": &event.emoji,
+        })
+    }
+
     async fn execute(&self, invocation: engine::Invocation) -> Result<()> {
         let worker = self.worker().await?;
         let reply = worker.invoke(invocation, self.timeout)?;
@@ -283,9 +304,10 @@ mod tests {
             ..EventMessage::default()
         };
         let message = JavaScriptSender::fallback_message(&event);
+        let time = event.time.to_rfc3339().unwrap();
         assert_eq!(
             message,
-            "🔴🔴🔴\nEvent: Offline\nMessage: gone\nTime: 2026-01-02T03:04:05Z"
+            format!("🔴🔴🔴\nEvent: Offline\nMessage: gone\nTime: {time}")
         );
     }
 
@@ -310,9 +332,10 @@ mod tests {
             emoji: "🔴".to_owned(),
         };
         let message = JavaScriptSender::fallback_message(&event);
+        let time = event.time.to_rfc3339().unwrap();
         assert_eq!(
             message,
-            "🔴🔴🔴\nEvent: Offline\nClients: [alpha u-2]\nMessage: gone\nTime: 2026-01-02T03:04:05Z"
+            format!("🔴🔴🔴\nEvent: Offline\nClients: [alpha u-2]\nMessage: gone\nTime: {time}")
         );
     }
 

@@ -216,7 +216,7 @@ impl Runtime {
             return self.send_fallback(event);
         };
 
-        let json = serde_json::to_value(event)?;
+        let json = super::JavaScriptSender::event_json(event);
         let argument = match JsValue::from_json(&json, &mut self.context) {
             Ok(value) => value,
             Err(error) => return Err(runtime_error(&error, &mut self.context)),

@@ -454,20 +454,45 @@ async fn empty_script_is_rejected() {
 
 #[tokio::test]
 async fn send_event_uses_the_send_event_function() {
-    let sender = text_sender(
+    let event = event();
+    let expected_time = event.time.to_rfc3339_nano();
+    let sender = text_sender(&format!(
         r#"
-        function sendMessage() { return false; }
-        function sendEvent(event) {
+        function sendMessage() {{ return false; }}
+        function sendEvent(event) {{
             return event.event === "Offline"
                 && event.emoji === "🔴"
                 && event.clients.length === 2
                 && event.clients[1].uuid === "u-2"
-                && event.time === "2026-01-02T03:04:05Z";
-        }
-        "#,
+                && event.time === "{expected_time}";
+        }}
+        "#
+    ));
+
+    sender.send_event(&event).await.unwrap();
+}
+
+#[tokio::test]
+async fn send_event_uses_go_time_and_nil_clients_encoding() {
+    let mut event = event();
+    event.time = LocalTime::parse("2026-01-02T03:04:05.123456789Z").unwrap();
+    event.clients.clear();
+    let expected_time = event.time.to_rfc3339_nano();
+    assert!(
+        expected_time.starts_with("2026-01-02T03:04:05.123456789"),
+        "{expected_time}"
     );
 
-    sender.send_event(&event()).await.unwrap();
+    let sender = text_sender(&format!(
+        r#"
+        function sendMessage() {{ return false; }}
+        function sendEvent(event) {{
+            return event.clients === null && event.time === "{expected_time}";
+        }}
+        "#
+    ));
+
+    sender.send_event(&event).await.unwrap();
 }
 
 #[tokio::test]
