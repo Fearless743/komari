@@ -611,7 +611,9 @@ browser_check() {
         'error while loading shared libraries|No usable sandbox|Failed to move to new namespace|Operation not permitted|cannot open shared object|zygote|DevToolsActivePort|Failed to launch' \
         <<<"$stderr_text"; then
       # Known environment limitation (sandbox, missing shared library, ...):
-      # the curl checks above already cover the HTTP contract.
+      # the curl checks above already cover the HTTP contract. Mark the
+      # browser unavailable so the second render check is not attempted.
+      BROWSER_AVAILABLE=false
       BROWSER_SKIP_REASON="headless browser unavailable: $stderr_text"
       record_check "$name" skipped "$BROWSER_SKIP_REASON"
     else

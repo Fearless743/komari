@@ -45,9 +45,9 @@ MISSING_UUID = "00000000-0000-4000-8000-000000000000"
 def build_cases(visible_uuid: str, hidden_uuid: str) -> list[dict[str, Any]]:
     """Return the request matrix in execution order.
 
-    ``public`` must run before ``admin_settings``: the Rust backend persists
-    the public-settings defaults lazily on the first ``/api/public`` call,
-    whereas Go seeds every ``config.Legacy`` default during startup.
+    Both backends seed the complete ``config.Legacy``/``SiteConfig`` default
+    key set during startup, so ``admin_settings`` no longer depends on a prior
+    ``public`` call for its key set. The order is kept for readability.
     """
 
     def rpc(
@@ -113,6 +113,48 @@ def build_cases(visible_uuid: str, hidden_uuid: str) -> list[dict[str, Any]]:
             "path": "/api/admin/settings",
             "auth": True,
             "json": {},
+            "follow_redirects": False,
+        },
+        {
+            "id": "admin_settings_head_no_slash",
+            "method": "HEAD",
+            "path": "/api/admin/settings",
+            "auth": True,
+            "follow_redirects": False,
+        },
+        {
+            "id": "admin_settings_put_no_slash",
+            "method": "PUT",
+            "path": "/api/admin/settings",
+            "auth": True,
+            "follow_redirects": False,
+        },
+        {
+            "id": "admin_settings_patch_no_slash",
+            "method": "PATCH",
+            "path": "/api/admin/settings",
+            "auth": True,
+            "follow_redirects": False,
+        },
+        {
+            "id": "admin_settings_delete_no_slash",
+            "method": "DELETE",
+            "path": "/api/admin/settings",
+            "auth": True,
+            "follow_redirects": False,
+        },
+        {
+            "id": "admin_settings_options_no_slash",
+            "method": "OPTIONS",
+            "path": "/api/admin/settings",
+            "auth": True,
+            "follow_redirects": False,
+        },
+        {
+            "id": "admin_settings_head_slash",
+            "method": "HEAD",
+            "path": "/api/admin/settings/",
+            "auth": True,
             "follow_redirects": False,
         },
         {"id": "recent_seeded", "method": "GET", "path": f"/api/recent/{visible_uuid}"},
@@ -925,6 +967,7 @@ def run_invariants(
             f"{side}: guest /api/nodes hides the hidden node",
             isinstance(guest_nodes, list)
             and len(guest_nodes) == 1
+            and isinstance(guest_nodes[0], dict)
             and guest_nodes[0].get("uuid") == visible_uuid,
             f"nodes={guest_nodes}",
         )
@@ -999,7 +1042,8 @@ def run_invariants(
             denied = case_json(results, case_id, side) or {}
             check(
                 f"{side}: {case_id} denies hidden nodes",
-                denied.get("status") == "error"
+                isinstance(denied, dict)
+                and denied.get("status") == "error"
                 and denied.get("message") == "UUID is required",
                 f"body={denied}",
             )
@@ -1007,7 +1051,9 @@ def run_invariants(
         me = case_json(results, "me_admin", side) or {}
         check(
             f"{side}: admin session is logged in",
-            me.get("logged_in") is True and me.get("username") == admin_user,
+            isinstance(me, dict)
+            and me.get("logged_in") is True
+            and me.get("username") == admin_user,
             f"body={me}",
         )
 

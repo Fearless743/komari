@@ -166,9 +166,10 @@ detect_go_repo() {
   return 1
 }
 
-if [[ -z "$GO_BIN" && -z "$GO_REPO" ]]; then
+if [[ -z "$GO_REPO" ]]; then
   if ! GO_REPO="$(detect_go_repo)"; then
-    cat >&2 <<'EOF'
+    if [[ -z "$GO_BIN" ]]; then
+      cat >&2 <<'EOF'
 error: Go reference checkout not found.
 
 Pass it explicitly:
@@ -177,7 +178,10 @@ Pass it explicitly:
 or set KOMARI_GO_REPO. A prebuilt binary can be supplied with
 KOMARI_GO_BIN / --go-bin instead.
 EOF
-    exit 2
+      exit 2
+    fi
+    echo "warning: --go-bin given without --go-repo; Go revision/dirty provenance will be empty" >&2
+    GO_REPO=""
   fi
 fi
 

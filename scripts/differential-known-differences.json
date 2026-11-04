@@ -82,6 +82,24 @@
       "ignore_paths": [
         "data.set-cookie.session_token"
       ]
+    },
+    "admin_settings_head_no_slash": {
+      "status_only": true
+    },
+    "admin_settings_put_no_slash": {
+      "status_only": true
+    },
+    "admin_settings_patch_no_slash": {
+      "status_only": true
+    },
+    "admin_settings_delete_no_slash": {
+      "status_only": true
+    },
+    "admin_settings_options_no_slash": {
+      "status_only": true
+    },
+    "admin_settings_head_slash": {
+      "status_only": true
     }
   }
 }
