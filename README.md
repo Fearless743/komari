@@ -65,6 +65,32 @@ cargo run -p komari-cli -- server --listen 0.0.0.0:25774
 
 Passing no subcommand is equivalent to `server`, matching the Go CLI.
 
+## 安装
+
+`install.sh`（移植自 Go 版 `install-komari.sh`）提供交互式菜单：安装 / 升级 /
+卸载 / 状态 / 日志 / 重启 / 停止。安装位置、服务名、数据目录与 Go 版完全一致，
+可直接覆盖升级：
+
+```sh
+curl -fsSLO https://raw.githubusercontent.com/Fearless743/komari/main/install.sh
+chmod +x install.sh
+sudo ./install.sh
+```
+
+- 安装目录 `/opt/komari`，二进制 `/opt/komari/komari`，systemd 服务 `komari`，
+  `WorkingDirectory=/opt/komari`，数据库沿用 `./data/komari.db`（见
+  [docs/DEPLOYMENT.md](docs/DEPLOYMENT.md) 第 2、3 节）。
+- 从 Release `latest` 下载 `komari-linux-amd64` / `komari-linux-arm64`；
+  **386 / riscv64 无 Rust 预编译包**，脚本会明确报错（可用 Go 版 v0.2.0 或自行构建）。
+- 全新安装后会自动从服务日志提取初始管理员密码（Rust 日志格式优先，兼容 Go 格式）。
+- 升级前会自动备份旧二进制（`komari.backup.<时间戳>`）；数据目录不受影响，
+  数据库迁移在启动时自动执行。
+
+从 Go 版迁移（建议先 Agent 后面板，Rust Agent 只支持 v1 协议）：在同一台机器上
+直接运行上面的脚本选“升级”，服务定义会被重写为指向新二进制，数据库原地兼容。
+回退时把备份的旧二进制拷回即可，详见 [docs/DEPLOYMENT.md](docs/DEPLOYMENT.md)
+第 9 节与 [docs/MIGRATION.md](docs/MIGRATION.md)。
+
 ## Configuration
 
 Precedence is **command-line flag > environment variable > built-in default**.

@@ -392,7 +392,8 @@ ufw allow 25774/tcp
 
 ## 9. 升级与回退
 
-### 升级
+交互式脚本 `install.sh`（仓库根目录，移植自 Go 版 `install-komari.sh`）的
+“升级”选项会自动完成以下步骤；也可手工执行：
 
 ```sh
 systemctl stop komari
