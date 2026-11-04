@@ -56,11 +56,12 @@ use axum::response::{IntoResponse, Response};
 use komari_auth::{
     AuthLayer, BufferedBodyLimit, PrivateSite, SkipBodyBuffering, payload_too_large_response,
 };
-use komari_config::Config;
+use komari_config::{Config, SiteConfig, keys};
 use komari_db::{BackupOptions, Db, DbError, restore_pending_backup};
 use komari_ddns::DdnsService;
 use komari_geoip::{DEFAULT_JANITOR_INTERVAL, GeoIpJanitor, GeoIpService};
 use komari_web::WebAssets;
+use serde_json::{Value, json};
 use tokio::net::TcpListener;
 use tower_http::trace::{DefaultOnResponse, MakeSpan, TraceLayer};
 use tracing::{Level, error, info, warn};
@@ -762,6 +763,13 @@ pub fn prepare_database(config: &ServerConfig) -> Result<Db> {
         )
     })?;
 
+    // Go's `RunServer` calls `config.GetManyAs[config.Legacy]()` immediately
+    // after `InitDatabase`, which inserts every struct-tag default. Do the same
+    // here so a fresh database exposes the full settings key set through
+    // `/api/admin/settings` instead of waiting for each handler to lazily write
+    // its own defaults.
+    seed_site_config_defaults(&db).context("failed to seed site config defaults")?;
+
     if db
         .accounts()
         .count()
@@ -776,6 +784,106 @@ pub fn prepare_database(config: &ServerConfig) -> Result<Db> {
     }
 
     Ok(db)
+}
+
+/// Insert the `config.Legacy` defaults that Go writes during startup.
+///
+/// Only missing keys are inserted; existing deployments keep their values.
+/// The key names and defaults mirror `crates/komari-config/src/site.rs`
+/// (which in turn mirrors Go `config/legacy.go`).
+fn seed_site_config_defaults(db: &Db) -> Result<()> {
+    let default = SiteConfig::default();
+    let entries: Vec<(&str, Value)> = vec![
+        (keys::SITENAME_KEY, json!(default.sitename)),
+        (keys::DESCRIPTION_KEY, json!(default.description)),
+        (keys::ALLOW_CORS_KEY, json!(default.allow_cors)),
+        (keys::THEME_KEY, json!(default.theme)),
+        (keys::PRIVATE_SITE_KEY, json!(default.private_site)),
+        (keys::API_KEY_KEY, json!(default.api_key)),
+        (
+            keys::AUTO_DISCOVERY_KEY_KEY,
+            json!(default.auto_discovery_key),
+        ),
+        (keys::SCRIPT_DOMAIN_KEY, json!(default.script_domain)),
+        (
+            keys::SEND_IP_ADDR_TO_GUEST_KEY,
+            json!(default.send_ip_addr_to_guest),
+        ),
+        (keys::EULA_ACCEPTED_KEY, json!(default.eula_accepted)),
+        (keys::BASE_SCRIPTS_URL_KEY, json!(default.base_scripts_url)),
+        (keys::GEO_IP_ENABLED_KEY, json!(default.geo_ip_enabled)),
+        (keys::GEO_IP_PROVIDER_KEY, json!(default.geo_ip_provider)),
+        (keys::DDNS_ENABLED_KEY, json!(default.ddns_enabled)),
+        (keys::DDNS_PROVIDER_KEY, json!(default.ddns_provider)),
+        (
+            keys::DDNS_SYNC_INTERVAL_KEY,
+            json!(default.ddns_sync_interval),
+        ),
+        (keys::OAUTH_ENABLED_KEY, json!(default.o_auth_enabled)),
+        (keys::OAUTH_PROVIDER_KEY, json!(default.o_auth_provider)),
+        (
+            keys::DISABLE_PASSWORD_LOGIN_KEY,
+            json!(default.disable_password_login),
+        ),
+        (keys::CUSTOM_HEAD_KEY, json!(default.custom_head)),
+        (keys::CUSTOM_BODY_KEY, json!(default.custom_body)),
+        (
+            keys::NOTIFICATION_ENABLED_KEY,
+            json!(default.notification_enabled),
+        ),
+        (
+            keys::NOTIFICATION_METHOD_KEY,
+            json!(default.notification_method),
+        ),
+        (
+            keys::NOTIFICATION_TEMPLATE_KEY,
+            json!(default.notification_template),
+        ),
+        (
+            keys::EXPIRE_NOTIFICATION_ENABLED_KEY,
+            json!(default.expire_notification_enabled),
+        ),
+        (
+            keys::EXPIRE_NOTIFICATION_LEAD_DAYS_KEY,
+            json!(default.expire_notification_lead_days),
+        ),
+        (
+            keys::LOGIN_NOTIFICATION_KEY,
+            json!(default.login_notification),
+        ),
+        (
+            keys::TRAFFIC_LIMIT_PERCENTAGE_KEY,
+            go_number(default.traffic_limit_percentage),
+        ),
+        (keys::RECORD_ENABLED_KEY, json!(default.record_enabled)),
+        (
+            keys::RECORD_PRESERVE_TIME_KEY,
+            json!(default.record_preserve_time),
+        ),
+    ];
+
+    for (key, value) in entries {
+        if !db
+            .config()
+            .contains(key)
+            .with_context(|| format!("failed to check config key {key}"))?
+        {
+            db.config()
+                .set(key, &value)
+                .with_context(|| format!("failed to seed config key {key}"))?;
+        }
+    }
+    Ok(())
+}
+
+/// Go's `encoding/json` renders integral `float64` values without a fractional
+/// part (`80`, not `80.0`). Match that for the one float-typed default.
+fn go_number(value: f64) -> Value {
+    if value.is_finite() && value.fract() == 0.0 {
+        json!(value as i64)
+    } else {
+        json!(value)
+    }
 }
 
 /// Move a restored database to a custom `--database` path.

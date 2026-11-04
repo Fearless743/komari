@@ -259,7 +259,7 @@ pub(crate) fn get_public_info(
         "description": config_string(
             db,
             komari_config::keys::DESCRIPTION_KEY,
-            "Komari Monitor, a simple server monitoring tool.",
+            komari_config::DEFAULT_DESCRIPTION,
         ),
         "custom_head": config_string(db, komari_config::keys::CUSTOM_HEAD_KEY, ""),
         "custom_body": config_string(db, komari_config::keys::CUSTOM_BODY_KEY, ""),

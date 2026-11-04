@@ -351,10 +351,7 @@ async fn public_settings_use_go_defaults_when_config_is_empty() {
     assert_eq!(body["status"], "success");
     let data = &body["data"];
     assert_eq!(data["sitename"], "Komari");
-    assert_eq!(
-        data["description"],
-        "Komari Monitor, a simple server monitoring tool."
-    );
+    assert_eq!(data["description"], "A simple server monitor tool.");
     assert_eq!(data["oauth_enable"], false);
     assert_eq!(data["oauth_provider"], "github");
     assert_eq!(data["disable_password_login"], false);
