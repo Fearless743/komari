@@ -104,6 +104,16 @@ impl HttpRequest {
 #[derive(Clone, PartialEq, Eq)]
 pub struct HttpResponse {
     pub status: u16,
+    /// Reason phrase exactly as sent on the wire, when the transport can see it.
+    ///
+    /// `reqwest`/`http` discard non-standard reason phrases, so the production
+    /// transport leaves this `None` and [`HttpResponse::status_line`] falls back
+    /// to the registered reason for the status code.
+    pub status_text: Option<String>,
+    /// Response headers with Go-canonical names (`Content-Type`), in wire order.
+    /// Only the JavaScript `fetch` bridge reads them; provider validation
+    /// ignores them.
+    pub headers: Vec<(String, String)>,
     pub body: Vec<u8>,
 }
 
@@ -111,6 +121,10 @@ impl std::fmt::Debug for HttpResponse {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("HttpResponse")
             .field("status", &self.status)
+            .field(
+                "headers",
+                &format!("<{} headers redacted>", self.headers.len()),
+            )
             .field("body", &format!("<{} bytes redacted>", self.body.len()))
             .finish()
     }
@@ -120,12 +134,59 @@ impl HttpResponse {
     pub fn new(status: u16, body: impl Into<Vec<u8>>) -> Self {
         Self {
             status,
+            status_text: None,
+            headers: Vec::new(),
             body: body.into(),
         }
     }
 
+    /// Attach the reason phrase seen on the wire (`OK`, `Custom Reason`, …).
+    pub fn with_status_text(mut self, status_text: impl Into<String>) -> Self {
+        self.status_text = Some(status_text.into());
+        self
+    }
+
     pub fn ok_json(value: &serde_json::Value) -> Self {
         Self::new(200, serde_json::to_vec(value).unwrap_or_default())
+    }
+
+    /// Append a response header (builder style).
+    pub fn with_header(mut self, name: impl Into<String>, value: impl Into<String>) -> Self {
+        self.headers.push((name.into(), value.into()));
+        self
+    }
+
+    /// Case-insensitive header lookup.
+    pub fn header_value(&self, name: &str) -> Option<&str> {
+        self.headers
+            .iter()
+            .find(|(key, _)| key.eq_ignore_ascii_case(name))
+            .map(|(_, value)| value.as_str())
+    }
+
+    /// Go's `resp.Status`: `"<code> <reason>"` (`202 Accepted`).
+    ///
+    /// The wire phrase wins when the transport observed one, matching Go's
+    /// `net/http` behaviour for non-standard reasons.
+    pub fn status_line(&self) -> String {
+        let reason = self
+            .status_text
+            .as_deref()
+            .map(str::trim)
+            .filter(|reason| !reason.is_empty())
+            .map(str::to_owned)
+            .or_else(|| {
+                reqwest::StatusCode::from_u16(self.status)
+                    .ok()
+                    .and_then(|status| status.canonical_reason())
+                    .map(str::to_owned)
+            })
+            .unwrap_or_default();
+        if reason.is_empty() {
+            self.status.to_string()
+        } else {
+            format!("{} {reason}", self.status)
+        }
     }
 
     pub fn body_text(&self) -> &str {
@@ -203,8 +264,23 @@ impl HttpTransport for ReqwestTransport {
 
         let response = builder.send().await.map_err(reqwest_error)?;
         let status = response.status().as_u16();
+        let headers = response
+            .headers()
+            .iter()
+            .map(|(name, value)| {
+                (
+                    canonical_header_name(name.as_str()),
+                    value.to_str().unwrap_or("").to_owned(),
+                )
+            })
+            .collect();
         let body = response.bytes().await.map_err(reqwest_error)?.to_vec();
-        Ok(HttpResponse { status, body })
+        Ok(HttpResponse {
+            status,
+            status_text: None,
+            headers,
+            body,
+        })
     }
 }
 
@@ -221,6 +297,29 @@ fn reqwest_error(error: reqwest::Error) -> NotifyError {
         "request"
     };
     NotifyError::Http(format!("{kind} failed"))
+}
+
+/// Go's `textproto.CanonicalMIMEHeaderKey`: `content-type` → `Content-Type`.
+///
+/// Go stores response headers under canonical names, so `fetch` scripts can
+/// read `response.headers["Content-Type"]`; `reqwest` lowercases them.
+pub fn canonical_header_name(name: &str) -> String {
+    let mut canonical = String::with_capacity(name.len());
+    let mut upper = true;
+    for byte in name.bytes() {
+        match byte {
+            b'-' => {
+                canonical.push('-');
+                upper = true;
+            }
+            _ if upper => {
+                canonical.push(char::from(byte.to_ascii_uppercase()));
+                upper = false;
+            }
+            _ => canonical.push(char::from(byte.to_ascii_lowercase())),
+        }
+    }
+    canonical
 }
 
 /// Percent-encode one `application/x-www-form-urlencoded` component the same
@@ -271,6 +370,32 @@ mod tests {
             Some(Duration::from_secs(30))
         );
         assert_eq!(ReqwestTransport::without_timeout().timeout(), None);
+    }
+
+    #[test]
+    fn canonical_header_name_matches_go() {
+        assert_eq!(canonical_header_name("content-type"), "Content-Type");
+        assert_eq!(
+            canonical_header_name("x-amz-meta-token"),
+            "X-Amz-Meta-Token"
+        );
+        assert_eq!(canonical_header_name("ETag"), "Etag");
+        assert_eq!(canonical_header_name(""), "");
+    }
+
+    #[test]
+    fn status_line_prefers_the_wire_reason() {
+        assert_eq!(
+            HttpResponse::new(202, Vec::new()).status_line(),
+            "202 Accepted"
+        );
+        assert_eq!(HttpResponse::new(299, Vec::new()).status_line(), "299");
+        assert_eq!(
+            HttpResponse::new(202, Vec::new())
+                .with_status_text("Custom Reason")
+                .status_line(),
+            "202 Custom Reason"
+        );
     }
 
     #[test]

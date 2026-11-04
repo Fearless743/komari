@@ -137,6 +137,56 @@ impl LocalTime {
         Some(dt.to_rfc3339_opts(SecondsFormat::Secs, true))
     }
 
+    /// Format like Go's `time.Time.MarshalJSON` (RFC 3339 with nanoseconds).
+    ///
+    /// `time.Time` marshals as `2006-01-02T15:04:05.999999999Z07:00`: the
+    /// fraction drops trailing zeros (and disappears when zero), the offset is
+    /// the application timezone, and the zero time is `0001-01-01T00:00:00Z`.
+    /// `EventMessage.Time` is a plain `time.Time` in Go, so notification
+    /// scripts see exactly this representation.
+    pub fn to_rfc3339_nano(self) -> String {
+        if self.is_zero() {
+            return "0001-01-01T00:00:00Z".to_owned();
+        }
+
+        let (naive, offset_seconds) = if timezone_is_utc() {
+            (self.0, 0)
+        } else {
+            match Local.from_local_datetime(&self.0) {
+                LocalResult::Single(dt) => (dt.naive_local(), dt.offset().local_minus_utc()),
+                LocalResult::Ambiguous(first, _) => {
+                    (first.naive_local(), first.offset().local_minus_utc())
+                }
+                // Nonexistent wall clock during a DST jump: fall back to UTC.
+                LocalResult::None => (self.0, 0),
+            }
+        };
+
+        let nanos = naive.and_utc().timestamp_subsec_nanos();
+        let mut fraction = String::new();
+        if nanos > 0 {
+            fraction = format!(".{nanos:09}");
+            while fraction.ends_with('0') {
+                fraction.pop();
+            }
+        }
+
+        let offset = if offset_seconds == 0 {
+            "Z".to_owned()
+        } else {
+            let sign = if offset_seconds < 0 { '-' } else { '+' };
+            let absolute = offset_seconds.abs();
+            format!("{sign}{:02}:{:02}", absolute / 3600, (absolute % 3600) / 60)
+        };
+
+        format!(
+            "{}{}{}",
+            naive.format("%Y-%m-%dT%H:%M:%S"),
+            fraction,
+            offset
+        )
+    }
+
     /// Parse a timestamp from any layout Komari has ever written.
     pub fn parse(value: &str) -> Result<Self, String> {
         let value = value.trim();
@@ -386,6 +436,27 @@ mod tests {
         assert!(value.is_zero());
         assert_eq!(value.to_storage_string(), "0001-01-01 00:00:00.0000000");
         assert_eq!(value.to_rfc3339(), None);
+    }
+
+    #[test]
+    fn rfc3339_nano_matches_go_time_marshal() {
+        // Go's RFC3339Nano layout trims trailing zeros.
+        let trimmed = LocalTime::parse("2026-01-02T03:04:05.120000000Z").unwrap();
+        let text = trimmed.to_rfc3339_nano();
+        assert!(text.starts_with("2026-01-02T03:04:05.12"), "{text}");
+        assert!(!text.contains(".1200"), "{text}");
+
+        let precise = LocalTime::parse("2026-01-02T03:04:05.123456789Z").unwrap();
+        assert!(
+            precise
+                .to_rfc3339_nano()
+                .starts_with("2026-01-02T03:04:05.123456789"),
+            "{}",
+            precise.to_rfc3339_nano()
+        );
+
+        // Zero time marshals as Go's zero `time.Time`.
+        assert_eq!(LocalTime::zero().to_rfc3339_nano(), "0001-01-01T00:00:00Z");
     }
 
     #[test]

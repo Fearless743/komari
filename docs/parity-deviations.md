@@ -18,16 +18,52 @@
 
 基线：`main@0382eb3`（B07/B08/B10/B13/B14）；本文件由 B11 统一维护。
 
-## D-001 通知 Javascript provider 不支持
+## D-001 通知 Javascript provider（已实现，保留编号）
 
-- **Rust**：`komari-notify` 注册了 `Javascript` provider，但 `init`/`send` 返回
-  `NotifyError::Unsupported`，不会执行脚本。
-- **Go**：通过 `goja` 执行用户脚本，支持自定义通知逻辑。
-- **原因**：Rust 没有与 `goja` 语义完全一致的嵌入式 JS 运行时，避免静默降级。
-- **影响**：`notification_method=Javascript` 时通知发送失败；其他 provider 不受影响。
-- **迁移**：改用 `telegram`、`bark`、`webhook`、`email`、`Server酱³`、
-  `Server酱Turbo` 等原生 provider；需要自定义逻辑时用 webhook 转发到外部服务。
-- **状态**：有意差异，待 B07 对等验收确认。
+- **状态**：已实现（B16），存在已登记差异，**待用户确认**。编号保留。
+- **Rust**：`komari-notify` 的 `Javascript` provider 使用 `boa_engine`（纯 Rust
+  ECMAScript 引擎）执行用户脚本：
+  - 每个 provider 实例一个常驻运行时线程，`Init` 只执行一次脚本，`sendMessage`
+    / `sendEvent` 复用同一 realm，与 Go 的 `JavaScriptSender.vm` 一致；
+  - `sendMessage(message, title)` 必需（boolean 或 Promise），`sendEvent(event)`
+    可选且缺失/不可调用时回退到文本格式；
+  - 注入 `fetch`、`XMLHttpRequest`、`console.log/error`、`setTimeout`、
+    `require`（任何模块都抛 `Invalid module`，与 goja 未注册原生模块一致）；
+  - 单次调用 30 秒墙钟超时（含同步代码），`Init` 加载脚本不计时，与 Go 的
+    `SendTextMessage` 计时起点一致。
+- **Go**：通过 `goja` + `goja_nodejs/require` 执行同一份脚本。
+- **剩余差异**：
+  - **错误文本**：只返回错误类型与入口函数名（如
+    `JavaScript error in sendMessage: TypeError`），不返回 Go 的完整错误消息，
+    避免脚本字面量中的 token 进入 API/日志（安全差异）；
+  - **同步死循环**：Go 只在轮询 Promise 时检查超时，同步 `while(true)` 会永久
+    挂起；Rust 由外层 30 秒墙钟超时返回错误，并重建运行时（Go 会一直挂起）。
+    另有每栈帧 1,000,000 次循环迭代上限；
+  - **statusText**：`reqwest`/`http` 丢弃自定义 reason phrase，Rust 回退到标准
+    原因短语（`202 Accepted`）；传输层可观测时（测试/自定义 transport）使用
+    wire reason；
+  - **XHR readyState**：2/3 在响应到达时与 4 同批触发（Go 按网络阶段触发）；
+    同步 XHR 通过 Tokio 运行时阻塞等待；
+  - **setTimeout**：只在入口 Promise 仍 pending 时触发（Go 的 goroutine 在返回
+    后仍会执行）；非可调用参数与 Go 一样是 no-op；
+  - **event JSON**：
+    - `clients` 为空 `Vec` 时序列化为 `null`。Go 的 nil slice 是 `null`，但
+      **非 nil 空 slice 是 `[]`**，`komari-db` 的 `Vec` 无法区分两种情况；
+    - `clients[]` 的字段集合与 Go 的 json tags 一致：两侧对 `uuid`、`token`、
+      `ipv4`、`ipv6`、`remark`、`public_remark`、`version` 都使用 omitempty，
+      空值同样被省略；唯一文本差异是 `price` 的 `0` 在 Rust 序列化为 `0.0`
+      （JS 中 `0 === 0.0`，不可观察）；
+    - `time` 由 `LocalTime` 重新按**应用时区**渲染（RFC3339Nano）。Go 的
+      `time.Time` 保留原 location，若事件时间来自非应用时区，偏移会不同；
+  - **headers.get()**：`fetch` 的 `response.headers` 除普通属性外还提供
+    大小写不敏感的 `get(name)`；Go 的对象只有属性，没有 `get` 方法（扩展）；
+  - **console**：输出到 `tracing` 而非 stdout（Go 用 `fmt.Println`）；
+  - **引擎**：boa 与 goja 的 ES 实现存在细微差异（如部分 Annex B / 旧版扩展）。
+- **影响**：`notification_method=Javascript` 可以正常发送；不再需要改用其他
+  provider。
+- **迁移**：使用自定义脚本的部署可直接沿用 Go 版脚本；若脚本依赖
+  `require('console')`、`console.info`、`clearTimeout` 或 `process`，需要改为
+  Go 也支持的写法（这些在 Go 中同样不可用）。
 
 ## D-002 DDNS 记录删除是 Rust 扩展
 

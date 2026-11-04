@@ -20,7 +20,7 @@ Rust port of the Go backend's notification stack:
 | `Server酱³` | parity | JSON `{title, desp, tags?}`. |
 | `Server酱Turbo` | parity | JSON `{title, desp, channel?, noip?, openid?}`. |
 | `empty` | parity | Always fails with the Go message. |
-| `Javascript` | **unsupported** | Go uses `goja`; no Rust runtime with identical semantics. `init`/`send` return `NotifyError::Unsupported` and the provider is documented here instead of silently falling back. |
+| `Javascript` | parity | User script executed by `boa_engine` (pure-Rust ECMAScript) on a persistent runtime thread, so `Init` runs the script once and every message reuses the realm like Go's `goja` VM. `sendMessage(message, title)` returns boolean or Promise; optional `sendEvent(event)` falls back to the Go text format. Injects `fetch`, `XMLHttpRequest`, `console.log/error`, `setTimeout` and `require` (always `Invalid module`, like goja without native modules). 30 s wall-clock limit per invocation; script loading is not counted. Errors expose only the error class and entry point, never script text. |
 
 
 ## 对外 API 脱敏
@@ -85,8 +85,14 @@ port，路径/query 隐藏。`HttpRequest` 的 `Debug` 不显示请求体和敏�
 
 ## Known differences
 
-* `LoadProvider` for `Javascript` fails with `Unsupported`; Go can execute the
-  script. This is the only provider intentionally missing.
+* `Javascript` error messages are reduced to the error class plus the failing
+  entry point instead of Go's full message (the message can interpolate script
+  secrets), and each stack frame has a 1,000,000 loop-iteration cap.
+* `Javascript`'s `fetch`/XHR report errors as strings like Go, but the string is
+  sanitized (no URL); `statusText` falls back to the canonical reason because
+  `reqwest` discards custom reason phrases. `response.headers.get()` is a Rust
+  extension (Go exposes plain object properties only), and event times are
+  re-rendered in the application timezone. See D-001 for the full list.
 * Provider `Default` values are Go's zero-value `Addition` structs. UI defaults
   (telegram endpoint, bark server/level, webhook method/content-type/body,
   email port 587) are exposed only through `ConfigField::default` and are not
@@ -109,9 +115,10 @@ port，路径/query 隐藏。`HttpRequest` 的 `Debug` 不显示请求体和敏�
 * Request URLs are validated with `reqwest`/`url`; Go's `url.Parse` accepts a
   few relative forms that fail later in `http.Client.Do`. Absolute URLs used by
   the supported providers behave identically.
-* `NotificationService::send_event` templates every event as text. Go's
-  optional `IEventMessageSender` is only implemented by the Javascript
-  provider, so no supported provider loses event capabilities.
+* `NotificationService::send_event` type-asserts the provider through
+  `MessageSender::as_event_sender`, mirroring Go's `IEventMessageSender`.
+  `Javascript` implements it; every other provider receives the templated text
+  message, exactly as in Go.
 * Offline `OnlineNotification` does not run `utils/renewal` (auto-renewal);
   renewal is outside this task's scope.
 * Traffic threshold history is in memory and expires lazily after 30 days,

@@ -391,7 +391,7 @@ provider 配置存放在 `message_sender_providers` 表（`name` + `addition` JS
 | `Server酱³` | `api_url`、`tags`（竖线分隔） |
 | `Server酱Turbo` | `api_url`、`channel`（竖线分隔）、`noip`、`openid` |
 | `empty` | `{}`；发送总是失败 |
-| `Javascript` | `script`；Rust 不支持，加载/发送返回 `Unsupported` |
+| `Javascript` | `script`；通过嵌入式 `boa_engine` 执行脚本，见下文 |
 
 说明：
 
@@ -400,7 +400,15 @@ provider 配置存放在 `message_sender_providers` 表（`name` + `addition` JS
   已存 JSON。
 - `notification_method` 为空或 `none` 时使用 `empty` provider；provider 配置缺失
   也会回退到 `empty`。
-- `Javascript` provider 是唯一的已知功能缺口，见
+- `Javascript` provider 使用 `boa_engine`（纯 Rust ECMAScript）执行用户脚本，
+  与 Go 的 `goja` 语义对齐：每个 provider 一个常驻运行时，脚本只在初始化时
+  执行一次，之后复用同一 realm。脚本必须定义 `sendMessage(message, title)`
+  （可返回 boolean 或 Promise），可选定义 `sendEvent(event)`；没有 `sendEvent`
+  时回退到 `sendMessage` 的文本格式。注入的 API 为 `fetch`、
+  `XMLHttpRequest`、`console.log`/`console.error`、`setTimeout` 和 `require`
+  （任何模块都抛 `Invalid module`，与 Go 未注册原生模块一致）。
+  单次调用限时 30 秒（脚本加载不计时）；错误只回显错误类型（以及失败的入口
+  函数），不回显脚本内容或错误消息。已知限制见
   [parity-deviations.md](parity-deviations.md) D-001。
 
 通知规则表：
