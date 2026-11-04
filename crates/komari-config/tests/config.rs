@@ -57,7 +57,7 @@ fn environment_overrides_defaults() {
             (keys::ENV_ALLOW_CORS, "true"),
             (keys::ENV_ENABLE_CLOUDFLARED, "1"),
             (keys::ENV_CLOUDFLARED_TOKEN, "token"),
-            (keys::ENV_WS_DISABLE_ORIGIN, "yes"),
+            (keys::ENV_WS_DISABLE_ORIGIN, "TRUE"),
             (keys::ENV_BODY_LIMIT, "1048576"),
         ],
         &ConfigOverrides::default(),
@@ -177,4 +177,64 @@ fn rejects_a_non_positive_body_limit() {
     let error = load(&[(keys::ENV_BODY_LIMIT, "0")], &ConfigOverrides::default())
         .expect_err("zero body limit must be rejected");
     assert!(matches!(error, ConfigError::InvalidValue { .. }));
+}
+
+#[test]
+fn ws_disable_origin_env_only_accepts_case_insensitive_true() {
+    for value in ["true", "TRUE", "True", "tRuE"] {
+        let config = load(
+            &[(keys::ENV_WS_DISABLE_ORIGIN, value)],
+            &ConfigOverrides::default(),
+        )
+        .expect("true values must load");
+        assert!(
+            config.ws_disable_origin,
+            "{value:?} should disable the check"
+        );
+    }
+
+    for value in [
+        "1", "0", "yes", "on", "no", "off", "false", " true ", "true ", "",
+    ] {
+        let config = load(
+            &[(keys::ENV_WS_DISABLE_ORIGIN, value)],
+            &ConfigOverrides::default(),
+        )
+        .unwrap_or_else(|error| panic!("{value:?} must not be a config error: {error}"));
+        assert!(
+            !config.ws_disable_origin,
+            "{value:?} must not disable the check"
+        );
+    }
+}
+
+#[test]
+fn ws_disable_origin_flag_overrides_environment() {
+    let overrides = ConfigOverrides {
+        ws_disable_origin: Some(false),
+        ..ConfigOverrides::default()
+    };
+    let config = load(&[(keys::ENV_WS_DISABLE_ORIGIN, "true")], &overrides).expect("flag must win");
+    assert!(!config.ws_disable_origin);
+
+    let overrides = ConfigOverrides {
+        ws_disable_origin: Some(true),
+        ..ConfigOverrides::default()
+    };
+    let config = load(&[(keys::ENV_WS_DISABLE_ORIGIN, "yes")], &overrides).expect("flag must win");
+    assert!(config.ws_disable_origin);
+}
+
+#[test]
+fn allow_cors_keeps_the_generic_boolean_parser() {
+    // Only the WS variable follows Go's strict `EqualFold(..., "true")`;
+    // the other startup booleans keep accepting 1/yes/on.
+    for value in ["1", "yes", "on", "TRUE"] {
+        let config = load(
+            &[(keys::ENV_ALLOW_CORS, value)],
+            &ConfigOverrides::default(),
+        )
+        .expect("generic booleans must load");
+        assert!(config.allow_cors, "{value:?} should enable CORS");
+    }
 }

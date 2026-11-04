@@ -48,7 +48,9 @@ provider rows and loads `o_auth_provider`) before serving requests.
 - One aggregated `records` row and its `gpu_records` rows are written in a
   single SQLite transaction, so a failed retry cannot duplicate GPU samples.
 - `allow_cors` is read from the database on every browser WebSocket upgrade;
-  `KOMARI_WS_DISABLE_ORIGIN` only accepts a case-insensitive `true`.
+  `KOMARI_WS_DISABLE_ORIGIN` only accepts a case-insensitive `true` (like Go's
+  `strings.EqualFold(value, "true")`). Values such as `1`, `yes`, `on`, or
+  ` true ` do not disable the check.
 - Report POST tokens come from `?token=` or a JSON body `token` for non-GET
   requests. `Authorization: Bearer` is reserved for the admin API key, matching
   B03's `AuthLayer`.

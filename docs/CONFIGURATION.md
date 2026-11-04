@@ -76,6 +76,9 @@ CLI 的 `--database` 与 `--db-file` 是同一个参数，`--db-file` 是可见�
 
 - 环境变量：`1` / `true` / `yes` / `on` 为真，`0` / `false` / `no` / `off` 为假；
   大小写不敏感，前后空白会被忽略。
+- 例外：`KOMARI_WS_DISABLE_ORIGIN` 与 Go 的 `ws.CheckOrigin` 一致，只接受大小写
+  不敏感的 `true`；`1`、`yes`、`on`、` true ` 以及其他值都视为 `false`，且不会
+  产生配置错误。
 - CLI flag：clap 的 `BoolValueParser` **只接受小写 `true` / `false`**；
   `--flag` 等价于 `--flag=true`。`--flag=1`、`--flag=TRUE`、`--flag=yes` 会报
   `invalid value` 并以退出码 `2` 退出。
@@ -194,6 +197,8 @@ SQLite 连接由 `crates/komari-db/src/db.rs` 的 `DbOptions` 控制；CLI 只�
 ### WebSocket Origin
 
 - 启动配置：`KOMARI_WS_DISABLE_ORIGIN` / `--ws-disable-origin`，默认 `false`。
+- 环境变量只接受大小写不敏感的 `true`（与 Go 一致）；`1`/`yes`/`on` 不会关闭
+  校验。
 - 预期行为：为 `true` 时跳过 Origin 校验；否则要求 `Origin` 的 host 与请求
   `Host` 一致。浏览器 WebSocket 还会在 `allow_cors=true` 时直接放行。
 - 当前只有配置解析；具体升级逻辑由 B05（agent/browser WS）和 B14（页面）装配。

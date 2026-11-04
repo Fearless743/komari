@@ -247,10 +247,9 @@ impl Config {
         let cloudflared_token = read(keys::ENV_CLOUDFLARED_TOKEN);
         let ws_disable_origin = match overrides.ws_disable_origin {
             Some(value) => value,
-            None => match read(keys::ENV_WS_DISABLE_ORIGIN) {
-                Some(value) => parse_bool(keys::ENV_WS_DISABLE_ORIGIN, &value)?,
-                None => false,
-            },
+            None => read(keys::ENV_WS_DISABLE_ORIGIN)
+                .map(|value| parse_ws_disable_origin(&value))
+                .unwrap_or(false),
         };
         let body_limit = match overrides.body_limit {
             Some(value) => Some(value),
@@ -333,4 +332,14 @@ fn parse_bool(key: &str, value: &str) -> Result<bool, ConfigError> {
             expected: "true or false",
         }),
     }
+}
+
+/// Parse `KOMARI_WS_DISABLE_ORIGIN` exactly like Go's `ws.CheckOrigin`.
+///
+/// Go uses `strings.EqualFold(os.Getenv(...), "true")` without trimming, so
+/// only a case-insensitive `true` disables the check; `1`, `yes`, `on`,
+/// ` true ` and every other value mean "disabled flag is off". Invalid values
+/// are not configuration errors.
+fn parse_ws_disable_origin(value: &str) -> bool {
+    value.eq_ignore_ascii_case("true")
 }
