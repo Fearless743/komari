@@ -21,10 +21,12 @@ use crate::provider::GeoIpProvider;
 use crate::providers::empty::EmptyProvider;
 
 /// Default cache lifetime, matching Go's `48 * time.Hour`.
+///
+/// Go's `go-cache` instance in `utils/geoip/geoip.go` has no capacity limit:
+/// entries only expire after this TTL (the janitor's one-hour interval merely
+/// controls when expired entries are reclaimed). The Rust cache follows the
+/// same policy and grows without a hard entry cap.
 pub const DEFAULT_CACHE_TTL: Duration = Duration::from_secs(48 * 60 * 60);
-
-/// Upper bound on cached lookups so long-running instances stay bounded.
-pub const DEFAULT_CACHE_CAPACITY: usize = 10_000;
 
 #[derive(Clone)]
 struct CacheEntry {
@@ -40,7 +42,6 @@ pub struct GeoIpService {
     provider_key: RwLock<String>,
     cache: Mutex<HashMap<String, CacheEntry>>,
     cache_ttl: Duration,
-    cache_capacity: usize,
 }
 
 impl Default for GeoIpService {
@@ -59,7 +60,6 @@ impl GeoIpService {
             provider_key: RwLock::new("empty".to_owned()),
             cache: Mutex::new(HashMap::new()),
             cache_ttl: DEFAULT_CACHE_TTL,
-            cache_capacity: DEFAULT_CACHE_CAPACITY,
         }
     }
 
@@ -76,15 +76,9 @@ impl GeoIpService {
         self
     }
 
-    /// Override the cache lifetime.
+    /// Override the cache lifetime. A zero duration disables caching.
     pub fn with_cache_ttl(mut self, ttl: Duration) -> Self {
         self.cache_ttl = ttl;
-        self
-    }
-
-    /// Override the maximum number of cached lookups. Zero disables caching.
-    pub fn with_cache_capacity(mut self, capacity: usize) -> Self {
-        self.cache_capacity = capacity;
         self
     }
 
@@ -245,24 +239,10 @@ impl GeoIpService {
     }
 
     fn store(&self, key: String, info: GeoInfo) {
-        if self.cache_capacity == 0 || self.cache_ttl.is_zero() {
+        if self.cache_ttl.is_zero() {
             return;
         }
-        let mut cache = self.cache.lock();
-        if cache.len() >= self.cache_capacity {
-            cache.retain(|_, entry| entry.stored_at.elapsed() <= self.cache_ttl);
-        }
-        while cache.len() >= self.cache_capacity {
-            let oldest = cache
-                .iter()
-                .min_by_key(|(_, entry)| entry.stored_at)
-                .map(|(key, _)| key.clone());
-            let Some(oldest) = oldest else {
-                break;
-            };
-            cache.remove(&oldest);
-        }
-        cache.insert(
+        self.cache.lock().insert(
             key,
             CacheEntry {
                 stored_at: Instant::now(),

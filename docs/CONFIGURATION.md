@@ -292,8 +292,8 @@ Time: {{time}}
 - `ip-api` 使用 `http://ip-api.com/json/<ip>`；`ipinfo` 使用
   `https://ipinfo.io/<ip>/json`；`geojs` 使用
   `https://get.geojs.io/v1/ip/geo/<ip>.json`。
-- 查询结果缓存 48 小时，缓存容量上限 10,000 条（Rust 扩展，见
-  [parity-deviations.md](parity-deviations.md) D-004）。
+- 查询结果缓存 48 小时，与 Go 的 `go-cache` 一致没有容量上限；过期条目按需
+  清理。
 - provider 初始化失败或 `geo_ip_enabled=false` 时回退到 empty provider，
   查询返回空 `GeoInfo`，不会 panic。
 - GeoIP 没有 `KOMARI_*` 环境变量，全部通过数据库配置。
