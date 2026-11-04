@@ -79,11 +79,13 @@ impl Runtime {
     /// Create the context, inject globals and install the network bridge.
     pub(super) fn new(handle: Handle, transport: Arc<dyn HttpTransport>) -> Result<Self> {
         ACTIVE.with(|cell| {
+            // During `Init` there is no invocation deadline yet; give top-level
+            // network calls the same budget as one request.
             *cell.borrow_mut() = Some(NetState::new(
                 handle,
                 transport,
                 REQUEST_TIMEOUT,
-                Instant::now(),
+                Instant::now() + REQUEST_TIMEOUT,
             ));
         });
         let guard = StateGuard;
@@ -118,17 +120,10 @@ impl Runtime {
             }
         });
 
-        let result = match invocation {
+        match invocation {
             Invocation::Text { message, title } => self.send_text(&message, &title),
             Invocation::Event(event) => self.send_event(&event),
-        };
-
-        ACTIVE.with(|cell| {
-            if let Some(state) = cell.borrow_mut().as_mut() {
-                state.end_job();
-            }
-        });
-        result
+        }
     }
 
     /// Evaluate the script and verify `sendMessage` (`Init`).

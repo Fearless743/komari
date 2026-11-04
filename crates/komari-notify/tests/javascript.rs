@@ -398,6 +398,74 @@ async fn top_level_state_persists_between_messages() {
 }
 
 #[tokio::test]
+async fn concurrent_first_calls_load_the_script_once() {
+    let transport = Arc::new(MockHttp::new(vec![HttpResponse::new(200, b"{}".to_vec())]));
+    let sender = sender(
+        r#"
+        // Top-level side effect: must run exactly once even when init and the
+        // first send race.
+        fetch("https://hook.example/init").then(function () {});
+        function sendMessage() { return true; }
+        "#,
+        transport.clone(),
+    );
+
+    let (init, send) = tokio::join!(sender.init(), sender.send_text("hello", "title"));
+    init.unwrap();
+    send.unwrap();
+
+    tokio::time::sleep(Duration::from_millis(100)).await;
+    assert_eq!(
+        transport.requests().len(),
+        1,
+        "top-level fetch ran more than once"
+    );
+}
+
+#[tokio::test]
+async fn init_can_use_synchronous_xhr() {
+    let transport = Arc::new(MockHttp::new(vec![HttpResponse::new(
+        200,
+        b"pong".to_vec(),
+    )]));
+    let sender = sender(
+        r#"
+        var initStatus = 0;
+        var initBody = "";
+        var xhr = new XMLHttpRequest();
+        xhr.open("GET", "https://hook.example/init", false);
+        xhr.send();
+        initStatus = xhr.status;
+        initBody = xhr.responseText;
+        function sendMessage() { return initStatus === 200 && initBody === "pong"; }
+        "#,
+        transport,
+    );
+
+    sender.init().await.unwrap();
+    sender.send_text("hello", "title").await.unwrap();
+}
+
+#[tokio::test]
+async fn promise_created_at_load_still_settles() {
+    let transport = Arc::new(MockHttp::new(vec![HttpResponse::new(
+        200,
+        br#"{"ok":true}"#.to_vec(),
+    )]));
+    let sender = sender(
+        r#"
+        var pending = fetch("https://hook.example/init").then(function (response) {
+            return response.ok;
+        });
+        function sendMessage() { return pending; }
+        "#,
+        transport,
+    );
+
+    sender.send_text("hello", "title").await.unwrap();
+}
+
+#[tokio::test]
 async fn top_level_code_runs_once_for_init_and_send() {
     let sender = text_sender(
         r#"

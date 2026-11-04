@@ -21,7 +21,7 @@ mod engine;
 mod net;
 mod worker;
 
-use std::sync::{Arc, Mutex};
+use std::sync::Arc;
 use std::time::Duration;
 
 use async_trait::async_trait;
@@ -29,6 +29,7 @@ use komari_db::models::EventMessage;
 use serde::Serialize;
 use serde_json::Value;
 use tokio::runtime::Handle;
+use tokio::sync::Mutex;
 
 use crate::error::{NotifyError, Result};
 use crate::http::{HttpTransport, ReqwestTransport};
@@ -76,6 +77,8 @@ pub struct JavaScriptSender {
     config: JavaScriptConfig,
     transport: Arc<dyn HttpTransport>,
     timeout: Duration,
+    /// Async mutex: the first caller holds it across `Init`, so concurrent
+    /// `init`/`send` never evaluate the script twice.
     worker: Mutex<Option<Arc<Worker>>>,
 }
 
@@ -179,14 +182,9 @@ impl JavaScriptSender {
 
     /// Return the live runtime thread, starting it (Go `Init`) if needed.
     async fn worker(&self) -> Result<Arc<Worker>> {
-        if let Some(worker) = self
-            .worker
-            .lock()
-            .unwrap_or_else(|poisoned| poisoned.into_inner())
-            .as_ref()
-            .cloned()
-        {
-            return Ok(worker);
+        let mut slot = self.worker.lock().await;
+        if let Some(worker) = slot.as_ref() {
+            return Ok(worker.clone());
         }
 
         let handle = Handle::try_current().map_err(|_| {
@@ -194,32 +192,20 @@ impl JavaScriptSender {
         })?;
         let (worker, ready) =
             Worker::spawn(self.config.script.clone(), self.transport.clone(), handle);
+        // The lock is held until `Init` finishes so concurrent callers wait for
+        // the same runtime instead of evaluating the script a second time.
         ready.await.map_err(|_| {
             NotifyError::Send("JavaScript runtime terminated during init".to_owned())
         })??;
         let worker = Arc::new(worker);
-
-        // A concurrent caller may have won the race; keep one runtime so the
-        // script is not loaded twice.
-        let mut slot = self
-            .worker
-            .lock()
-            .unwrap_or_else(|poisoned| poisoned.into_inner());
-        if let Some(existing) = slot.as_ref() {
-            return Ok(existing.clone());
-        }
         *slot = Some(worker.clone());
         Ok(worker)
     }
 
     /// Drop the runtime thread. A stuck script keeps running until it hits the
     /// loop-iteration limit, but the next call starts a fresh runtime.
-    fn poison(&self) {
-        let _ = self
-            .worker
-            .lock()
-            .unwrap_or_else(|poisoned| poisoned.into_inner())
-            .take();
+    async fn poison(&self) {
+        self.worker.lock().await.take();
     }
 
     /// Run one invocation with the Go 30-second wall-clock limit.
@@ -255,13 +241,13 @@ impl JavaScriptSender {
         match tokio::time::timeout(self.timeout, reply).await {
             Ok(Ok(result)) => result,
             Ok(Err(_)) => {
-                self.poison();
+                self.poison().await;
                 Err(NotifyError::Send(
                     "JavaScript runtime terminated unexpectedly".to_owned(),
                 ))
             }
             Err(_) => {
-                self.poison();
+                self.poison().await;
                 Err(NotifyError::Send("JavaScript execution timeout".to_owned()))
             }
         }
@@ -306,7 +292,7 @@ impl MessageSender for JavaScriptSender {
     }
 
     async fn destroy(&self) -> Result<()> {
-        self.poison();
+        self.poison().await;
         Ok(())
     }
 
