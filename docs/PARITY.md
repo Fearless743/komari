@@ -14,7 +14,7 @@
 
 | 模块 | Crate | 状态 | 说明 |
 | --- | --- | --- | --- |
-| CLI / 启动配置 | `komari-cli`、`komari-config` | **已合并（B01/B15）** | 子命令、flag/env 优先级、日志、版本注入；CLI 布尔差异见 D-008。 |
+| CLI / 启动配置 | `komari-cli`、`komari-config` | **已合并（B01/B21）** | 子命令、flag/env 优先级、日志、版本注入；严格布尔解析由 B21 对齐，CLI 布尔差异见 D-008。 |
 | 数据库 | `komari-db` | **已合并（B02/B20/B21）** | SQLite schema 兼容、key/value `configs`、仓储层、历史迁移（D-003）。复合目标 `Vec<u8>` 残余见 D-022。 |
 | 认证 | `komari-auth` | **已合并（B03）** | 密码、会话、TOTP、角色、私有站点中间件。 |
 | 公开 API / JSON-RPC | `komari-api` | **已合并（B04/B06/B18）** | public API、JSON-RPC 与 `/api/mjpeg_live`（D-016–D-019）。 |
@@ -63,7 +63,7 @@
 | D-012 | cloudflared macOS 下载解包 `.tgz` | 有意修正（B17） | macOS 生成真正可执行文件；旧 `.tgz` 需删除 | macOS 切换前删除旧 `data/cloudflared`。 |
 | D-013 | cloudflared 严格检查 HTTP 状态码 | 有意安全差异（B17） | 非 2xx 不安装响应体 | 确保可访问 GitHub Releases。 |
 | D-014 | cloudflared 意外退出优雅关闭 | 有意差异（B17） | 退出码仍为 1，但先 drain 再退出 | 需要立即退出时缩短 `shutdown_timeout`。 |
-| D-015 | `KOMARI_ENABLE_CLOUDFLARED` 布尔解析 | 已解决（B15） | 现在只接受大小写不敏感 `true` | 无需处理。 |
+| D-015 | `KOMARI_ENABLE_CLOUDFLARED` 布尔解析 | 已解决（B21） | 现在只接受大小写不敏感 `true` | 无需处理。 |
 | D-016 | MJPEG 直接读仓储层而非 RPC | 有意实现差异（B18） | 不经过 RPC 审计包装；可见行为一致 | 无需操作。 |
 | D-017 | MJPEG 文本度量偏移 1–2 px | 实现差异（B18） | 文字居中可能偏移 1–2 px | 像素级比对时以 Go 为准。 |
 | D-018 | MJPEG JPEG 编码字节差异 | 实现差异（B18） | 尺寸/颜色/内容一致，字节流不同 | 逐字节比对时以 Go 为准。 |
@@ -187,4 +187,4 @@ B09 的服务器装配需要少量跨 crate 改动，均为验收项所需的最
 
 B18 提交的 MJPEG 剩余差异已编号为 D-016–D-019；B15 的主题扩展/硬化已编号为
 D-020/D-021；B21 的复合目标残余已编号为 D-022。B17 的 cloudflared 差异已编号为
-D-012–D-015（其中 D-015 已由 B15 解决）。
+D-012–D-015（其中 D-015 由 B17 登记、B21 修复）。

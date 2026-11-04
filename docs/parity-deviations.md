@@ -39,8 +39,11 @@
     `JavaScript error in sendMessage: TypeError`），不返回 Go 的完整错误消息，
     避免脚本字面量中的 token 进入 API/日志（安全差异）；
   - **同步死循环**：Go 只在轮询 Promise 时检查超时，同步 `while(true)` 会永久
-    挂起；Rust 由外层 30 秒墙钟超时返回错误，并重建运行时（Go 会一直挂起）。
-    另有每栈帧 1,000,000 次循环迭代上限；
+    挂起。Rust 对纯 JS 死循环通常先触发 Boa 的每栈帧 1,000,000 次循环迭代上限，
+    返回 `Maximum loop iteration limit ... exceeded` 脚本错误；这类错误由
+    `execute()` 直接返回，不 poison/重建运行时，后续调用继续复用同一 realm。
+    只有不迭代的同步阻塞代码超过 30 秒墙钟超时才走外层超时，并在超时后重建
+    运行时；Go 对两种情况都会一直挂起；
   - **statusText**：`reqwest`/`http` 丢弃自定义 reason phrase，Rust 回退到标准
     原因短语（`202 Accepted`）；传输层可观测时（测试/自定义 transport）使用
     wire reason；
@@ -284,8 +287,8 @@
 - **原因**：当时与 `KOMARI_ALLOW_CORS` 共用解析器。
 - **影响**：部署脚本写 `KOMARI_ENABLE_CLOUDFLARED=1` 时 Rust 会启动隧道而 Go 不会。
 - **迁移**：无需处理；当前实现已与 Go 一致。
-- **状态**：已解决（B15），与 Go 一致；编号保留。
-- **变更（B15）**：`KOMARI_ENABLE_CLOUDFLARED` 改用 `parse_strict_true`，只接受
+- **状态**：已解决（B21），与 Go 一致；编号保留。该差异由 B17 登记，B21 修复。
+- **变更（B21）**：`KOMARI_ENABLE_CLOUDFLARED` 改用 `parse_strict_true`，只接受
   大小写不敏感的 `true`（不 trim）；`1`/`yes`/`on`/带空白值均为 false，且不报
   配置错误。CLI 覆盖值仍按 D-008 的 clap 布尔规则解析。
 
@@ -331,8 +334,9 @@
 
 ## D-020 主题上传同时接受 multipart 和原始 ZIP
 
-- **Rust**：`PUT /api/admin/theme/upload` 同时接受 `multipart/form-data` 的
-  `file` 字段和 Go 的原始 ZIP 请求体；更新/导入路径也兼容两种形状。
+- **Rust**：只有 `PUT /api/admin/theme/upload` 同时接受 `multipart/form-data` 的
+  `file` 字段和 Go 的原始 ZIP 请求体；`update`/`import` 仍是 JSON 元数据请求，
+  不接受 multipart 或原始 ZIP，下载到的 ZIP 与上传包走同一安装逻辑。
 - **Go**：只读取原始 ZIP 请求体，不解析 multipart。
 - **原因**：内置管理界面以 multipart 上传，保持 Go 原始请求体的同时兼容该扩展。
 - **影响**：这是 **非 Go 对等扩展**；Go 客户端行为不变，Rust 客户端可多一种上传

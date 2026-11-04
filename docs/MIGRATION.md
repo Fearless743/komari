@@ -272,7 +272,7 @@ systemctl start komari
 | D-012 | cloudflared macOS 解包 `.tgz` | macOS 切换前删除旧 `data/cloudflared`。 |
 | D-013 | cloudflared 严格检查 HTTP 状态码 | 确保可访问 GitHub Releases。 |
 | D-014 | cloudflared 意外退出优雅关闭 | 退出码仍为 1；需要立即退出时缩短 `shutdown_timeout`。 |
-| D-015 | `KOMARI_ENABLE_CLOUDFLARED` 字面量（已解决 B15） | 已与 Go 一致，无需处理。 |
+| D-015 | `KOMARI_ENABLE_CLOUDFLARED` 字面量（B17 登记，B21 解决） | 已与 Go 一致，无需处理。 |
 | D-016 | MJPEG 直接读仓储层而非 RPC | 无需操作。 |
 | D-017 | MJPEG 文本度量偏移 1–2 px | 像素级比对时以 Go 为准。 |
 | D-018 | MJPEG JPEG 字节差异 | 逐字节比对时以 Go 为准。 |

@@ -365,7 +365,7 @@ provider 配置存放在 `oidc_providers` 表（`name` + `addition` JSON）：
 | `qq` | `aggregation_url`（默认 `https://login.qjqq.cn`）、`app_id`、`app_key`、`login_type` |
 
 `komari-oauth`（B13）已实现 provider 加载、授权回调、账户绑定和 state/PKCE；
-上述 schema 与 Go 版兼容。OAuth 的 HTTP 登录/绑定端点仍需服务器装配。
+上述 schema 与 Go 版兼容。OAuth 的 HTTP 登录/绑定端点已由 B09 装配。
 `o_auth_provider` 为空或 `none` 时按 `github` 处理，与 Go 一致。
 
 ## 11. 通知
