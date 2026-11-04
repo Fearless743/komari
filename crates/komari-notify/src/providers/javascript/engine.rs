@@ -29,9 +29,10 @@ const PRELUDE: &str = include_str!("prelude.js");
 /// Hard cap on loop iterations per stack frame.
 ///
 /// Boa has no interrupt handler, so without this an accidental `while (true)`
-/// would occupy a blocking worker forever. The cap is far above anything a
-/// notification script needs.
-const LOOP_ITERATION_LIMIT: u64 = 20_000_000;
+/// would keep a runtime thread busy until the process exits. The cap only
+/// applies to one stack frame and is far above anything a notification script
+/// needs.
+const LOOP_ITERATION_LIMIT: u64 = 1_000_000;
 
 /// Per-request limit, matching the Go provider's `http.Client{Timeout: 30s}`.
 const REQUEST_TIMEOUT: Duration = Duration::from_secs(30);
@@ -49,81 +50,13 @@ thread_local! {
 
 /// What the caller wants the script to do.
 pub(super) enum Invocation {
-    /// Load and validate only (`Init`).
-    Validate,
     /// Call `sendMessage(message, title)`.
     Text { message: String, title: String },
     /// Call `sendEvent(event)`, falling back to `sendMessage`.
     Event(Box<EventMessage>),
 }
 
-/// Run one invocation on the blocking pool.
-pub(super) async fn execute(
-    script: String,
-    transport: Arc<dyn HttpTransport>,
-    timeout: Duration,
-    invocation: Invocation,
-) -> Result<()> {
-    // Resolve the runtime handle before entering the blocking pool so the
-    // engine never has to guess which runtime owns the worker thread.
-    let handle = Handle::try_current().map_err(|_| {
-        NotifyError::Send("JavaScript provider requires a Tokio runtime".to_owned())
-    })?;
-    tokio::task::spawn_blocking(move || run(handle, &script, transport, timeout, invocation))
-        .await
-        .map_err(|error| NotifyError::Send(format!("JavaScript worker terminated: {error}")))?
-}
-
-fn run(
-    handle: Handle,
-    script: &str,
-    transport: Arc<dyn HttpTransport>,
-    timeout: Duration,
-    invocation: Invocation,
-) -> Result<()> {
-    if script.is_empty() {
-        return Err(NotifyError::InvalidConfig(
-            "JavaScript script is empty".to_owned(),
-        ));
-    }
-
-    let deadline = Instant::now() + timeout;
-
-    ACTIVE.with(|cell| {
-        *cell.borrow_mut() = Some(NetState::new(handle, transport, REQUEST_TIMEOUT, deadline));
-    });
-    // Clears the thread-local on every exit path.
-    let guard = StateGuard;
-
-    let mut context = Context::default();
-    context
-        .runtime_limits_mut()
-        .set_loop_iteration_limit(LOOP_ITERATION_LIMIT);
-
-    let installed = install_globals(&mut context);
-    if let Err(error) = installed {
-        return Err(setup_error(&error, &mut context));
-    }
-    let prelude = context.eval(Source::from_bytes(PRELUDE));
-    if let Err(error) = prelude {
-        return Err(setup_error(&error, &mut context));
-    }
-
-    let mut runtime = ScriptRuntime {
-        context,
-        deadline,
-        _guard: guard,
-    };
-    runtime.load(script)?;
-
-    match invocation {
-        Invocation::Validate => Ok(()),
-        Invocation::Text { message, title } => runtime.send_text(&message, &title),
-        Invocation::Event(event) => runtime.send_event(&event),
-    }
-}
-
-/// Clears the thread-local network state when the runtime is dropped.
+/// Clears the thread-local network state when the runtime thread exits.
 struct StateGuard;
 
 impl Drop for StateGuard {
@@ -132,15 +65,79 @@ impl Drop for StateGuard {
     }
 }
 
-struct ScriptRuntime {
+/// One `boa_engine` context owned by a [`super::worker::Worker`] thread.
+///
+/// The context is created and the script loaded once; every invocation reuses
+/// the same realm, so top-level state persists like Go's `JavaScriptSender.vm`.
+pub(super) struct Runtime {
     context: Context,
     deadline: Instant,
     _guard: StateGuard,
 }
 
-impl ScriptRuntime {
-    /// Evaluate the script and verify `sendMessage`.
-    fn load(&mut self, script: &str) -> Result<()> {
+impl Runtime {
+    /// Create the context, inject globals and install the network bridge.
+    pub(super) fn new(handle: Handle, transport: Arc<dyn HttpTransport>) -> Result<Self> {
+        ACTIVE.with(|cell| {
+            *cell.borrow_mut() = Some(NetState::new(
+                handle,
+                transport,
+                REQUEST_TIMEOUT,
+                Instant::now(),
+            ));
+        });
+        let guard = StateGuard;
+
+        let mut context = Context::default();
+        context
+            .runtime_limits_mut()
+            .set_loop_iteration_limit(LOOP_ITERATION_LIMIT);
+
+        let installed = install_globals(&mut context);
+        if let Err(error) = installed {
+            return Err(setup_error(&error, &mut context));
+        }
+        let prelude = context.eval(Source::from_bytes(PRELUDE));
+        if let Err(error) = prelude {
+            return Err(setup_error(&error, &mut context));
+        }
+
+        Ok(Self {
+            context,
+            deadline: Instant::now(),
+            _guard: guard,
+        })
+    }
+
+    /// Run one invocation with a fresh wall-clock deadline.
+    pub(super) fn invoke(&mut self, invocation: Invocation, timeout: Duration) -> Result<()> {
+        self.deadline = Instant::now() + timeout;
+        ACTIVE.with(|cell| {
+            if let Some(state) = cell.borrow_mut().as_mut() {
+                state.begin_job(self.deadline);
+            }
+        });
+
+        let result = match invocation {
+            Invocation::Text { message, title } => self.send_text(&message, &title),
+            Invocation::Event(event) => self.send_event(&event),
+        };
+
+        ACTIVE.with(|cell| {
+            if let Some(state) = cell.borrow_mut().as_mut() {
+                state.end_job();
+            }
+        });
+        result
+    }
+
+    /// Evaluate the script and verify `sendMessage` (`Init`).
+    pub(super) fn load(&mut self, script: &str) -> Result<()> {
+        if script.is_empty() {
+            return Err(NotifyError::InvalidConfig(
+                "JavaScript script is empty".to_owned(),
+            ));
+        }
         let result = self.context.eval(Source::from_bytes(script));
         if let Err(error) = result {
             let summary = summarize(&error, &mut self.context);

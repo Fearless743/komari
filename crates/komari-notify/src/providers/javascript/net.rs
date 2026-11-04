@@ -77,6 +77,24 @@ impl NetState {
         id
     }
 
+    /// Prepare the state for a new invocation.
+    ///
+    /// Pending promises and timers belong to the previous message: Go's
+    /// goroutines outlive a send, but a notification never awaits them, so
+    /// dropping the bookkeeping is equivalent and prevents cross-talk.
+    pub fn begin_job(&mut self, deadline: Instant) {
+        self.deadline = deadline;
+        self.pending.clear();
+        self.timers.clear();
+        while self.rx.try_recv().is_ok() {}
+    }
+
+    /// Release per-invocation bookkeeping.
+    pub fn end_job(&mut self) {
+        self.pending.clear();
+        self.timers.clear();
+    }
+
     /// Spawn a request whose completion is reported as a [`NetEvent`].
     pub fn submit(&self, id: u64, request: HttpRequest) {
         let transport = self.transport.clone();

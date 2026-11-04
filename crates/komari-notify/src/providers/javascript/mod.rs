@@ -19,8 +19,9 @@
 
 mod engine;
 mod net;
+mod worker;
 
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 use async_trait::async_trait;
@@ -28,9 +29,12 @@ use komari_db::models::EventMessage;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
-use crate::error::Result;
+use tokio::runtime::Handle;
+
+use crate::error::{NotifyError, Result};
 use crate::http::{HttpTransport, ReqwestTransport};
 use crate::provider::{ConfigField, EventMessageSender, MessageSender};
+use worker::Worker;
 
 /// Configuration keys removed from external API responses.
 pub const SENSITIVE_FIELDS: &[&str] = &["script", "code"];
@@ -55,10 +59,15 @@ impl std::fmt::Debug for JavaScriptConfig {
 }
 
 /// Go's `JavaScriptSender`.
+///
+/// The `boa_engine` context is `!Send`, so it lives on a dedicated thread (see
+/// [`worker::Worker`]) that is created on `Init` and reused for every message,
+/// matching Go's single `goja.Runtime` per provider instance.
 pub struct JavaScriptSender {
     config: JavaScriptConfig,
     transport: Arc<dyn HttpTransport>,
     timeout: Duration,
+    worker: Mutex<Option<Arc<Worker>>>,
 }
 
 impl JavaScriptSender {
@@ -73,6 +82,7 @@ impl JavaScriptSender {
             config,
             transport,
             timeout: DEFAULT_TIMEOUT,
+            worker: Mutex::new(None),
         }
     }
 
@@ -127,14 +137,73 @@ impl JavaScriptSender {
         }
     }
 
+    /// Return the live runtime thread, starting it (Go `Init`) if needed.
+    async fn worker(&self) -> Result<Arc<Worker>> {
+        if let Some(worker) = self
+            .worker
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .as_ref()
+            .cloned()
+        {
+            return Ok(worker);
+        }
+
+        let handle = Handle::try_current().map_err(|_| {
+            NotifyError::Send("JavaScript provider requires a Tokio runtime".to_owned())
+        })?;
+        let (worker, ready) =
+            Worker::spawn(self.config.script.clone(), self.transport.clone(), handle);
+        ready.await.map_err(|_| {
+            NotifyError::Send("JavaScript runtime terminated during init".to_owned())
+        })??;
+        let worker = Arc::new(worker);
+
+        // A concurrent caller may have won the race; keep one runtime so the
+        // script is not loaded twice.
+        let mut slot = self
+            .worker
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        if let Some(existing) = slot.as_ref() {
+            return Ok(existing.clone());
+        }
+        *slot = Some(worker.clone());
+        Ok(worker)
+    }
+
+    /// Drop the runtime thread. A stuck script keeps running until it hits the
+    /// loop-iteration limit, but the next call starts a fresh runtime.
+    fn poison(&self) {
+        let _ = self
+            .worker
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .take();
+    }
+
+    /// Run one invocation with the Go 30-second wall-clock limit.
+    ///
+    /// The limit wraps the whole call, including synchronous script code that
+    /// never yields to the promise loop. Go only enforces it while polling a
+    /// Promise; a synchronous infinite loop there hangs forever.
     async fn execute(&self, invocation: engine::Invocation) -> Result<()> {
-        engine::execute(
-            self.config.script.clone(),
-            self.transport.clone(),
-            self.timeout,
-            invocation,
-        )
-        .await
+        let worker = self.worker().await?;
+        let reply = worker.invoke(invocation, self.timeout)?;
+
+        match tokio::time::timeout(self.timeout, reply).await {
+            Ok(Ok(result)) => result,
+            Ok(Err(_)) => {
+                self.poison();
+                Err(NotifyError::Send(
+                    "JavaScript runtime terminated unexpectedly".to_owned(),
+                ))
+            }
+            Err(_) => {
+                self.poison();
+                Err(NotifyError::Send("JavaScript execution timeout".to_owned()))
+            }
+        }
     }
 }
 
@@ -172,7 +241,12 @@ impl MessageSender for JavaScriptSender {
     }
 
     async fn init(&self) -> Result<()> {
-        self.execute(engine::Invocation::Validate).await
+        self.worker().await.map(|_| ())
+    }
+
+    async fn destroy(&self) -> Result<()> {
+        self.poison();
+        Ok(())
     }
 
     async fn send_text(&self, message: &str, title: &str) -> Result<()> {
