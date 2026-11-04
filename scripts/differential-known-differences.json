@@ -1,0 +1,105 @@
+{
+  "version": 1,
+  "notes": [
+    "Machine-readable whitelist for scripts/differential-test.sh.",
+    "DF-xxx are differential-harness identifiers documented in docs/DIFFERENTIAL.md.",
+    "The authoritative D-xxx registry remains docs/parity-deviations.md; this file does not assign D numbers."
+  ],
+  "cases": {
+    "version": {
+      "known_paths": {
+        "data.version": {
+          "id": "DF-004",
+          "reason": "Build metadata differs: Go utils.CurrentVersion defaults to 0.0.1, Rust uses CARGO_PKG_VERSION (0.1.0). Not an API contract difference."
+        },
+        "data.hash": {
+          "id": "DF-004",
+          "reason": "Build metadata differs: release builds inject different commit hashes; both default to `unknown`."
+        }
+      }
+    },
+    "rpc_version": {
+      "known_paths": {
+        "result.version": {
+          "id": "DF-004",
+          "reason": "Build metadata differs: Go utils.CurrentVersion defaults to 0.0.1, Rust uses CARGO_PKG_VERSION (0.1.0)."
+        },
+        "result.hash": {
+          "id": "DF-004",
+          "reason": "Build metadata differs: release builds inject different commit hashes; both default to `unknown`."
+        }
+      }
+    },
+    "public": {
+      "known_paths": {
+        "data.description": {
+          "id": "DF-001",
+          "reason": "Fresh-install default description: Go seeds config.Legacy's `A simple server monitor tool.` at startup; Rust writes its /api/public fallback `Komari Monitor, a simple server monitoring tool.` lazily."
+        }
+      }
+    },
+    "rpc_public_info": {
+      "known_paths": {
+        "result.description": {
+          "id": "DF-001",
+          "reason": "Same fresh-install default-description difference as /api/public; the RPC returns database.GetPublicInfo()."
+        }
+      }
+    },
+    "admin_settings": {
+      "object_path": "data",
+      "known_paths": {
+        "data.description": {
+          "id": "DF-001",
+          "reason": "Fresh-install default description differs; see the /api/public entry."
+        }
+      },
+      "known_go_only_keys": [
+        "api_key",
+        "auto_discovery_key",
+        "base_scripts_url",
+        "ddns_enabled",
+        "ddns_sync_interval",
+        "eula_accepted",
+        "expire_notification_enabled",
+        "expire_notification_lead_days",
+        "login_notification",
+        "notification_enabled",
+        "notification_method",
+        "notification_template",
+        "script_domain",
+        "send_ip_addr_to_guest",
+        "traffic_limit_percentage"
+      ]
+    },
+    "admin_settings_no_slash": {
+      "status_only": true,
+      "known_status": [
+        301,
+        200
+      ],
+      "reason": "DF-003: Gin redirects GET /api/admin/settings to /api/admin/settings/ (301); axum serves both paths directly (200)."
+    },
+    "me_admin": {
+      "known_paths": {
+        "uuid": {
+          "id": "DF-006",
+          "reason": "The default administrator UUID is generated randomly in each temporary database."
+        }
+      }
+    },
+    "rpc_me_admin": {
+      "known_paths": {
+        "result.uuid": {
+          "id": "DF-006",
+          "reason": "The default administrator UUID is generated randomly in each temporary database."
+        }
+      }
+    },
+    "login": {
+      "ignore_paths": [
+        "data.set-cookie.session_token"
+      ]
+    }
+  }
+}
