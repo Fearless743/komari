@@ -380,6 +380,26 @@ mod tests {
     }
 
     #[test]
+    fn event_json_matches_go_time_and_nil_clients() {
+        let mut event = EventMessage {
+            event: "Login".to_owned(),
+            time: LocalTime::parse("2026-01-02T03:04:05.123456789Z").unwrap(),
+            message: "new login".to_owned(),
+            emoji: "🔑".to_owned(),
+            ..EventMessage::default()
+        };
+        let json = JavaScriptSender::event_json(&event);
+        assert!(json["clients"].is_null());
+        assert_eq!(json["time"], event.time.to_rfc3339_nano());
+        assert!(json["time"].as_str().unwrap().contains(".123456789"));
+
+        // Go's zero time marshals as the zero RFC 3339 instant.
+        event.time = LocalTime::zero();
+        let json = JavaScriptSender::event_json(&event);
+        assert_eq!(json["time"], "0001-01-01T00:00:00Z");
+    }
+
+    #[test]
     fn config_debug_hides_the_script() {
         let config = JavaScriptConfig {
             script: "JS_DEBUG_SECRET".to_owned(),

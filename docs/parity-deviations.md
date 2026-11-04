@@ -20,28 +20,43 @@
 
 ## D-001 通知 Javascript provider（已实现，保留编号）
 
-- **状态**：已解决（B16）。编号保留，以下为与 Go 的剩余细微差异。
+- **状态**：已实现（B16），存在已登记差异，**待用户确认**。编号保留。
 - **Rust**：`komari-notify` 的 `Javascript` provider 使用 `boa_engine`（纯 Rust
-  ECMAScript 引擎）执行用户脚本，语义对齐 Go 的 `goja` 实现：
-  `sendMessage(message, title)` 必需（boolean 或 Promise），`sendEvent(event)`
-  可选且缺失时回退到文本格式；注入 `fetch`、`XMLHttpRequest`、`console`、
-  `setTimeout`/`clearTimeout`、`require('console'|'process')`；单次调用 30 秒超时。
+  ECMAScript 引擎）执行用户脚本：
+  - 每个 provider 实例一个常驻运行时线程，`Init` 只执行一次脚本，`sendMessage`
+    / `sendEvent` 复用同一 realm，与 Go 的 `JavaScriptSender.vm` 一致；
+  - `sendMessage(message, title)` 必需（boolean 或 Promise），`sendEvent(event)`
+    可选且缺失/不可调用时回退到文本格式；
+  - 注入 `fetch`、`XMLHttpRequest`、`console.log/error`、`setTimeout`、
+    `require`（任何模块都抛 `Invalid module`，与 goja 未注册原生模块一致）；
+  - 单次调用 30 秒墙钟超时（含同步代码），`Init` 加载脚本不计时，与 Go 的
+    `SendTextMessage` 计时起点一致。
 - **Go**：通过 `goja` + `goja_nodejs/require` 执行同一份脚本。
 - **剩余差异**：
-  - 每次发送都会新建运行时（Go 每个 provider 实例复用同一个 VM），因此脚本
-    顶层状态不会跨消息保留；
-  - `require` 只解析 `console` 与 `process`，不提供文件系统模块（goja 默认也
-    未注册原生模块，行为等价）；
-  - 错误只返回错误类型与入口函数名，不回显 Go 的完整错误消息，避免脚本字面量中的
-    token 进入 API/日志；
-  - 每个栈帧有 20,000,000 次循环迭代上限，避免死循环长期占用阻塞线程；
-  - `XMLHttpRequest` 的 `readyState` 2/3 在响应到达时与 4 一起触发（Go 按网络
-    阶段触发）；同步模式通过 Tokio 运行时阻塞等待；
-  - `setTimeout` 只在顶层 Promise 仍 pending 时触发（Go 的 goroutine 在返回后
-    仍会执行）。
-- **影响**：`notification_method=Javascript` 现在可以正常发送；不再需要改用
-  其他 provider。
-- **迁移**：无。使用自定义脚本的部署可直接沿用 Go 版脚本。
+  - **错误文本**：只返回错误类型与入口函数名（如
+    `JavaScript error in sendMessage: TypeError`），不返回 Go 的完整错误消息，
+    避免脚本字面量中的 token 进入 API/日志（安全差异）；
+  - **同步死循环**：Go 只在轮询 Promise 时检查超时，同步 `while(true)` 会永久
+    挂起；Rust 由外层 30 秒墙钟超时返回错误，并重建运行时。另有每栈帧
+    1,000,000 次循环迭代上限；
+  - **statusText**：`reqwest`/`http` 丢弃自定义 reason phrase，Rust 回退到标准
+    原因短语（`202 Accepted`）；传输层可观测时（测试/自定义 transport）使用
+    wire reason；
+  - **XHR readyState**：2/3 在响应到达时与 4 同批触发（Go 按网络阶段触发）；
+    同步 XHR 通过 Tokio 运行时阻塞等待；
+  - **setTimeout**：只在入口 Promise 仍 pending 时触发（Go 的 goroutine 在返回
+    后仍会执行）；
+  - **event JSON**：`clients` 为空时序列化为 `null`（Go 的 nil slice），
+    Go 的非 nil 空 slice 会得到 `[]`；`clients[]` 的字段形状沿用
+    `komari-db::models::Client` 的 serde 规则（空字符串字段可能被省略），
+    与 Go 直接 `json.Marshal` 不完全一致；
+  - **console**：输出到 `tracing` 而非 stdout（Go 用 `fmt.Println`）；
+  - **引擎**：boa 与 goja 的 ES 实现存在细微差异（如部分 Annex B / 旧版扩展）。
+- **影响**：`notification_method=Javascript` 可以正常发送；不再需要改用其他
+  provider。
+- **迁移**：使用自定义脚本的部署可直接沿用 Go 版脚本；若脚本依赖
+  `require('console')`、`console.info`、`clearTimeout` 或 `process`，需要改为
+  Go 也支持的写法（这些在 Go 中同样不可用）。
 
 ## D-002 DDNS 记录删除是 Rust 扩展
 

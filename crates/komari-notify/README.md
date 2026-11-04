@@ -20,7 +20,7 @@ Rust port of the Go backend's notification stack:
 | `Server酱³` | parity | JSON `{title, desp, tags?}`. |
 | `Server酱Turbo` | parity | JSON `{title, desp, channel?, noip?, openid?}`. |
 | `empty` | parity | Always fails with the Go message. |
-| `Javascript` | parity | User script executed by `boa_engine` (pure-Rust ECMAScript). `sendMessage(message, title)` returns boolean or Promise; optional `sendEvent(event)` falls back to the Go text format. Injects `fetch`, `XMLHttpRequest`, `console`, `setTimeout`/`clearTimeout` and `require('console'|'process')`; 30 s per invocation. Errors expose only the error class (plus the failing entry point), never script text. |
+| `Javascript` | parity | User script executed by `boa_engine` (pure-Rust ECMAScript) on a persistent runtime thread, so `Init` runs the script once and every message reuses the realm like Go's `goja` VM. `sendMessage(message, title)` returns boolean or Promise; optional `sendEvent(event)` falls back to the Go text format. Injects `fetch`, `XMLHttpRequest`, `console.log/error`, `setTimeout` and `require` (always `Invalid module`, like goja without native modules). 30 s wall-clock limit per invocation; script loading is not counted. Errors expose only the error class and entry point, never script text. |
 
 
 ## 对外 API 脱敏
@@ -85,13 +85,12 @@ port，路径/query 隐藏。`HttpRequest` 的 `Debug` 不显示请求体和敏�
 
 ## Known differences
 
-* `Javascript` runs each message in a fresh `boa_engine` context (Go reuses one
-  `goja` VM per provider instance), so top-level script state does not persist
-  between messages.
-* `Javascript`'s `require` resolves only `console` and `process`, matching
-  goja's registry with no native modules registered. Errors are reduced to the
-  error class instead of Go's full message, and each stack frame has a
-  20,000,000 loop-iteration cap.
+* `Javascript` error messages are reduced to the error class plus the failing
+  entry point instead of Go's full message (the message can interpolate script
+  secrets), and each stack frame has a 1,000,000 loop-iteration cap.
+* `Javascript`'s `fetch`/XHR report errors as strings like Go, but the string is
+  sanitized (no URL); `statusText` falls back to the canonical reason because
+  `reqwest` discards custom reason phrases. See D-001 for the full list.
 * Provider `Default` values are Go's zero-value `Addition` structs. UI defaults
   (telegram endpoint, bark server/level, webhook method/content-type/body,
   email port 587) are exposed only through `ConfigField::default` and are not
