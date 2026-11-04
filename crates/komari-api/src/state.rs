@@ -42,6 +42,10 @@ pub struct ApiConfig {
     pub report_top_percentage: f64,
     /// Delay between MJPEG frames (Go's `refreshInterval`, 2 seconds).
     pub mjpeg_frame_interval: Duration,
+    /// Download MiSans when `data/font.ttf` is missing, matching Go's MJPEG
+    /// font bootstrap. Tests disable this so rendering never touches the
+    /// network.
+    pub mjpeg_font_download: bool,
 }
 
 impl Default for ApiConfig {
@@ -56,6 +60,7 @@ impl Default for ApiConfig {
             report_flush_interval: Duration::from_secs(60),
             report_top_percentage: 0.3,
             mjpeg_frame_interval: Duration::from_secs(2),
+            mjpeg_font_download: true,
         }
     }
 }

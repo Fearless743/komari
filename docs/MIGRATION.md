@@ -273,12 +273,15 @@ systemctl start komari
 
 此外，以下模块的 HTTP 装配尚未完成，不能视为已迁移：
 
-- B04：public API、JSON-RPC、`/ping`、`/api/mjpeg_live`；
+- B04：public API、JSON-RPC、`/ping`；
 - B05：agent API 与浏览器 WebSocket（截至 B11 基线未合并）；
 - B06：admin API；
 - B13：crate 已合并（provider/回调/账户绑定），但 OAuth HTTP 登录/绑定路由仍需
   服务器装配；
 - B14：crate 已合并，但静态路由仍需 HTTP server 装配；隐藏节点过滤由 B14/B06 接入。
+
+MJPEG（`/api/mjpeg_live`）已由 B18 补齐，不再属于上述未完成范围；布局、字体
+下载/回退、`lang`/`tz_offset` 与 Go 对齐。
 
 ## 9. 前端静态资源
 

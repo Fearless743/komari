@@ -39,6 +39,8 @@ fn state() -> ApiState {
         report_flush_interval: Duration::ZERO,
         // Keep the MJPEG test fast; production defaults to 2 seconds.
         mjpeg_frame_interval: Duration::from_millis(10),
+        // Never touch the network in tests; the bitmap fallback is used.
+        mjpeg_font_download: false,
         ..ApiConfig::default()
     };
     ApiState::with_config(memory_db(), config)
@@ -1131,24 +1133,59 @@ async fn private_site_blocks_guest_api_paths_but_allows_public_prefixes() {
     assert_eq!(status, StatusCode::OK);
 }
 
-#[tokio::test]
-async fn mjpeg_streams_multipart_jpeg_frames_until_the_client_disconnects() {
-    let state = state();
-    let uuid = create_client(&state, "visible", false);
-    let mut record = Record::new(uuid);
-    record.cpu = 12.3;
-    record.ram = 512;
-    record.ram_total = 1024;
-    state.db.records().insert(&record).expect("insert record");
+static MJPEG_TEST_LOCK: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
 
-    let response = app(&state)
-        .oneshot(get("/api/mjpeg_live"))
-        .await
-        .expect("router response");
-    assert_eq!(response.status(), StatusCode::OK);
+fn split_frame(frame: &[u8]) -> (&str, &[u8]) {
+    let header_end = frame
+        .windows(4)
+        .position(|window| window == b"\r\n\r\n")
+        .expect("multipart header terminator")
+        + 4;
+    let payload = frame[header_end..]
+        .strip_suffix(b"\r\n")
+        .expect("multipart part trailer");
+    (
+        std::str::from_utf8(&frame[..header_end]).expect("multipart header text"),
+        payload,
+    )
+}
+
+fn part_content_length(header: &str) -> usize {
+    header
+        .lines()
+        .find_map(|line| line.strip_prefix("Content-Length: "))
+        .expect("part Content-Length")
+        .trim()
+        .parse()
+        .expect("numeric Content-Length")
+}
+
+fn decode_rgb(payload: &[u8]) -> image::RgbImage {
+    image::load_from_memory(payload)
+        .expect("decode JPEG payload")
+        .to_rgb8()
+}
+
+fn non_white(image: &image::RgbImage) -> usize {
+    image
+        .pixels()
+        .filter(|pixel| pixel.0 != [255, 255, 255])
+        .count()
+}
+
+fn has_color_near(image: &image::RgbImage, target: [u8; 3], tolerance: i16) -> bool {
+    image.pixels().any(|pixel| {
+        pixel
+            .0
+            .iter()
+            .zip(target)
+            .all(|(value, expected)| (*value as i16 - expected as i16).abs() <= tolerance)
+    })
+}
+
+fn assert_stream_headers(headers: &HeaderMap) {
     assert_eq!(
-        response
-            .headers()
+        headers
             .get(CONTENT_TYPE)
             .expect("content type")
             .to_str()
@@ -1156,46 +1193,198 @@ async fn mjpeg_streams_multipart_jpeg_frames_until_the_client_disconnects() {
         "multipart/x-mixed-replace; boundary=frame"
     );
     assert_eq!(
-        response
-            .headers()
+        headers
             .get("cache-control")
             .expect("cache control")
             .to_str()
             .expect("header text"),
         "no-cache"
     );
+    assert_eq!(
+        headers
+            .get("connection")
+            .expect("connection")
+            .to_str()
+            .expect("header text"),
+        "keep-alive"
+    );
+}
+
+async fn first_frame(app: &Router, uri: &str) -> (HeaderMap, Vec<u8>) {
+    let response = app
+        .clone()
+        .oneshot(get(uri))
+        .await
+        .expect("router response");
+    assert_eq!(response.status(), StatusCode::OK, "{uri}");
+    let headers = response.headers().clone();
+    assert_stream_headers(&headers);
+    let mut stream = response.into_body().into_data_stream();
+    let frame = tokio::time::timeout(Duration::from_secs(2), stream.next())
+        .await
+        .expect("frame within timeout")
+        .expect("stream item")
+        .expect("frame bytes");
+    drop(stream);
+    let (header, payload) = split_frame(&frame);
+    assert_eq!(part_content_length(header), payload.len());
+    assert_eq!(&payload[..3], &[0xFF, 0xD8, 0xFF]);
+    (headers, frame.to_vec())
+}
+
+#[tokio::test]
+async fn mjpeg_streams_multipart_jpeg_frames_until_the_client_disconnects() {
+    let _guard = MJPEG_TEST_LOCK.lock().await;
+    // Keep `data/font.ttf` out of the picture so the deterministic bitmap
+    // fallback is used even on a developer machine with a downloaded font.
+    let data_dir = tempfile::tempdir().expect("temp data dir");
+    let state = state().with_web_assets(Arc::new(komari_web::WebAssets::with_data_dir(
+        data_dir.path(),
+    )));
+    create_client(&state, "visible", false);
+    create_client(&state, "hidden", true);
+
+    let response = app(&state)
+        .oneshot(get("/api/mjpeg_live"))
+        .await
+        .expect("router response");
+    assert_eq!(response.status(), StatusCode::OK);
+    assert_stream_headers(response.headers());
 
     let mut stream = response.into_body().into_data_stream();
+    let mut last_frame = Vec::new();
     for frame_number in 0..2 {
         let frame = tokio::time::timeout(Duration::from_secs(2), stream.next())
             .await
             .expect("frame within timeout")
             .expect("stream item")
             .expect("frame bytes");
-        let part = String::from_utf8_lossy(&frame[..64.min(frame.len())]);
+        let (header, payload) = split_frame(&frame);
         assert!(
-            part.starts_with("--frame\r\nContent-Type: image/jpeg\r\n"),
+            header.starts_with("--frame\r\nContent-Type: image/jpeg\r\n"),
             "frame {frame_number} part header"
         );
-        let header_end = frame
-            .windows(4)
-            .position(|window| window == b"\r\n\r\n")
-            .expect("multipart header terminator")
-            + 4;
-        assert!(
-            frame.len() > header_end + 3,
-            "frame {frame_number} has JPEG payload"
+        assert_eq!(
+            part_content_length(header),
+            payload.len(),
+            "frame {frame_number} Content-Length"
         );
         assert_eq!(
-            &frame[header_end..header_end + 3],
+            &payload[..3],
             &[0xFF, 0xD8, 0xFF],
             "frame {frame_number} JPEG SOI magic"
         );
+        let image = decode_rgb(payload);
+        // One visible node (the hidden client is filtered) and the bitmap
+        // fallback: Go's `renderStatusTableWithBasicFont` adds 30 px.
+        assert_eq!(image.dimensions(), (1280, 252));
+        assert!(non_white(&image) > 1000, "frame {frame_number} is blank");
+        // No hub report: the row is offline, so red text is present and the
+        // online green is absent.
+        assert!(
+            has_color_near(&image, [200, 0, 0], 60),
+            "offline row is missing"
+        );
+        assert!(
+            !has_color_near(&image, [0, 150, 0], 30),
+            "unexpected online row"
+        );
+        last_frame = frame.to_vec();
     }
+    assert!(!last_frame.is_empty());
 
-    // Dropping the body cancels the `unfold` stream; there is no detached
-    // rendering task left behind.
+    let rendered = komari_api::public::mjpeg_rendered_frame_count();
     drop(stream);
+    // Give the unfold stream several frame intervals to prove it stopped
+    // rendering after the body was dropped.
+    tokio::time::sleep(Duration::from_millis(150)).await;
+    assert_eq!(
+        komari_api::public::mjpeg_rendered_frame_count(),
+        rendered,
+        "dropping the body must cancel rendering"
+    );
+}
+
+#[tokio::test]
+async fn mjpeg_uses_the_ttf_font_when_data_font_ttf_exists() {
+    let _guard = MJPEG_TEST_LOCK.lock().await;
+    let data_dir = tempfile::tempdir().expect("temp data dir");
+    std::fs::write(
+        data_dir.path().join("font.ttf"),
+        include_bytes!("fixtures/misans-subset.ttf"),
+    )
+    .expect("write fixture font");
+    let state = state().with_web_assets(Arc::new(komari_web::WebAssets::with_data_dir(
+        data_dir.path(),
+    )));
+    state
+        .db
+        .config()
+        .set(komari_config::keys::SITENAME_KEY, "测试节点")
+        .expect("set sitename");
+    create_client(&state, "visible", false);
+    let router = app(&state);
+
+    let (_, frame) = first_frame(&router, "/api/mjpeg_live?lang=zh_cn&tz_offset=8").await;
+    let (header, payload) = split_frame(&frame);
+    assert_eq!(part_content_length(header), payload.len());
+    let chinese = decode_rgb(payload);
+    // The TTF path has no bitmap-fallback warning, so the table is 222 px.
+    assert_eq!(chinese.dimensions(), (1280, 222));
+    assert!(non_white(&chinese) > 1000, "TTF frame is blank");
+
+    let (_, english_frame) = first_frame(&router, "/api/mjpeg_live?lang=en&tz_offset=-5").await;
+    let (_, english_payload) = split_frame(&english_frame);
+    let english = decode_rgb(english_payload);
+    assert_eq!(english.dimensions(), (1280, 222));
+    assert!(
+        chinese.as_raw() != english.as_raw(),
+        "EN/ZH frames must differ"
+    );
+}
+
+#[tokio::test]
+async fn mjpeg_language_and_tz_parameters_change_the_frame() {
+    let _guard = MJPEG_TEST_LOCK.lock().await;
+    let data_dir = tempfile::tempdir().expect("temp data dir");
+    std::fs::write(
+        data_dir.path().join("font.ttf"),
+        include_bytes!("fixtures/misans-subset.ttf"),
+    )
+    .expect("write fixture font");
+    let state = state().with_web_assets(Arc::new(komari_web::WebAssets::with_data_dir(
+        data_dir.path(),
+    )));
+    create_client(&state, "visible", false);
+    let router = app(&state);
+
+    let (_, english_frame) = first_frame(&router, "/api/mjpeg_live?lang=en").await;
+    let (_, chinese_frame) = first_frame(&router, "/api/mjpeg_live?lang=zh_cn").await;
+    let (_, english_payload) = split_frame(&english_frame);
+    let (_, chinese_payload) = split_frame(&chinese_frame);
+    let english = decode_rgb(english_payload);
+    let chinese = decode_rgb(chinese_payload);
+    assert_eq!(english.dimensions(), (1280, 222));
+    assert_eq!(chinese.dimensions(), (1280, 222));
+    assert!(
+        english.as_raw() != chinese.as_raw(),
+        "language must change the rendered headers"
+    );
+
+    let (_, east_frame) = first_frame(&router, "/api/mjpeg_live?lang=en&tz_offset=8").await;
+    let (_, west_frame) = first_frame(&router, "/api/mjpeg_live?lang=en&tz_offset=-5").await;
+    let (_, east_payload) = split_frame(&east_frame);
+    let (_, west_payload) = split_frame(&west_frame);
+    let east = decode_rgb(east_payload);
+    let west = decode_rgb(west_payload);
+    // The table above the footer is identical; only the timestamp line moves.
+    let table_bytes = 152 * 1280 * 3;
+    assert_eq!(&east.as_raw()[..table_bytes], &west.as_raw()[..table_bytes]);
+    assert_ne!(
+        east.as_raw(),
+        west.as_raw(),
+        "tz_offset must change the footer"
+    );
 }
 
 fn now_unix() -> i64 {

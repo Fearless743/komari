@@ -243,3 +243,38 @@
   从 Rust 回退 Go 时可能出现“配置没变但隧道不再启动”。
 - **迁移**：跨版本部署统一使用 `true` / `false`。
 - **状态**：有意差异（更宽松），待 B17 对等验收确认。
+
+## 待 B11 编号（B18 提交）
+
+以下条目由 B18 提交，按维护规则不自行分配 D 编号，等待 B11 合并时编号。
+
+### MJPEG 直接读取仓储层而不是 guest JSON-RPC
+
+- **Rust**：`/api/mjpeg_live` 直接读取 `clients`、hub 最新 report 缓存和配置；
+  不调用 `common:getNodes` / `common:getNodesLatestStatus`。
+- **Go**：通过 `jsonRpc.OnInternalRequest(ctx, "guest", ...)` 获取节点与状态。
+- **原因**：Rust 的 MJPEG 渲染器与 RPC 层解耦，避免每个 2 秒帧走一次内部 RPC。
+- **影响**：guest 的隐藏节点过滤、`send_ip_addr_to_guest` 掩码、状态与在线判断
+  已按 Go 行为复刻；但不会经过 RPC 的审计/权限包装。MJPEG 始终按 guest 处理，
+  因此没有可见的权限差异。
+- **迁移**：无需操作；若后续要求 MJPEG 走统一 RPC 审计，再改为内部 RPC 调用。
+
+### MJPEG 文本度量与 JPEG 编码器的字节级差异
+
+- **Rust**：TTF 文本宽度使用 `ab_glyph` 的 advance/kerning；JPEG 使用
+  `jpeg-encoder`（4:2:0、quality 90）。
+- **Go**：文本宽度使用 `font.BoundString` 的 bearing 边界；JPEG 使用
+  `image/jpeg`（4:2:0、quality 90）。
+- **原因**：Rust 侧库的度量/编码实现不同，但采样率、质量、布局参数一致。
+- **影响**：文字居中可能偏移 1–2 px；JPEG 字节流与 Go 不完全相同，但尺寸、
+  颜色和内容一致。
+- **迁移**：无需操作；需要逐字节比对时以 Go 输出为准。
+
+### MJPEG 字体下载测试开关
+
+- **Rust**：`ApiConfig::mjpeg_font_download` 默认 `true`，测试可设为 `false`
+  以避免访问 `https://hyperos.mi.com/font-download/MiSans.zip`。
+- **Go**：没有对应配置，始终在 `data/font.ttf` 缺失时尝试下载。
+- **原因**：保证离线/CI 测试确定性。
+- **影响**：生产默认行为与 Go 一致；该字段不是用户配置项。
+- **迁移**：无需操作。
