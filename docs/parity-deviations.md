@@ -40,10 +40,11 @@
     避免脚本字面量中的 token 进入 API/日志（安全差异）；
   - **同步死循环**：Go 只在轮询 Promise 时检查超时，同步 `while(true)` 会永久
     挂起。Rust 对纯 JS 死循环通常先触发 Boa 的每栈帧 1,000,000 次循环迭代上限，
-    返回 `Maximum loop iteration limit ... exceeded` 脚本错误；这类错误由
-    `execute()` 直接返回，不 poison/重建运行时，后续调用继续复用同一 realm。
-    只有不迭代的同步阻塞代码超过 30 秒墙钟超时才走外层超时，并在超时后重建
-    运行时；Go 对两种情况都会一直挂起；
+    返回 `RuntimeLimit` 类脚本错误（Boa 内部消息为
+    `Maximum loop iteration limit ... exceeded`，对外按本条的“错误文本”规则只
+    保留错误类型）；这类错误由 `execute()` 直接返回，不 poison/重建运行时，
+    后续调用继续复用同一 realm。只有不迭代的同步阻塞代码超过 30 秒墙钟超时才
+    走外层超时，并在超时后重建运行时；Go 对两种情况都会一直挂起；
   - **statusText**：`reqwest`/`http` 丢弃自定义 reason phrase，Rust 回退到标准
     原因短语（`202 Accepted`）；传输层可观测时（测试/自定义 transport）使用
     wire reason；
