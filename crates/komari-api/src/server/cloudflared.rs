@@ -429,7 +429,7 @@ fn extract_tgz_binary_into(
             source,
         })?;
         drop(output);
-        std::fs::rename(&extracted_path, binary_path).map_err(|source| {
+        std::fs::rename(extracted_path, binary_path).map_err(|source| {
             CloudflaredError::Install {
                 path: binary_path.to_path_buf(),
                 source,

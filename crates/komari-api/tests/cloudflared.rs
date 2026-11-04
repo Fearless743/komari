@@ -515,16 +515,20 @@ async fn server_with_enabled_cloudflared_and_empty_token_does_not_start() {
 
 #[test]
 fn from_app_config_maps_the_cloudflared_gate() {
-    let mut app = Config::default();
-    app.enable_cloudflared = true;
-    app.cloudflared_token = Some("app-token".to_owned());
-
-    let server = ServerConfig::from_app_config(&app);
+    let enabled = Config {
+        enable_cloudflared: true,
+        cloudflared_token: Some("app-token".to_owned()),
+        ..Config::default()
+    };
+    let server = ServerConfig::from_app_config(&enabled);
     assert!(server.enable_cloudflared);
     assert_eq!(server.cloudflared_token.as_deref(), Some("app-token"));
 
-    app.enable_cloudflared = false;
-    let server = ServerConfig::from_app_config(&app);
+    let disabled = Config {
+        enable_cloudflared: false,
+        ..enabled
+    };
+    let server = ServerConfig::from_app_config(&disabled);
     assert!(!server.enable_cloudflared);
     assert_eq!(server.cloudflared_token.as_deref(), Some("app-token"));
 }
