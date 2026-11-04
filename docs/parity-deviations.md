@@ -49,9 +49,10 @@
   - **event JSON**：
     - `clients` 为空 `Vec` 时序列化为 `null`。Go 的 nil slice 是 `null`，但
       **非 nil 空 slice 是 `[]`**，`komari-db` 的 `Vec` 无法区分两种情况；
-    - `clients[]` 的字段集合由 `komari-db::models::Client` 的 serde 规则决定，
-      `skip_serializing_if` 会省略空字符串字段；Go 的 `json.Marshal` 会保留全部
-      字段（空字符串输出 `""`）；
+    - `clients[]` 的字段集合与 Go 的 json tags 一致：两侧对 `uuid`、`token`、
+      `ipv4`、`ipv6`、`remark`、`public_remark`、`version` 都使用 omitempty，
+      空值同样被省略；唯一文本差异是 `price` 的 `0` 在 Rust 序列化为 `0.0`
+      （JS 中 `0 === 0.0`，不可观察）；
     - `time` 由 `LocalTime` 重新按**应用时区**渲染（RFC3339Nano）。Go 的
       `time.Time` 保留原 location，若事件时间来自非应用时区，偏移会不同；
   - **headers.get()**：`fetch` 的 `response.headers` 除普通属性外还提供

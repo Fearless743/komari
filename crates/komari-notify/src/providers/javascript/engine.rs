@@ -48,6 +48,12 @@ thread_local! {
     static ACTIVE: RefCell<Option<NetState>> = const { RefCell::new(None) };
 }
 
+/// Test-only switch that makes the next invocation panic inside the runtime
+/// thread, exercising the worker's `catch_unwind` recovery path.
+#[cfg(test)]
+pub(super) static PANIC_NEXT_INVOKE: std::sync::atomic::AtomicBool =
+    std::sync::atomic::AtomicBool::new(false);
+
 /// What the caller wants the script to do.
 pub(super) enum Invocation {
     /// Call `sendMessage(message, title)`.
@@ -113,6 +119,11 @@ impl Runtime {
 
     /// Run one invocation with a fresh wall-clock deadline.
     pub(super) fn invoke(&mut self, invocation: Invocation, timeout: Duration) -> Result<()> {
+        #[cfg(test)]
+        if PANIC_NEXT_INVOKE.swap(false, std::sync::atomic::Ordering::SeqCst) {
+            panic!("injected runtime panic (test only)");
+        }
+
         self.deadline = Instant::now() + timeout;
         ACTIVE.with(|cell| {
             if let Some(state) = cell.borrow_mut().as_mut() {

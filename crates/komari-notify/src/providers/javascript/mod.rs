@@ -214,10 +214,13 @@ impl JavaScriptSender {
 
     /// JSON object passed to `sendEvent`, matching `json.Marshal(EventMessage)`.
     ///
-    /// `EventMessage.Time` is a plain `time.Time` in Go, so it marshals as
-    /// RFC 3339 with nanoseconds and the application offset; a nil `Clients`
-    /// slice marshals as `null`. `komari-db` cannot distinguish an empty slice
-    /// from a nil one, so an empty list is sent as `null` like Go's nil slice.
+    /// `EventMessage.Time` is a plain `time.Time` in Go: `json.Marshal` renders
+    /// RFC 3339 with nanoseconds using the time's own location. `LocalTime`
+    /// keeps only the wall clock, so Rust re-renders it with the application
+    /// timezone offset (difference registered in D-001).
+    ///
+    /// A nil `Clients` slice marshals as `null`; `komari-db` cannot distinguish
+    /// an empty slice from a nil one, so an empty list is sent as `null`.
     pub fn event_json(event: &EventMessage) -> Value {
         let clients = if event.clients.is_empty() {
             Value::Null
@@ -377,8 +380,12 @@ mod tests {
         );
     }
 
+    /// Serializes the tests that touch the process-wide panic switch.
+    static RUNTIME_TEST_LOCK: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
+
     #[tokio::test]
     async fn sender_recovers_after_the_runtime_is_poisoned() {
+        let _guard = RUNTIME_TEST_LOCK.lock().await;
         let sender = JavaScriptSender::new(JavaScriptConfig {
             script: "function sendMessage() { return true; }".to_owned(),
         });
@@ -388,6 +395,32 @@ mod tests {
         // as a timeout or panic would.
         sender.poison().await;
 
+        sender.send_text("hello", "title").await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn runtime_panic_is_recovered_by_a_new_runtime() {
+        let _guard = RUNTIME_TEST_LOCK.lock().await;
+        let sender = JavaScriptSender::new(JavaScriptConfig {
+            script: r#"
+                var runs = 0;
+                runs += 1;
+                function sendMessage() { return runs === 1; }
+            "#
+            .to_owned(),
+        });
+        sender.init().await.unwrap();
+
+        // Make `Runtime::invoke` panic on the worker thread; the worker must
+        // drop the reply and exit so the caller poisons the slot.
+        engine::PANIC_NEXT_INVOKE.store(true, std::sync::atomic::Ordering::SeqCst);
+        let error = sender.send_text("hello", "title").await.unwrap_err();
+        assert!(
+            error.to_string().contains("terminated unexpectedly"),
+            "{error}"
+        );
+
+        // The next call starts a fresh runtime: top-level `runs` is 1 again.
         sender.send_text("hello", "title").await.unwrap();
     }
 
