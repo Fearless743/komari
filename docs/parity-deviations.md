@@ -37,19 +37,25 @@
     `JavaScript error in sendMessage: TypeError`），不返回 Go 的完整错误消息，
     避免脚本字面量中的 token 进入 API/日志（安全差异）；
   - **同步死循环**：Go 只在轮询 Promise 时检查超时，同步 `while(true)` 会永久
-    挂起；Rust 由外层 30 秒墙钟超时返回错误，并重建运行时。另有每栈帧
-    1,000,000 次循环迭代上限；
+    挂起；Rust 由外层 30 秒墙钟超时返回错误，并重建运行时（Go 会一直挂起）。
+    另有每栈帧 1,000,000 次循环迭代上限；
   - **statusText**：`reqwest`/`http` 丢弃自定义 reason phrase，Rust 回退到标准
     原因短语（`202 Accepted`）；传输层可观测时（测试/自定义 transport）使用
     wire reason；
   - **XHR readyState**：2/3 在响应到达时与 4 同批触发（Go 按网络阶段触发）；
     同步 XHR 通过 Tokio 运行时阻塞等待；
   - **setTimeout**：只在入口 Promise 仍 pending 时触发（Go 的 goroutine 在返回
-    后仍会执行）；
-  - **event JSON**：`clients` 为空时序列化为 `null`（Go 的 nil slice），
-    Go 的非 nil 空 slice 会得到 `[]`；`clients[]` 的字段形状沿用
-    `komari-db::models::Client` 的 serde 规则（空字符串字段可能被省略），
-    与 Go 直接 `json.Marshal` 不完全一致；
+    后仍会执行）；非可调用参数与 Go 一样是 no-op；
+  - **event JSON**：
+    - `clients` 为空 `Vec` 时序列化为 `null`。Go 的 nil slice 是 `null`，但
+      **非 nil 空 slice 是 `[]`**，`komari-db` 的 `Vec` 无法区分两种情况；
+    - `clients[]` 的字段集合由 `komari-db::models::Client` 的 serde 规则决定，
+      `skip_serializing_if` 会省略空字符串字段；Go 的 `json.Marshal` 会保留全部
+      字段（空字符串输出 `""`）；
+    - `time` 由 `LocalTime` 重新按**应用时区**渲染（RFC3339Nano）。Go 的
+      `time.Time` 保留原 location，若事件时间来自非应用时区，偏移会不同；
+  - **headers.get()**：`fetch` 的 `response.headers` 除普通属性外还提供
+    大小写不敏感的 `get(name)`；Go 的对象只有属性，没有 `get` 方法（扩展）；
   - **console**：输出到 `tracing` 而非 stdout（Go 用 `fmt.Println`）；
   - **引擎**：boa 与 goja 的 ES 实现存在细微差异（如部分 Annex B / 旧版扩展）。
 - **影响**：`notification_method=Javascript` 可以正常发送；不再需要改用其他

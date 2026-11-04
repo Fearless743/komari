@@ -1,10 +1,10 @@
-//! `boa_engine` runtime hosting one user script invocation.
+//! `boa_engine` runtime owned by a dedicated thread.
 //!
-//! Each call creates a fresh [`Context`], injects the Go-compatible globals,
-//! evaluates the script and then drives promises/microtasks until the entry
-//! point settles or the wall-clock deadline expires. The engine is
-//! single-threaded, so it lives inside [`tokio::task::spawn_blocking`] and
-//! communicates with the async HTTP transport through [`super::net`].
+//! The context is created once per provider instance, the script is evaluated
+//! once (`Init`) and every invocation reuses the same realm, like Go's
+//! `JavaScriptSender.vm`. The engine is single-threaded, so it lives on the
+//! worker thread from [`super::worker`]; network requests are spawned on the
+//! Tokio runtime and reported back through [`super::net`].
 
 use std::cell::RefCell;
 use std::sync::Arc;

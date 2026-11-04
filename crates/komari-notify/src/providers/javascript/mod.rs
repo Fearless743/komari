@@ -7,11 +7,15 @@
 //!   Promise. A falsy value or a rejected Promise is a delivery failure.
 //! * `sendEvent(event)` is optional. Without it, the provider falls back to
 //!   [`JavaScriptSender::fallback_message`] and `sendMessage`, like Go.
-//! * `fetch`, `XMLHttpRequest`, `console`, `setTimeout`, `clearTimeout` and
-//!   `require` are injected before the script runs.
+//! * `fetch`, `XMLHttpRequest`, `console.log`/`console.error`, `setTimeout`
+//!   and `require` are injected before the script runs. `require` always throws
+//!   `Invalid module`, matching goja's registry with no native modules.
 //!
-//! Execution is bounded by [`DEFAULT_TIMEOUT`] and by a loop-iteration limit so
-//! a runaway script cannot hang a notification worker forever.
+//! Each provider instance owns one runtime thread, so `Init` evaluates the
+//! script exactly once and every message reuses the same realm (Go's
+//! `JavaScriptSender.vm`). One invocation is bounded by [`DEFAULT_TIMEOUT`] of
+//! wall-clock time; script loading is not counted. A loop-iteration limit stops
+//! a runaway script from pinning the runtime thread forever.
 //!
 //! Errors never echo the script text or a JavaScript error message: only the
 //! error class survives, because both the script and the values it
@@ -208,11 +212,6 @@ impl JavaScriptSender {
         self.worker.lock().await.take();
     }
 
-    /// Run one invocation with the Go 30-second wall-clock limit.
-    ///
-    /// The limit wraps the whole call, including synchronous script code that
-    /// never yields to the promise loop. Go only enforces it while polling a
-    /// Promise; a synchronous infinite loop there hangs forever.
     /// JSON object passed to `sendEvent`, matching `json.Marshal(EventMessage)`.
     ///
     /// `EventMessage.Time` is a plain `time.Time` in Go, so it marshals as
@@ -234,6 +233,11 @@ impl JavaScriptSender {
         })
     }
 
+    /// Run one invocation with the Go 30-second wall-clock limit.
+    ///
+    /// The limit wraps the whole call, including synchronous script code that
+    /// never yields to the promise loop. Go only enforces it while polling a
+    /// Promise; a synchronous infinite loop there hangs forever.
     async fn execute(&self, invocation: engine::Invocation) -> Result<()> {
         let worker = self.worker().await?;
         let reply = match worker.invoke(invocation, self.timeout) {
@@ -264,7 +268,7 @@ impl JavaScriptSender {
 
 pub fn fields() -> Vec<ConfigField> {
     vec![ConfigField::new("script", "richtext").required(true).help(
-        "JavaScript code (ES6 supported) that implements sendMessage(message, title) and optionally sendEvent(event) functions. Both should return a Promise or boolean. Available APIs: fetch(), XMLHttpRequest, console.log(), setTimeout(), require('console'|'process').",
+        "JavaScript code (ES6 supported) that implements sendMessage(message, title) and optionally sendEvent(event) functions. Both should return a Promise or boolean. Available APIs: fetch(), XMLHttpRequest, console.log(), console.error(), setTimeout(). require() always throws Invalid module, like the Go provider.",
     )]
 }
 

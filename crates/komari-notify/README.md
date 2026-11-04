@@ -90,7 +90,9 @@ port，路径/query 隐藏。`HttpRequest` 的 `Debug` 不显示请求体和敏�
   secrets), and each stack frame has a 1,000,000 loop-iteration cap.
 * `Javascript`'s `fetch`/XHR report errors as strings like Go, but the string is
   sanitized (no URL); `statusText` falls back to the canonical reason because
-  `reqwest` discards custom reason phrases. See D-001 for the full list.
+  `reqwest` discards custom reason phrases. `response.headers.get()` is a Rust
+  extension (Go exposes plain object properties only), and event times are
+  re-rendered in the application timezone. See D-001 for the full list.
 * Provider `Default` values are Go's zero-value `Addition` structs. UI defaults
   (telegram endpoint, bark server/level, webhook method/content-type/body,
   email port 587) are exposed only through `ConfigField::default` and are not
