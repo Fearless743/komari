@@ -20,7 +20,7 @@ Ports of Go `api/public/*.go` plus the route table in `cmd/server.go`:
 | `GET /api/recent/{uuid}` | Reads the B05 in-memory report buffer (`api.Records`); omits `data` when nothing is buffered. |
 | `GET /api/records/load` | `uuid`/`hours`/`load_type` validation, per-metric projection and GPU device grouping. |
 | `GET /api/oauth`, `GET /api/oauth_callback` | Uses the B13 provider installed with `ApiState::set_oauth_provider`; error bodies use Go's `error` key. |
-| `GET /api/mjpeg_live` | `multipart/x-mixed-replace; boundary=frame` JPEG stream rendered from the latest `records` rows with a built-in bitmap font. Frame interval is `ApiConfig::mjpeg_frame_interval` (2 s by default). |
+| `GET /api/mjpeg_live` | `multipart/x-mixed-replace; boundary=frame` JPEG stream with Go's 1280 px layout, `lang`/`tz_offset` parameters, MiSans font bootstrap (`data/font.ttf`, then download/extract, then bitmap fallback). Frame interval is `ApiConfig::mjpeg_frame_interval` (2 s by default). |
 
 `public_router_with_state` additionally installs `komari_auth::PrivateSite`,
 matching the global private-site middleware in `cmd/server.go`. Server
@@ -60,11 +60,12 @@ provider rows and loads `o_auth_provider`) before serving requests.
 
 ## Known differences / follow-up work
 
-- `/api/mjpeg_live` renders from the `records` table instead of the JSON-RPC
-  node snapshot, uses the built-in 5x7 bitmap font instead of the downloaded
-  MiSans font, and drops hidden clients like Go's guest `common:getNodes` call.
-  The `lang` and `tz_offset` query parameters are accepted but the frame text is
-  English and uses the application timezone.
+- `/api/mjpeg_live` reads `clients`, the hub's latest report cache and the
+  latest `records` row directly instead of going through the JSON-RPC
+  `common:getNodes` / `common:getNodesLatestStatus` methods. The guest
+  filtering, address masking, layout, language packs and font bootstrap match
+  Go; `ApiConfig::mjpeg_font_download` only exists so tests can disable the
+  network download (production defaults to `true`).
 - `/api/records/load` rejects `hours` outside `±2_562_047` (the largest whole
   hour offset that fits in Go's `time.Duration`) with 400. Go silently wraps the
   duration for larger values.

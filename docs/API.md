@@ -60,7 +60,7 @@ B04/B05/B06 合并并完成 B13 OAuth HTTP/B14 静态路由装配。
 | JSON-RPC | `GET/POST /api/rpc2` | 已实现（B04/B06） | B04/B06 |
 | OAuth | `/api/oauth`、`/api/oauth_callback` | 已实现（B04，B09 装配） | B04/B09 |
 | 静态资源 | `/`、`/themes/:id/*path`、`/favicon.ico` | 已实现（komari-web + B09 装配） | B09 |
-| MJPEG | `/api/mjpeg_live` | 未实现 | B04 |
+| MJPEG | `/api/mjpeg_live` | 已实现（Go 布局、MiSans 字体下载/回退、`lang`/`tz_offset`） | B18 |
 
 ## 4. 公开路由（Go 参考，Rust 状态）
 

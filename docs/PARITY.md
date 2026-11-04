@@ -95,7 +95,7 @@ D 条目、不占号**；若后续需要正式登记，使用 `D-012` / `D-013`�
 
 | 缺口 | 责任 | 影响 |
 | --- | --- | --- |
-| MJPEG | B04 | `/api/mjpeg_live` 返回明确的未实现响应；其余公开端点已可用。 |
+| 无 | — | MJPEG 已由 B18 补齐：Go 布局、MiSans 字体下载/回退与 `lang`/`tz_offset` 均可用。 |
 
 Public/Agent/Admin/RPC/OAuth/静态路由与浏览器 WS 均已由 B04/B05/B06/B09 装配。
 生产切换仍建议先按 [MIGRATION.md](MIGRATION.md) 验证；参见
