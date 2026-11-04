@@ -358,7 +358,10 @@ fn theme_config_requires_name_and_short() {
         ThemeInfo::from_json(r#"{"name":"Theme","short":"theme","version":"1.0.0","author":"me"}"#)
             .expect("valid theme");
     assert_eq!(valid.short, "theme");
-    assert_eq!(valid.configuration, serde_json::Value::Null);
+    assert_eq!(
+        valid.configuration,
+        komari_web::ThemeConfiguration::default()
+    );
 
     let missing_name = ThemeInfo::from_json(r#"{"short":"theme"}"#).expect_err("missing name");
     assert!(missing_name.to_string().contains("name"));

@@ -7,9 +7,11 @@ license.workspace = true
 
 [dependencies]
 anyhow = { workspace = true }
+async-trait = { workspace = true }
 axum = { workspace = true }
 bytes = { workspace = true }
 chrono = { workspace = true }
+flate2 = "1"
 form_urlencoded = "1"
 futures-util = { workspace = true }
 http = { workspace = true }
@@ -27,6 +29,7 @@ qrcode = { version = "0.14", default-features = false, features = ["image"] }
 reqwest = { workspace = true }
 serde = { workspace = true }
 serde_json = { workspace = true }
+tar = "0.4"
 thiserror = { workspace = true }
 tokio = { workspace = true }
 tower-http = { workspace = true }
@@ -34,7 +37,6 @@ tracing = { workspace = true }
 zip = { version = "2.4", default-features = false, features = ["deflate"] }
 
 [dev-dependencies]
-async-trait = { workspace = true }
 tempfile = "3"
 tokio-tungstenite = { workspace = true }
 tower = { workspace = true }

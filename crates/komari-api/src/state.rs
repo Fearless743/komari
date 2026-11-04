@@ -17,6 +17,7 @@ use komari_web::{WebAssets, WebConfig};
 use crate::cache::ReportCache;
 use crate::clock::{Clock, SystemClock};
 use crate::presence::PresenceTracker;
+use crate::theme_fetch::{HttpThemeFetcher, ThemeFetcher};
 use crate::ws::WsHub;
 
 /// Timeouts and limits used by the agent routes.
@@ -86,6 +87,9 @@ pub struct ApiState {
     /// DDNS service used by the admin sync endpoint. The server assembly can
     /// install an initialized instance with [`ApiState::with_ddns_service`].
     pub ddns: Arc<DdnsService>,
+    /// HTTP client used by the admin theme import/update endpoints. Tests
+    /// replace it with [`ApiState::with_theme_fetcher`].
+    pub theme_fetcher: Arc<dyn ThemeFetcher>,
     /// Active OAuth provider. It is `None` until the server assembly loads the
     /// configured provider (see `komari_api::public::initialize_oauth`).
     oauth_provider: Arc<RwLock<Option<Arc<dyn OAuthProvider>>>>,
@@ -140,6 +144,7 @@ impl ApiState {
             geoip,
             web,
             ddns,
+            theme_fetcher: Arc::new(HttpThemeFetcher::new()),
             oauth_provider: Arc::new(RwLock::new(None)),
             config: Arc::new(config),
             background_cancel: CancelToken::new(),
@@ -181,6 +186,13 @@ impl ApiState {
     /// Install an initialized DDNS service.
     pub fn with_ddns_service(mut self, service: Arc<DdnsService>) -> Self {
         self.ddns = service;
+        self
+    }
+
+    /// Replace the HTTP client used for theme downloads (tests use this to
+    /// avoid network access).
+    pub fn with_theme_fetcher(mut self, fetcher: Arc<dyn ThemeFetcher>) -> Self {
+        self.theme_fetcher = fetcher;
         self
     }
 

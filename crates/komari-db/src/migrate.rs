@@ -5,8 +5,11 @@
 //! `IF NOT EXISTS`, so running the migration again never alters, drops or
 //! rewrites an existing table — an old Komari database keeps all of its data.
 
+use rusqlite::params;
+
 use crate::db::Db;
 use crate::error::Result;
+use crate::time::LocalTime;
 use crate::util::{generate_random_string, generate_token};
 
 /// Tables created by the Go backend's `AutoMigrate` call.
@@ -702,12 +705,57 @@ fn legacy_string(cell: &LegacyCell) -> String {
     }
 }
 
+fn legacy_cell<'a>(cells: &'a [(String, LegacyCell)], column: &str) -> Option<&'a LegacyCell> {
+    cells
+        .iter()
+        .find(|(name, _)| name.eq_ignore_ascii_case(column))
+        .map(|(_, cell)| cell)
+}
+
+fn legacy_get_string(cells: &[(String, LegacyCell)], column: &str) -> String {
+    legacy_cell(cells, column)
+        .map(legacy_string)
+        .unwrap_or_default()
+}
+
+fn legacy_get_i64(cells: &[(String, LegacyCell)], column: &str) -> i64 {
+    legacy_cell(cells, column)
+        .map(legacy_i64)
+        .unwrap_or_default()
+}
+
+fn legacy_get_bool(cells: &[(String, LegacyCell)], column: &str) -> bool {
+    legacy_cell(cells, column)
+        .map(legacy_bool)
+        .unwrap_or_default()
+}
+
+/// Columns that were removed from `models.Config` after the pre-1.0.2
+/// migrations. Go's `config.Legacy` struct no longer contains them, so the
+/// single-row -> key/value conversion drops them. Keeping them out of the new
+/// table also avoids copying credentials into the active configuration.
+const LEGACY_REMOVED_CONFIG_COLUMNS: &[&str] = &[
+    "o_auth_client_id",
+    "o_auth_client_secret",
+    "telegram_bot_token",
+    "telegram_chat_id",
+    "telegram_endpoint",
+    "email_host",
+    "email_port",
+    "email_username",
+    "email_password",
+    "email_sender",
+    "email_receiver",
+    "email_use_ssl",
+];
+
 fn legacy_config_value(column: &str, cell: &LegacyCell) -> Option<serde_json::Value> {
     let name = column.to_ascii_lowercase();
     if matches!(
         name.as_str(),
         "id" | "created_at" | "updated_at" | "key" | "value"
-    ) {
+    ) || LEGACY_REMOVED_CONFIG_COLUMNS.contains(&name.as_str())
+    {
         return None;
     }
     let boolean = matches!(
@@ -742,6 +790,218 @@ fn legacy_config_value(column: &str, cell: &LegacyCell) -> Option<serde_json::Va
     } else {
         serde_json::Value::String(legacy_string(cell))
     })
+}
+
+/// Pre-1.0.2 OIDC credentials lived in the single-row `configs` table.
+///
+/// Go `MergeDatabase` creates the `github` provider from
+/// `o_auth_client_id`/`o_auth_client_secret` and forces
+/// `configs.o_auth_provider = 'github'` when the table is still the legacy
+/// single-row form. This returns the JSON `addition` to insert after the
+/// schema exists; the legacy row is updated here, before the configs table is
+/// converted to key/value form.
+fn prepare_legacy_oidc(tx: &rusqlite::Transaction<'_>) -> crate::error::Result<Option<String>> {
+    if !table_exists_tx(tx, "configs")? || table_exists_tx(tx, "oidc_providers")? {
+        return Ok(None);
+    }
+
+    let columns = actual_columns(tx, "configs")?;
+    let has_key = columns
+        .iter()
+        .any(|column| column.eq_ignore_ascii_case("key"));
+    let values = read_legacy_config(tx, "configs", false)?;
+    let client_id = legacy_get_string(&values, "o_auth_client_id");
+    let client_secret = legacy_get_string(&values, "o_auth_client_secret");
+
+    // Go uses `json.Marshal(map[string]string{...})`, so both keys are always
+    // present and are emitted in lexicographic order.
+    let addition = serde_json::to_string(&serde_json::json!({
+        "client_id": client_id,
+        "client_secret": client_secret,
+    }))?;
+
+    if !has_key {
+        if !columns
+            .iter()
+            .any(|column| column.eq_ignore_ascii_case("o_auth_provider"))
+        {
+            tx.execute(
+                "ALTER TABLE `configs` ADD COLUMN `o_auth_provider` varchar(50) DEFAULT 'github'",
+                [],
+            )?;
+        }
+        if columns
+            .iter()
+            .any(|column| column.eq_ignore_ascii_case("id"))
+        {
+            tx.execute(
+                "UPDATE `configs` SET `o_auth_provider` = 'github' WHERE `id` = 1",
+                [],
+            )?;
+        } else {
+            tx.execute("UPDATE `configs` SET `o_auth_provider` = 'github'", [])?;
+        }
+    }
+
+    Ok(Some(addition))
+}
+
+/// Pre-1.0.2 notification settings lived in the single-row `configs` table.
+/// Build the provider rows Go `MergeDatabase` creates, preserving the exact
+/// `addition` JSON shape and the Telegram endpoint default.
+fn prepare_legacy_message_senders(
+    tx: &rusqlite::Transaction<'_>,
+) -> crate::error::Result<Vec<(String, String)>> {
+    if !table_exists_tx(tx, "configs")? || table_exists_tx(tx, "message_sender_providers")? {
+        return Ok(Vec::new());
+    }
+
+    let values = read_legacy_config(tx, "configs", false)?;
+    let method = legacy_get_string(&values, "notification_method");
+    let mut providers = Vec::new();
+
+    if method == "telegram" {
+        let bot_token = legacy_get_string(&values, "telegram_bot_token");
+        if !bot_token.is_empty() {
+            let mut endpoint = legacy_get_string(&values, "telegram_endpoint");
+            if endpoint.is_empty() {
+                endpoint = "https://api.telegram.org/bot".to_owned();
+            }
+            providers.push((
+                "telegram".to_owned(),
+                serde_json::to_string(&serde_json::json!({
+                    "bot_token": bot_token,
+                    "chat_id": legacy_get_string(&values, "telegram_chat_id"),
+                    "endpoint": endpoint,
+                }))?,
+            ));
+        }
+    }
+
+    if method == "email" {
+        let host = legacy_get_string(&values, "email_host");
+        if !host.is_empty() {
+            providers.push((
+                "email".to_owned(),
+                serde_json::to_string(&serde_json::json!({
+                    "host": host,
+                    "port": legacy_get_i64(&values, "email_port"),
+                    "username": legacy_get_string(&values, "email_username"),
+                    "password": legacy_get_string(&values, "email_password"),
+                    "sender": legacy_get_string(&values, "email_sender"),
+                    "receiver": legacy_get_string(&values, "email_receiver"),
+                    "use_ssl": legacy_get_bool(&values, "email_use_ssl"),
+                }))?,
+            ));
+        }
+    }
+
+    Ok(providers)
+}
+
+fn insert_provider(
+    tx: &rusqlite::Transaction<'_>,
+    table: &str,
+    name: &str,
+    addition: &str,
+) -> crate::error::Result<()> {
+    tx.execute(
+        &format!(
+            "INSERT INTO `{table}` (`name`, `addition`) VALUES (?1, ?2) \
+             ON CONFLICT(`name`) DO UPDATE SET `addition` = excluded.`addition`"
+        ),
+        params![name, addition],
+    )?;
+    Ok(())
+}
+
+/// Merge the pre-0.0.5 `client_infos` table into `clients`.
+///
+/// Mirrors Go `mergeClientInfo`: copy the static fields for every matching
+/// UUID (unknown UUIDs are skipped), then rename the old table to
+/// `client_infos_backup`. The backup is only created once; if it already
+/// exists the migration is considered complete.
+fn merge_client_infos(tx: &rusqlite::Transaction<'_>) -> crate::error::Result<()> {
+    if !table_exists_tx(tx, "client_infos")? || table_exists_tx(tx, "client_infos_backup")? {
+        return Ok(());
+    }
+    if !table_exists_tx(tx, "clients")? {
+        return Ok(());
+    }
+
+    let columns = actual_columns(tx, "client_infos")?;
+    let rows = {
+        let mut stmt = tx.prepare("SELECT * FROM `client_infos`")?;
+        let mut rows = stmt.query([])?;
+        let mut values = Vec::new();
+        while let Some(row) = rows.next()? {
+            values.push(legacy_cells(row, &columns)?);
+        }
+        values
+    };
+
+    let now = LocalTime::now();
+    for cells in rows {
+        let uuid = legacy_get_string(&cells, "uuid");
+        let exists: i64 = tx.query_row(
+            "SELECT COUNT(*) FROM `clients` WHERE `uuid` = ?1",
+            [&uuid],
+            |row| row.get(0),
+        )?;
+        if exists == 0 {
+            // Go logs and continues when the client record is missing.
+            continue;
+        }
+
+        let expired_at = match legacy_cell(&cells, "expired_at") {
+            Some(cell) => LocalTime::parse(&legacy_string(cell)).unwrap_or_default(),
+            None => LocalTime::default(),
+        };
+
+        tx.execute(
+            "UPDATE `clients` SET \
+                 `name` = ?1, `cpu_name` = ?2, `virtualization` = ?3, `arch` = ?4, \
+                 `cpu_cores` = ?5, `os` = ?6, `gpu_name` = ?7, `ipv4` = ?8, \
+                 `ipv6` = ?9, `region` = ?10, `remark` = ?11, \
+                 `public_remark` = ?12, `mem_total` = ?13, `swap_total` = ?14, \
+                 `disk_total` = ?15, `version` = ?16, `weight` = ?17, \
+                 `price` = ?18, `billing_cycle` = ?19, `expired_at` = ?20, \
+                 `updated_at` = ?21 \
+             WHERE `uuid` = ?22",
+            params![
+                legacy_get_string(&cells, "name"),
+                legacy_get_string(&cells, "cpu_name"),
+                legacy_get_string(&cells, "virtualization"),
+                legacy_get_string(&cells, "arch"),
+                legacy_get_i64(&cells, "cpu_cores"),
+                legacy_get_string(&cells, "os"),
+                legacy_get_string(&cells, "gpu_name"),
+                legacy_get_string(&cells, "ipv4"),
+                legacy_get_string(&cells, "ipv6"),
+                legacy_get_string(&cells, "region"),
+                legacy_get_string(&cells, "remark"),
+                legacy_get_string(&cells, "public_remark"),
+                legacy_get_i64(&cells, "mem_total"),
+                legacy_get_i64(&cells, "swap_total"),
+                legacy_get_i64(&cells, "disk_total"),
+                legacy_get_string(&cells, "version"),
+                legacy_get_i64(&cells, "weight"),
+                legacy_cell(&cells, "price")
+                    .map(legacy_f64)
+                    .unwrap_or_default(),
+                legacy_get_i64(&cells, "billing_cycle"),
+                expired_at,
+                now,
+                uuid,
+            ],
+        )?;
+    }
+
+    tx.execute(
+        "ALTER TABLE `client_infos` RENAME TO `client_infos_backup`",
+        [],
+    )?;
+    Ok(())
 }
 
 /// Convert a pre-1.1.4 single-row `configs` table into the current key/value
@@ -866,6 +1126,11 @@ impl Db {
 
         let mut conn = self.conn();
         let tx = conn.transaction()?;
+        // Pre-1.0.2 migrations read columns from the legacy single-row
+        // `configs` table, so they must run before it is converted to
+        // key/value form. Provider rows are inserted after the schema exists.
+        let legacy_oidc = prepare_legacy_oidc(&tx)?;
+        let legacy_senders = prepare_legacy_message_senders(&tx)?;
         // Convert the pre-1.1.4 single-row configs table before generic
         // column repair, because its schema is structurally different.
         if configs_need_conversion(&tx)? {
@@ -873,9 +1138,17 @@ impl Db {
         }
         // Tables first: older tables keep their existing definition.
         tx.execute_batch(SCHEMA_SQL)?;
+        if let Some(addition) = legacy_oidc {
+            insert_provider(&tx, "oidc_providers", "github", &addition)?;
+        }
+        for (name, addition) in legacy_senders {
+            insert_provider(&tx, "message_sender_providers", &name, &addition)?;
+        }
         // Then add any columns the old table is missing, so the index DDL and
         // repository queries below never reference a non-existent column.
         add_missing_columns(&tx)?;
+        // Merge pre-0.0.5 `client_infos` after `clients` has every column.
+        merge_client_infos(&tx)?;
         // Restore unique constraints that old tables may never have had.
         ensure_unique_columns(&tx)?;
         // Indexes last: they can reference columns added in the step above.

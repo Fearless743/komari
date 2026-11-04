@@ -92,7 +92,7 @@ impl Default for DatabaseConfig {
 }
 
 /// Fully resolved, strongly typed startup configuration.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Config {
     pub listen: String,
     pub db: DatabaseConfig,
@@ -105,6 +105,26 @@ pub struct Config {
     /// Normal HTTP request-body limit in bytes (`KOMARI_BODY_LIMIT`).
     /// `None` lets the server use its default.
     pub body_limit: Option<usize>,
+}
+
+impl fmt::Debug for Config {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter
+            .debug_struct("Config")
+            .field("listen", &self.listen)
+            .field("db", &self.db)
+            .field("log_level", &self.log_level)
+            .field("theme", &self.theme)
+            .field("allow_cors", &self.allow_cors)
+            .field("enable_cloudflared", &self.enable_cloudflared)
+            .field(
+                "cloudflared_token",
+                &self.cloudflared_token.as_ref().map(|_| "<redacted>"),
+            )
+            .field("ws_disable_origin", &self.ws_disable_origin)
+            .field("body_limit", &self.body_limit)
+            .finish()
+    }
 }
 
 impl Default for Config {

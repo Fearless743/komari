@@ -182,10 +182,13 @@ Rules:
   `redirect_base` (or call `RedirectPolicy` /
   `validate_redirect_uri_for_base` in the API layer) to reject
   `evil.example`; shape validation alone cannot know the real callback host.
-* OIDC `id_token` signatures are verified with RS256/RS384/RS512 using `ring`.
-  `iss`, `aud`, `exp` and `nbf` are checked. JWKS is refreshed only for an
-  unknown `kid`, at most once per 30 seconds; invalid signatures or claim
-  mismatches never trigger a refresh.
+* OIDC `id_token` signatures are verified with the full go-oidc/go-jose
+  asymmetric set: RS256/384/512, PS256/384/512, ES256/384/512 and EdDSA
+  (Ed25519), using RSA, EC (P-256/P-384/P-521) and OKP JWKS keys. `alg=none`,
+  unknown algorithms and algorithm/key-type confusion are rejected. `iss`,
+  `aud`, `exp` and `nbf` are checked. JWKS is refreshed only for an unknown
+  `kid`, at most once per 30 seconds; invalid signatures or claim mismatches
+  never trigger a refresh.
 * Cloudflare Access accepts only the `Cf-Access-Jwt-Assertion` header by
   default. Set `allow_query_token: true` explicitly for non-browser clients.
   `exchange_code` also enforces the switch and returns
@@ -209,18 +212,23 @@ parameters for all four providers, mocked token/user-info exchanges, GitHub
 email fallback, QQ error codes and empty `social_uid`, state mismatch and
 redirect mismatch, provider error callbacks, OIDC discovery/JWKS/id-token
 validation (wrong audience, missing `id_token`, nonce mismatch, discovery
-skip, OIDC subject override, no-userinfo id_token flow), Cloudflare JWT
-verification, missing-header rejection and query-token switch, PKCE, token
-refresh/expiry, JSON/query/form secret redaction (including camelCase,
-kebab-case, `code`, `state`, `passwd` and `two_factor`), non-object JSON error
-bodies, JWKS refresh amplification and claim-error no-refresh, redirect-base
-rejection for all four providers, QQ default-config loadability, and account
+skip, OIDC subject override, no-userinfo id_token flow), every supported JWT
+algorithm, `alg=none`, unknown algorithms, algorithm/key-type confusion, EC
+JWKS parsing and rotation, Cloudflare JWT verification, missing-header
+rejection and query-token switch, PKCE, token refresh/expiry,
+JSON/query/form secret redaction (including camelCase, kebab-case, `code`,
+`state`, `passwd` and `two_factor`), non-object JSON error bodies, JWKS refresh
+amplification and claim-error no-refresh, redirect-base rejection for all four
+providers, QQ default-config loadability, and account
 creation/binding/duplicate-binding/legacy-row/`rebind`/`AccountNotBound`/
 `SessionUser` serialization behaviour.
 
 ## Known limitations
 
-* Only RS* JWTs are verified. ES256/EdDSA providers are not supported yet.
+* JWKS keys must publish `n`/`e`, `crv`/`x`/`y` or `crv`/`x`; `x5c`-only keys
+  are not parsed.
+* All go-oidc algorithms are accepted. There is no per-provider signing
+  algorithm allowlist yet; pinning would require a configuration field.
 * `generic` still requires `user_id_field`; pure OIDC users must set `"sub"`.
 * The generic provider does not implement the full OpenID Connect RP library
   surface (no userinfo-only OIDC session management, no token introspection or

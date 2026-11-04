@@ -42,21 +42,20 @@
   外部脚本需要改为直接调用 provider API。
 - **状态**：非 Go 扩展，已记录在 `crates/komari-ddns/README.md`。
 
-## D-003 旧数据库历史迁移不自动执行
+## D-003 旧数据库历史迁移（已合并）
 
-- **Rust**：`komari-db` 的 `migrate()` 只做加法式 schema 迁移、缺失列补齐和
-  legacy `configs` 转换；不执行以下 Go 历史迁移：
-  - pre-1.0.2 将 OAuth/通知设置从旧 `configs` 列搬出的迁移；
-  - `client_infos` 合并到 `clients`；
-  - MySQL 路径（Go 的 MySQL 分支同样被注释，但 Rust 会显式返回
-    `UnsupportedDatabase`）。
-- **Go**：启动时 `AutoMigrate` 会执行上述历史迁移。
-- **原因**：这些迁移只影响很老的数据库，Rust 选择不自动改写用户数据，降低误迁移
-  风险。
-- **影响**：极老数据库直接用 Rust 打开时，可能缺少 OAuth/通知配置或旧客户端信息。
-- **迁移**：先用 Go 版启动一次并正常退出，让 Go 完成历史迁移；备份后再切换 Rust。
-  参见 [MIGRATION.md](MIGRATION.md) 第 4 节。
-- **状态**：兼容性限制，已记录在 `crates/komari-db/README.md`。
+- **Rust**：`komari-db` 的 `migrate()` 在单个事务中执行以下 Go 历史迁移：
+  - `client_infos` 合并到 `clients`，原表重命名为 `client_infos_backup`；
+  - pre-1.0.2 将 OAuth/通知设置从旧 `configs` 列搬出到
+    `oidc_providers` / `message_sender_providers`；
+  - 现有加法式 schema 迁移、缺失列补齐和 legacy `configs` 转换保持不变。
+- **Go**：启动时 `MergeDatabase` + `AutoMigrate` 会执行上述历史迁移。
+- **差异**：Rust 把旧 `configs` 表保留为 `configs_legacy_backup`，Go 会直接
+  删除/重写；旧凭据列不会复制到新的 key/value `configs`，只保留在备份表中。
+- **迁移**：无需再先用 Go 启动一次；直接备份数据库后切换即可。
+- **状态**：已合并（B20），由 `crates/komari-db/tests/legacy_migration.rs`
+  覆盖合并、重命名、OIDC/通知迁移、幂等、缺列、空表、异常 JSON、回滚和
+  现有库不变。
 
 ## D-004 GeoIP 缓存容量上限 10,000
 
@@ -189,3 +188,58 @@
 - **调用点**：B06 的 GET/list 响应路径调用 `redact_addition`；写路径始终使用原始
   `addition`。
 - **状态**：已合并（B07）；待 B06 接入 API 并对等验收。
+
+## 待 B11 编号（D-012 起）
+
+以下条目由 B17 提交内容，编号与最终措辞由 B11 统一分配。
+
+### cloudflared macOS 下载会解包 `.tgz`
+
+- **Rust**：macOS 目标下载 `cloudflared-darwin-*.tgz` 后，从归档中提取
+  `cloudflared` 成员写入 `data/cloudflared`，再设置 `0755`。
+- **Go**：`utils/cloudflared` 把 `.tgz` 响应直接写入 `data/cloudflared` 并尝试
+  执行，没有解包步骤；在 macOS 上通常无法直接运行。
+- **原因**：让 macOS 上的隧道实际可用。
+- **影响**：Rust 生成的 `data/cloudflared` 是真正的可执行文件；从 Go 迁移时，如果
+  `data/cloudflared` 已存在且实际是 `.tgz`，Rust 会按“已存在则复用”直接使用并
+  启动失败。
+- **迁移**：macOS 从 Go 切到 Rust 前删除旧的 `data/cloudflared`，让 Rust 重新下载
+  并解包；其他平台不受影响。
+- **状态**：有意修正，待 B17 对等验收确认。
+
+### cloudflared 下载严格检查 HTTP 状态码
+
+- **Rust**：`HttpDownloader` 只在 `2xx` 时写入文件；非 `2xx` 返回
+  `CloudflaredError::Download`，不会安装响应体。
+- **Go**：`http.Get` 后不检查 `StatusCode`，会把 404/重定向错误页当作可执行文件
+  写入 `data/cloudflared`。
+- **原因**：避免把 HTML 错误页安装成二进制并产生难以诊断的启动错误。
+- **影响**：GitHub 不可达、代理返回 403/404 时 Rust 启动失败并保留原文件；Go 可能
+  先写入错误内容再启动失败。两者都不会启动隧道，但磁盘状态不同。
+- **迁移**：确保服务器可访问 GitHub Releases；失败时按错误提示检查代理/网络。
+- **状态**：有意安全差异，待 B17 对等验收确认。
+
+### cloudflared 意外退出的关闭方式与退出码
+
+- **Rust**：记录子进程退出码，向 HTTP 服务发送关闭信号，按
+  `shutdown_timeout` 完成 drain 后让 `serve` 返回错误，CLI 最终以退出码 `1`
+  结束。
+- **Go**：在等待 goroutine 中记录日志后直接 `os.Exit(1)`，HTTP 服务没有机会
+  graceful shutdown。
+- **原因**：Rust 库代码不应直接终止进程；同时保留 Go 的非零退出码语义。
+- **影响**：退出码一致（`1`）；Rust 会短暂等待连接排空并执行后台任务清理，Go 立即
+  退出。若 `shutdown_timeout` 内仍有长连接，Rust 会在超时后强制结束。
+- **迁移**：依赖退出码的编排逻辑无需修改；需要立即退出时可缩短
+  `ServerConfig::shutdown_timeout`。
+- **状态**：有意差异，待 B17 对等验收确认。
+
+### `KOMARI_ENABLE_CLOUDFLARED` 布尔字面量更宽松
+
+- **Rust**：沿用配置层布尔解析，接受 `true` / `1` / `yes` / `on`（大小写不敏感）。
+- **Go**：`cmd/server.go` 只把 `strings.ToLower(value) == "true"` 视为启用。
+- **原因**：与 `KOMARI_ALLOW_CORS`、`KOMARI_WS_DISABLE_ORIGIN` 共用解析器，行为
+  一致（参见 D-005）。
+- **影响**：部署脚本写 `KOMARI_ENABLE_CLOUDFLARED=1` 时 Rust 会启动隧道而 Go 不会；
+  从 Rust 回退 Go 时可能出现“配置没变但隧道不再启动”。
+- **迁移**：跨版本部署统一使用 `true` / `false`。
+- **状态**：有意差异（更宽松），待 B17 对等验收确认。
