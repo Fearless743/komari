@@ -137,7 +137,7 @@ async fn perform(
 ) -> NetResult {
     match tokio::time::timeout(timeout, transport.execute(request)).await {
         Ok(Ok(response)) => Ok(response),
-        Ok(Err(error)) => Err(sanitized_error(&error)),
+        Ok(Err(error)) => Err(error_reason(&error)),
         Err(_) => Err("request timed out".to_owned()),
     }
 }
@@ -145,10 +145,11 @@ async fn perform(
 /// Keep only the transport's already-sanitized classification.
 ///
 /// `NotifyError::Rejected` carries a remote body, which may contain a token,
-/// so it is reduced to the status code.
-fn sanitized_error(error: &NotifyError) -> String {
+/// so it is reduced to the status code. The result is the reason used in Go's
+/// `Fetch failed: <reason>` rejection string.
+fn error_reason(error: &NotifyError) -> String {
     match error {
-        NotifyError::Http(message) => format!("request failed: {message}"),
+        NotifyError::Http(message) => message.clone(),
         NotifyError::Rejected { status, .. } => {
             format!("remote endpoint returned status {status}")
         }

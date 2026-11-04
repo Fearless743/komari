@@ -58,6 +58,8 @@ async fn fetch_roundtrips_through_the_reqwest_transport() {
                 const data = await response.json();
                 return response.status === 202
                     && response.statusText === "202 Accepted"
+                    && response.headers["Content-Type"] === "application/json"
+                    && response.headers["X-Reply"] === "yes"
                     && response.headers.get("x-reply") === "yes"
                     && data.ok === true;
             }}

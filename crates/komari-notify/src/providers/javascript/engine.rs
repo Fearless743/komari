@@ -337,15 +337,14 @@ fn handle_event(context: &mut Context, event: NetEvent) -> Result<()> {
                 return Err(runtime_error(&error, context));
             }
         }
-        Err(message) => {
-            let error = JsNativeError::error()
-                .with_message(message)
-                .to_opaque(context);
-            if let Err(error) =
-                resolvers
-                    .reject
-                    .call(&JsValue::undefined(), &[JsValue::from(error)], context)
-            {
+        Err(reason) => {
+            // Go rejects with a string; `fetch` adds the `Fetch failed: `
+            // prefix in the prelude, while XHR uses it as `statusText`.
+            if let Err(error) = resolvers.reject.call(
+                &JsValue::undefined(),
+                &[JsValue::from(js_string!(reason))],
+                context,
+            ) {
                 return Err(runtime_error(&error, context));
             }
         }
@@ -523,7 +522,8 @@ fn native_http_sync(_this: &JsValue, args: &[JsValue], context: &mut Context) ->
 
     match result {
         Ok(response) => response_value(context, response),
-        Err(message) => Err(JsNativeError::error().with_message(message).into()),
+        // Go's synchronous XHR path reports the transport error as a string.
+        Err(reason) => Err(JsError::from_opaque(JsValue::from(js_string!(reason)))),
     }
 }
 
@@ -655,15 +655,9 @@ fn response_value(context: &mut Context, response: HttpResponse) -> JsResult<JsV
     let object = JsObject::with_object_proto(context.intrinsics());
     object.set(js_string!("status"), response.status as i32, false, context)?;
 
-    let reason = response.reason();
-    let status_text = if reason.is_empty() {
-        response.status.to_string()
-    } else {
-        format!("{} {reason}", response.status)
-    };
     object.set(
         js_string!("statusText"),
-        js_string!(status_text),
+        js_string!(response.status_line()),
         false,
         context,
     )?;

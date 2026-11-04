@@ -218,9 +218,19 @@ async fn xml_http_request_onerror_fires_when_the_transport_fails() {
             script: r#"
                 function sendMessage() {
                     return new Promise(function (resolve) {
+                        const order = [];
                         const xhr = new XMLHttpRequest();
                         xhr.open("GET", "https://hook.example/xhr");
-                        xhr.onerror = function () { resolve(xhr.readyState === 4 && xhr.status === 0); };
+                        xhr.onerror = function () { order.push("error"); };
+                        xhr.onreadystatechange = function () {
+                            if (xhr.readyState !== 4) return;
+                            order.push("readystatechange");
+                            resolve(
+                                order.join(",") === "error,readystatechange"
+                                    && xhr.status === 0
+                                    && xhr.statusText === "connect failed"
+                            );
+                        };
                         xhr.send();
                     });
                 }
@@ -230,6 +240,77 @@ async fn xml_http_request_onerror_fires_when_the_transport_fails() {
         Arc::new(FailingTransport),
     )
     .with_timeout(Duration::from_secs(5));
+
+    sender.send_text("hello", "title").await.unwrap();
+}
+
+#[tokio::test]
+async fn synchronous_xml_http_request_failure_calls_onerror() {
+    let sender = JavaScriptSender::with_transport(
+        JavaScriptConfig {
+            script: r#"
+                function sendMessage() {
+                    const order = [];
+                    const xhr = new XMLHttpRequest();
+                    xhr.open("GET", "https://hook.example/xhr", false);
+                    xhr.onerror = function () { order.push("error"); };
+                    xhr.onreadystatechange = function () {
+                        if (xhr.readyState === 4) order.push("readystatechange");
+                    };
+                    xhr.send();
+                    return order.join(",") === "error,readystatechange"
+                        && xhr.readyState === 4
+                        && xhr.status === 0
+                        && xhr.statusText === "connect failed";
+                }
+            "#
+            .to_owned(),
+        },
+        Arc::new(FailingTransport),
+    )
+    .with_timeout(Duration::from_secs(5));
+
+    sender.send_text("hello", "title").await.unwrap();
+}
+
+#[tokio::test]
+async fn fetch_rejects_with_a_string_like_go() {
+    let sender = JavaScriptSender::with_transport(
+        JavaScriptConfig {
+            script: r#"
+                async function sendMessage() {
+                    try {
+                        await fetch("https://hook.example/x");
+                        return false;
+                    } catch (error) {
+                        return typeof error === "string"
+                            && error.indexOf("Fetch failed: connect failed") === 0;
+                    }
+                }
+            "#
+            .to_owned(),
+        },
+        Arc::new(FailingTransport),
+    )
+    .with_timeout(Duration::from_secs(5));
+
+    sender.send_text("hello", "title").await.unwrap();
+}
+
+#[tokio::test]
+async fn fetch_uses_the_wire_reason_phrase_when_available() {
+    let transport = Arc::new(MockHttp::new(vec![
+        HttpResponse::new(202, b"ok".to_vec()).with_status_text("Custom Reason"),
+    ]));
+    let sender = sender(
+        r#"
+        async function sendMessage() {
+            const response = await fetch("https://hook.example/custom");
+            return response.status === 202 && response.statusText === "202 Custom Reason";
+        }
+        "#,
+        transport,
+    );
 
     sender.send_text("hello", "title").await.unwrap();
 }
@@ -262,6 +343,72 @@ async fn never_settling_promise_hits_the_deadline() {
 
     let error = sender.send_text("hello", "title").await.unwrap_err();
     assert!(error.to_string().contains("timeout"), "{error}");
+}
+
+#[tokio::test]
+async fn synchronous_send_message_hits_the_wall_clock_deadline() {
+    // Go only checks the timeout while polling a Promise, so a synchronous
+    // loop hangs forever there. The Rust provider bounds the whole call.
+    let sender = text_sender("function sendMessage() { while (true) {} }")
+        .with_timeout(Duration::from_millis(100));
+
+    let started = std::time::Instant::now();
+    let error = sender.send_text("hello", "title").await.unwrap_err();
+    let elapsed = started.elapsed();
+
+    assert!(error.to_string().contains("timeout"), "{error}");
+    assert!(elapsed < Duration::from_secs(3), "timeout took {elapsed:?}");
+}
+
+#[tokio::test]
+async fn script_load_time_is_not_counted_by_the_deadline() {
+    // Go starts its 30s timer in SendTextMessage, after Init ran the script.
+    // Loading takes ~300ms here while the invocation budget is 100ms.
+    let sender = text_sender(
+        r#"
+        const started = Date.now();
+        while (Date.now() - started < 300) {}
+        function sendMessage() { return true; }
+        "#,
+    )
+    .with_timeout(Duration::from_millis(100));
+
+    sender.send_text("hello", "title").await.unwrap();
+}
+
+#[tokio::test]
+async fn top_level_state_persists_between_messages() {
+    // First call sees calls === 1 and fails; a fresh VM would also see 1.
+    let sender = text_sender(
+        r#"
+        var calls = 0;
+        function sendMessage() {
+            calls += 1;
+            return calls !== 1;
+        }
+        "#,
+    );
+
+    let error = sender.send_text("hello", "title").await.unwrap_err();
+    assert!(
+        error.to_string().contains("sendMessage returned false"),
+        "{error}"
+    );
+    sender.send_text("hello", "title").await.unwrap();
+}
+
+#[tokio::test]
+async fn top_level_code_runs_once_for_init_and_send() {
+    let sender = text_sender(
+        r#"
+        var runs = 0;
+        runs += 1;
+        function sendMessage() { return runs === 1; }
+        "#,
+    );
+
+    sender.init().await.unwrap();
+    sender.send_text("hello", "title").await.unwrap();
 }
 
 #[tokio::test]

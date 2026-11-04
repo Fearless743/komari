@@ -48,7 +48,8 @@
           try {
             resolve(JSON.parse(raw.body));
           } catch (error) {
-            reject(error);
+            // Go rejects with a string as well.
+            reject("Failed to parse JSON: " + (error && error.message ? error.message : String(error)));
           }
         });
       },
@@ -83,7 +84,10 @@
     if (arguments.length < 1) {
       throw new TypeError("fetch requires at least 1 argument");
     }
-    return bridge(requestFrom(url, options)).then(responseFrom);
+    return bridge(requestFrom(url, options)).then(responseFrom, function (reason) {
+      // Go: reject(vm.ToValue(fmt.Sprintf("Fetch failed: %v", err))).
+      return Promise.reject("Fetch failed: " + reason);
+    });
   };
 
   function XMLHttpRequest() {
@@ -153,13 +157,22 @@
       self.readyState = 4;
       self.status = 0;
       self.statusText =
-        error && error.message ? String(error.message) : "request failed";
-      self._fire("onreadystatechange");
+        typeof error === "string"
+          ? error
+          : error && error.message
+            ? String(error.message)
+            : "request failed";
+      // Go calls onerror first, then onreadystatechange.
       self._fire("onerror");
+      self._fire("onreadystatechange");
     }
 
     if (this._async === false) {
-      apply(bridgeSync(request));
+      try {
+        apply(bridgeSync(request));
+      } catch (error) {
+        fail(error);
+      }
       return;
     }
     bridge(request).then(apply, fail);
