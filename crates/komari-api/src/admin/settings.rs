@@ -4,9 +4,11 @@ use std::collections::HashMap;
 
 use axum::Router;
 use axum::body::Bytes;
-use axum::extract::State;
+use axum::extract::{Request, State};
+use axum::http::{HeaderValue, Method, StatusCode, Uri, header};
+use axum::middleware::Next;
 use axum::response::{IntoResponse, Response};
-use axum::routing::get;
+use axum::routing::{any, get};
 use komari_auth::RequireAdmin;
 use komari_config::keys;
 use komari_web::SiteMeta;
@@ -18,11 +20,46 @@ use crate::state::ApiState;
 
 pub(crate) fn routes() -> Router<ApiState> {
     Router::new()
-        .route("/api/admin/settings", get(get_settings).post(edit_settings))
+        // Go/Gin redirects the no-slash form before auth: 301 for GET/HEAD,
+        // 307 for other methods (method and body preserved).
+        .route("/api/admin/settings", any(redirect_settings))
         .route(
             "/api/admin/settings/",
             get(get_settings).post(edit_settings),
         )
+}
+
+fn settings_redirect(uri: &Uri, method: &Method) -> Response {
+    let mut location = String::from(uri.path());
+    location.push('/');
+    if let Some(query) = uri.query() {
+        location.push('?');
+        location.push_str(query);
+    }
+    let status = if matches!(*method, Method::GET | Method::HEAD) {
+        StatusCode::MOVED_PERMANENTLY
+    } else {
+        StatusCode::TEMPORARY_REDIRECT
+    };
+    let mut response = status.into_response();
+    response.headers_mut().insert(
+        header::LOCATION,
+        HeaderValue::from_str(&location).expect("settings redirect location is valid"),
+    );
+    response
+}
+
+async fn redirect_settings(uri: Uri, method: Method) -> Response {
+    settings_redirect(&uri, &method)
+}
+
+/// Redirect `/api/admin/settings` before the auth layers run, matching Gin's
+/// `RedirectTrailingSlash` behaviour (unauthenticated callers see 301/307).
+pub(crate) async fn redirect_settings_middleware(request: Request, next: Next) -> Response {
+    if request.uri().path() == "/api/admin/settings" {
+        return settings_redirect(request.uri(), request.method());
+    }
+    next.run(request).await
 }
 
 /// `GET /api/admin/settings` — Go `admin.GetSettings`.

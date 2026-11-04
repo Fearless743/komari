@@ -55,9 +55,38 @@ async fn admin_settings_requires_admin() {
     let directory = tempfile::tempdir().unwrap();
     let (state, app) = admin_app(directory.path());
 
+    // Gin redirects the no-slash form before auth.
+    let response = app
+        .clone()
+        .oneshot(request(Method::GET, "/api/admin/settings", Body::empty()))
+        .await
+        .expect("redirect response");
+    assert_eq!(response.status(), StatusCode::MOVED_PERMANENTLY);
+    assert_eq!(
+        response
+            .headers()
+            .get(header::LOCATION)
+            .expect("location header"),
+        "/api/admin/settings/"
+    );
+
+    let response = app
+        .clone()
+        .oneshot(request(Method::POST, "/api/admin/settings", Body::empty()))
+        .await
+        .expect("post redirect response");
+    assert_eq!(response.status(), StatusCode::TEMPORARY_REDIRECT);
+    assert_eq!(
+        response
+            .headers()
+            .get(header::LOCATION)
+            .expect("location header"),
+        "/api/admin/settings/"
+    );
+
     let (status, body) = call(
         &app,
-        request(Method::GET, "/api/admin/settings", Body::empty()),
+        request(Method::GET, "/api/admin/settings/", Body::empty()),
     )
     .await;
     assert_eq!(status, StatusCode::UNAUTHORIZED);
@@ -68,7 +97,7 @@ async fn admin_settings_requires_admin() {
         &app,
         request(
             Method::GET,
-            &format!("/api/admin/settings?token={}", client.token),
+            &format!("/api/admin/settings/?token={}", client.token),
             Body::empty(),
         ),
     )
@@ -78,7 +107,7 @@ async fn admin_settings_requires_admin() {
     admin_key(&state);
     let (status, body) = call(
         &app,
-        bearer(Method::GET, "/api/admin/settings", Body::empty()),
+        bearer(Method::GET, "/api/admin/settings/", Body::empty()),
     )
     .await;
     assert_eq!(status, StatusCode::OK);
@@ -96,7 +125,7 @@ async fn admin_settings_round_trip() {
         &app,
         bearer(
             Method::POST,
-            "/api/admin/settings",
+            "/api/admin/settings/",
             json_body(json!({"sitename": "Example", "allow_cors": true})),
         ),
     )
@@ -107,7 +136,7 @@ async fn admin_settings_round_trip() {
 
     let (_, body) = call(
         &app,
-        bearer(Method::GET, "/api/admin/settings", Body::empty()),
+        bearer(Method::GET, "/api/admin/settings/", Body::empty()),
     )
     .await;
     assert_eq!(body["data"]["sitename"], "Example");
@@ -115,7 +144,7 @@ async fn admin_settings_round_trip() {
 
     let (status, body) = call(
         &app,
-        bearer(Method::POST, "/api/admin/settings", Body::from("[1,2]")),
+        bearer(Method::POST, "/api/admin/settings/", Body::from("[1,2]")),
     )
     .await;
     assert_eq!(status, StatusCode::BAD_REQUEST);
@@ -149,7 +178,7 @@ async fn admin_settings_apply_provider_and_theme_side_effects() {
         &app,
         bearer(
             Method::POST,
-            "/api/admin/settings",
+            "/api/admin/settings/",
             json_body(json!({
                 "ddns_provider": "cloudflare",
                 "ddns_enabled": true,
@@ -1075,7 +1104,7 @@ async fn admin_user_update_and_favicon() {
     let (status, _) = call(
         &app,
         with_cookie(
-            request(Method::GET, "/api/admin/settings", Body::empty()),
+            request(Method::GET, "/api/admin/settings/", Body::empty()),
             &format!("session_token={session}"),
         ),
     )
@@ -1129,7 +1158,7 @@ async fn admin_router_can_be_merged_without_layers() {
 
     let (status, _) = call(
         &app,
-        bearer(Method::GET, "/api/admin/settings", Body::empty()),
+        bearer(Method::GET, "/api/admin/settings/", Body::empty()),
     )
     .await;
     assert_eq!(status, StatusCode::OK);
