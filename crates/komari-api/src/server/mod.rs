@@ -673,13 +673,21 @@ fn is_backup_upload(path: &str) -> bool {
     path.starts_with("/api/admin/upload/backup")
 }
 
+fn is_theme_upload(path: &str) -> bool {
+    path.starts_with("/api/admin/theme/upload")
+}
+
 async fn body_limit(
     State(limits): State<BodyLimits>,
     mut request: Request,
     next: Next,
 ) -> Response {
-    let limit = if is_backup_upload(request.uri().path()) {
+    let backup_upload = is_backup_upload(request.uri().path());
+    let theme_upload = is_theme_upload(request.uri().path());
+    let limit = if backup_upload {
         limits.backup
+    } else if theme_upload {
+        crate::theme_fetch::THEME_ARCHIVE_LIMIT
     } else {
         limits.normal
     };
@@ -694,9 +702,9 @@ async fn body_limit(
         }
     }
     request.extensions_mut().insert(BufferedBodyLimit(limit));
-    if is_backup_upload(request.uri().path()) {
-        // B06 streams the multipart upload to disk; do not buffer it in the
-        // auth layer (which would allocate the whole body in memory).
+    if backup_upload || theme_upload {
+        // Backup upload streams to disk and theme upload parses the multipart
+        // stream itself; do not buffer either in the auth layer.
         request.extensions_mut().insert(SkipBodyBuffering);
     }
     next.run(request).await
