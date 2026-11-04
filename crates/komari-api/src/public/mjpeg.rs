@@ -9,14 +9,15 @@
 //! Layout, text, colours, progress bars, node ordering and language selection
 //! follow the Go implementation. Node data is read from `clients` plus the
 //! hub's latest report cache (the Rust equivalent of the guest
-//! `common:getNodes` / `common:getNodesLatestStatus` calls); the latest
-//! `records` row is used as a fallback for report fields. Hidden clients are
-//! always filtered, and IPv4/IPv6 follow the guest `send_ip_addr_to_guest`
-//! policy.
+//! `common:getNodes` / `common:getNodesLatestStatus` calls). There is no
+//! `records` fallback, matching Go: a node without a cached report renders
+//! the offline placeholders. Hidden clients are always filtered, and
+//! IPv4/IPv6 follow the guest `send_ip_addr_to_guest` policy.
 
 use std::collections::HashMap;
 use std::io::{Cursor, Read};
 use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex, OnceLock};
 
 use ab_glyph::{Font, FontVec, PxScale, ScaleFont, point};
@@ -26,9 +27,10 @@ use axum::http::HeaderValue;
 use axum::http::header::{CACHE_CONTROL, CONNECTION, CONTENT_TYPE};
 use axum::response::{IntoResponse, Response};
 use bytes::Bytes;
-use chrono::{DateTime, Datelike, Duration as ChronoDuration, Utc};
-use image::codecs::jpeg::JpegEncoder;
+use chrono::{DateTime, Datelike, Duration as ChronoDuration, TimeZone, Utc};
+use chrono_tz::OffsetName;
 use image::{Rgb, RgbImage};
+use jpeg_encoder::{ColorType, Encoder as JpegEncoder, SamplingFactor};
 use komari_config::keys;
 use komari_db::LocalTime;
 use komari_db::models::Client;
@@ -285,14 +287,38 @@ fn frame_bytes(state: &ApiState, request: &FrameRequest) -> Bytes {
 
 fn render_jpeg(state: &ApiState, request: &FrameRequest) -> Option<Vec<u8>> {
     let image = render_frame(state, request);
-    encode_jpeg(&image)
+    let jpeg = encode_jpeg(&image);
+    if jpeg.is_some() {
+        RENDERED_FRAMES.fetch_add(1, Ordering::Relaxed);
+    }
+    jpeg
 }
 
 fn encode_jpeg(image: &RgbImage) -> Option<Vec<u8>> {
     let mut jpeg = Vec::new();
-    let mut encoder = JpegEncoder::new_with_quality(&mut jpeg, JPEG_QUALITY);
-    encoder.encode_image(image).ok()?;
+    let mut encoder = JpegEncoder::new(&mut jpeg, JPEG_QUALITY);
+    // Go's `image/jpeg` encoder always subsamples chroma 4:2:0.
+    encoder.set_sampling_factor(SamplingFactor::R_4_2_0);
+    encoder
+        .encode(
+            image.as_raw(),
+            image.width() as u16,
+            image.height() as u16,
+            ColorType::Rgb,
+        )
+        .ok()?;
     Some(jpeg)
+}
+
+static RENDERED_FRAMES: AtomicU64 = AtomicU64::new(0);
+
+/// Number of successfully encoded MJPEG frames since process start.
+///
+/// Exposed for the disconnect-cancellation integration test; production code
+/// does not need it.
+#[doc(hidden)]
+pub fn rendered_frame_count() -> u64 {
+    RENDERED_FRAMES.load(Ordering::Relaxed)
 }
 
 // ---------------------------------------------------------------------------
@@ -455,14 +481,16 @@ async fn download_font(path: &Path, entry: &Arc<Mutex<FontEntry>>) -> Result<(),
     let mut response = reqwest::get(FONT_URL)
         .await
         .map_err(|error| format!("failed to download font: {error}"))?;
-    if !response.status().is_success() {
+    if response.status() != reqwest::StatusCode::OK {
         return Err(format!(
             "font download failed with status {}",
             response.status().as_u16()
         ));
     }
 
-    let total = response.content_length().unwrap_or(0) as i64;
+    // Go's `resp.ContentLength` is -1 when the length is unknown; keep that
+    // sentinel so the progress frame shows `-1B` like Go instead of `0B`.
+    let total = response.content_length().map_or(-1, |length| length as i64);
     {
         let mut guard = entry
             .lock()
@@ -473,7 +501,9 @@ async fn download_font(path: &Path, entry: &Arc<Mutex<FontEntry>>) -> Result<(),
         });
     }
 
-    let mut bytes = Vec::with_capacity(total.max(0) as usize);
+    // Never trust a remote Content-Length for an unbounded allocation.
+    const MAX_PREALLOC: i64 = 32 * 1024 * 1024;
+    let mut bytes = Vec::with_capacity(total.clamp(0, MAX_PREALLOC) as usize);
     let mut last_update = std::time::Instant::now();
     let mut last_bytes = 0i64;
     while let Some(chunk) = response
@@ -634,23 +664,6 @@ impl NodeStatus {
             net_out: report.network.up,
         }
     }
-
-    fn from_record(record: &komari_db::models::Record, online: bool) -> Self {
-        Self {
-            online,
-            uptime: 0,
-            load: record.load,
-            cpu: record.cpu,
-            ram: record.ram,
-            ram_total: record.ram_total,
-            disk: record.disk,
-            disk_total: record.disk_total,
-            net_total_up: record.net_total_up,
-            net_total_down: record.net_total_down,
-            net_in: record.net_in,
-            net_out: record.net_out,
-        }
-    }
 }
 
 fn load_table_data(state: &ApiState) -> Result<TableData, String> {
@@ -665,11 +678,12 @@ fn load_table_data(state: &ApiState) -> Result<TableData, String> {
         .flatten()
         .unwrap_or(false);
 
-    let clients = state
-        .db
-        .clients()
-        .list()
-        .map_err(|error| format!("Failed to retrieve client information: {error}"))?;
+    let clients = state.db.clients().list().map_err(|error| {
+        // Go's guest RPC surfaces the fixed `common:getNodes` error message;
+        // keep SQLite details in the log rather than in the rendered frame.
+        tracing::error!(%error, "failed to list clients for MJPEG");
+        "Failed to get client info".to_owned()
+    })?;
 
     let mut nodes = Vec::new();
     for mut client in clients {
@@ -694,13 +708,17 @@ fn load_table_data(state: &ApiState) -> Result<TableData, String> {
     });
 
     let statuses = fetch_statuses(state, &nodes);
+    // Go's startup `GetManyAs[Legacy]` persists the `Komari` default, so the
+    // MJPEG title reads the stored value (writing it when absent) instead of
+    // inventing a per-request default.
     let site_name = state
         .db
         .config()
-        .get_as::<String>(keys::SITENAME_KEY)
-        .ok()
-        .flatten()
-        .unwrap_or_else(|| "Komari Monitor".to_owned());
+        .get_as_or(keys::SITENAME_KEY, "Komari".to_owned())
+        .unwrap_or_else(|error| {
+            tracing::warn!(%error, "failed to read MJPEG sitename; using default");
+            "Komari".to_owned()
+        });
 
     Ok(TableData {
         nodes,
@@ -710,9 +728,9 @@ fn load_table_data(state: &ApiState) -> Result<TableData, String> {
 }
 
 fn fetch_statuses(state: &ApiState, nodes: &[NodeInfo]) -> HashMap<String, NodeStatus> {
-    // `common:getNodesLatestStatus` reads the hub's latest report cache and
-    // the online UUID set. The `records` row is only a fallback for the same
-    // fields; it never makes an offline node look online.
+    // `common:getNodesLatestStatus` only reads the hub's latest report cache
+    // and the online UUID set. Go has no `records` fallback, so an offline
+    // node without a cached report is rendered with the "-" placeholders.
     let latest = state.hub.latest_reports();
     let mut statuses = HashMap::new();
     for node in nodes {
@@ -721,8 +739,6 @@ fn fetch_statuses(state: &ApiState, nodes: &[NodeInfo]) -> HashMap<String, NodeS
                 node.uuid.clone(),
                 NodeStatus::from_report(report, state.hub.is_online(&node.uuid)),
             );
-        } else if let Ok(Some(record)) = state.db.records().latest(&node.uuid) {
-            statuses.insert(node.uuid.clone(), NodeStatus::from_record(&record, false));
         }
     }
     statuses
@@ -1340,7 +1356,8 @@ fn render_download_progress(progress: DownloadProgress) -> RgbImage {
     let bar_height = 20;
     let bar_x = (width - bar_width) / 2;
     let bar_y = y + 20;
-    fill_rect(
+    // Go `drawRect` draws a 1 px border and leaves the interior white.
+    draw_rect(
         &mut image,
         bar_x as i32,
         bar_y,
@@ -1494,11 +1511,6 @@ fn draw_centered_ttf_text(
     );
 }
 
-/// `basicfont.Face7x13` equivalent: 5x7 glyphs in a 7 px cell, baseline 11 px
-/// below the top of the cell.
-const BASIC_ADVANCE: i32 = 7;
-const BASIC_ASCENT: i32 = 11;
-
 fn basic_text_width(text: &str) -> i32 {
     text.chars().count() as i32 * BASIC_ADVANCE
 }
@@ -1507,11 +1519,11 @@ fn draw_basic_text(image: &mut RgbImage, x: i32, baseline_y: i32, text: &str, co
     let top = baseline_y - BASIC_ASCENT;
     let mut cursor = x;
     for character in text.chars() {
-        let rows = glyph_rows(character.to_ascii_uppercase());
+        let rows = basic_glyph(character);
         for (row, bits) in rows.iter().enumerate() {
-            for (column, bit) in bits.chars().enumerate() {
-                if bit == '#' {
-                    fill_rect(image, cursor + column as i32, top + row as i32, 1, 1, color);
+            for column in 0..BASIC_WIDTH {
+                if bits & (1 << column) != 0 {
+                    fill_rect(image, cursor + column, top + row as i32, 1, 1, color);
                 }
             }
         }
@@ -1621,6 +1633,29 @@ fn fill_rect(image: &mut RgbImage, x: i32, y: i32, width: u32, height: u32, colo
         for px in x0..x1 {
             image.put_pixel(px, py, color);
         }
+    }
+}
+
+/// Go `drawRect`: a 1 px outline, with the interior left untouched.
+fn draw_rect(image: &mut RgbImage, x: i32, y: i32, width: u32, height: u32, color: Rgb<u8>) {
+    if width == 0 || height == 0 {
+        return;
+    }
+    let (image_width, image_height) = image.dimensions();
+    let x0 = x.max(0) as u32;
+    let y0 = y.max(0) as u32;
+    let x1 = (x as i64 + width as i64).clamp(0, image_width as i64) as u32;
+    let y1 = (y as i64 + height as i64).clamp(0, image_height as i64) as u32;
+    if x0 >= x1 || y0 >= y1 {
+        return;
+    }
+    for px in x0..x1 {
+        image.put_pixel(px, y0, color);
+        image.put_pixel(px, y1 - 1, color);
+    }
+    for py in y0..y1 {
+        image.put_pixel(x0, py, color);
+        image.put_pixel(x1 - 1, py, color);
     }
 }
 
@@ -1792,6 +1827,10 @@ fn format_time_at(now: DateTime<Utc>, tz_offset: Option<i32>) -> String {
             format!("GMT{offset}")
         };
         format!("{} {}", shifted.format("%Y-%m-%d %H:%M:%S"), timezone)
+    } else if let Some(timezone) = system_timezone() {
+        // Go `t.Format("MST")` returns the TZDB abbreviation (CST, UTC, …),
+        // not a numeric `+08:00` offset.
+        format_time_in_zone(now, timezone)
     } else {
         let local = now.with_timezone(&chrono::Local);
         format!(
@@ -1802,151 +1841,328 @@ fn format_time_at(now: DateTime<Utc>, tz_offset: Option<i32>) -> String {
     }
 }
 
-// ---------------------------------------------------------------------------
-// Built-in 5x7 bitmap font (basicfont fallback)
-// ---------------------------------------------------------------------------
+fn system_timezone() -> Option<chrono_tz::Tz> {
+    iana_time_zone::get_timezone()
+        .ok()
+        .and_then(|name| name.parse::<chrono_tz::Tz>().ok())
+}
 
-fn glyph_rows(character: char) -> [&'static str; 7] {
-    match character {
-        'A' => [
-            ".###.", "#...#", "#...#", "#####", "#...#", "#...#", "#...#",
-        ],
-        'B' => [
-            "####.", "#...#", "#...#", "####.", "#...#", "#...#", "####.",
-        ],
-        'C' => [
-            ".###.", "#...#", "#....", "#....", "#....", "#...#", ".###.",
-        ],
-        'D' => [
-            "####.", "#...#", "#...#", "#...#", "#...#", "#...#", "####.",
-        ],
-        'E' => [
-            "#####", "#....", "#....", "####.", "#....", "#....", "#####",
-        ],
-        'F' => [
-            "#####", "#....", "#....", "####.", "#....", "#....", "#....",
-        ],
-        'G' => [
-            ".###.", "#...#", "#....", "#.###", "#...#", "#...#", ".###.",
-        ],
-        'H' => [
-            "#...#", "#...#", "#...#", "#####", "#...#", "#...#", "#...#",
-        ],
-        'I' => [
-            "#####", "..#..", "..#..", "..#..", "..#..", "..#..", "#####",
-        ],
-        'J' => [
-            "..###", "...#.", "...#.", "...#.", "...#.", "#..#.", ".##..",
-        ],
-        'K' => [
-            "#...#", "#..#.", "#.#..", "##...", "#.#..", "#..#.", "#...#",
-        ],
-        'L' => [
-            "#....", "#....", "#....", "#....", "#....", "#....", "#####",
-        ],
-        'M' => [
-            "#...#", "##.##", "#.#.#", "#.#.#", "#...#", "#...#", "#...#",
-        ],
-        'N' => [
-            "#...#", "##..#", "#.#.#", "#..##", "#...#", "#...#", "#...#",
-        ],
-        'O' => [
-            ".###.", "#...#", "#...#", "#...#", "#...#", "#...#", ".###.",
-        ],
-        'P' => [
-            "####.", "#...#", "#...#", "####.", "#....", "#....", "#....",
-        ],
-        'Q' => [
-            ".###.", "#...#", "#...#", "#...#", "#.#.#", "#..#.", ".##.#",
-        ],
-        'R' => [
-            "####.", "#...#", "#...#", "####.", "#.#..", "#..#.", "#...#",
-        ],
-        'S' => [
-            ".####", "#....", "#....", ".###.", "....#", "....#", "####.",
-        ],
-        'T' => [
-            "#####", "..#..", "..#..", "..#..", "..#..", "..#..", "..#..",
-        ],
-        'U' => [
-            "#...#", "#...#", "#...#", "#...#", "#...#", "#...#", ".###.",
-        ],
-        'V' => [
-            "#...#", "#...#", "#...#", "#...#", "#...#", ".#.#.", "..#..",
-        ],
-        'W' => [
-            "#...#", "#...#", "#...#", "#.#.#", "#.#.#", "##.##", "#...#",
-        ],
-        'X' => [
-            "#...#", "#...#", ".#.#.", "..#..", ".#.#.", "#...#", "#...#",
-        ],
-        'Y' => [
-            "#...#", "#...#", ".#.#.", "..#..", "..#..", "..#..", "..#..",
-        ],
-        'Z' => [
-            "#####", "....#", "...#.", "..#..", ".#...", "#....", "#####",
-        ],
-        '0' => [
-            ".###.", "#...#", "#..##", "#.#.#", "##..#", "#...#", ".###.",
-        ],
-        '1' => [
-            "..#..", ".##..", "..#..", "..#..", "..#..", "..#..", ".###.",
-        ],
-        '2' => [
-            ".###.", "#...#", "....#", "...#.", "..#..", ".#...", "#####",
-        ],
-        '3' => [
-            "####.", "....#", "....#", ".###.", "....#", "....#", "####.",
-        ],
-        '4' => [
-            "...#.", "..##.", ".#.#.", "#..#.", "#####", "...#.", "...#.",
-        ],
-        '5' => [
-            "#####", "#....", "####.", "....#", "....#", "#...#", ".###.",
-        ],
-        '6' => [
-            ".###.", "#....", "#....", "####.", "#...#", "#...#", ".###.",
-        ],
-        '7' => [
-            "#####", "....#", "...#.", "..#..", ".#...", ".#...", ".#...",
-        ],
-        '8' => [
-            ".###.", "#...#", "#...#", ".###.", "#...#", "#...#", ".###.",
-        ],
-        '9' => [
-            ".###.", "#...#", "#...#", ".####", "....#", "....#", ".###.",
-        ],
-        ' ' => [
-            ".....", ".....", ".....", ".....", ".....", ".....", ".....",
-        ],
-        '.' => [
-            ".....", ".....", ".....", ".....", ".....", "..##.", "..##.",
-        ],
-        ':' => [
-            ".....", "..##.", "..##.", ".....", "..##.", "..##.", ".....",
-        ],
-        '-' => [
-            ".....", ".....", ".....", "#####", ".....", ".....", ".....",
-        ],
-        '/' => [
-            "....#", "...#.", "...#.", "..#..", ".#...", ".#...", "#....",
-        ],
-        '%' => [
-            "##..#", "##.#.", "..#..", ".#...", "#.##.", "..##.", ".....",
-        ],
-        '+' => [
-            ".....", "..#..", "..#..", "#####", "..#..", "..#..", ".....",
-        ],
-        '↑' => [
-            ".....", "..#..", ".###.", "#.#.#", "..#..", "..#..", ".....",
-        ],
-        '↓' => [
-            ".....", "..#..", "..#..", "#.#.#", ".###.", "..#..", ".....",
-        ],
-        _ => [
-            ".....", ".....", ".....", ".....", ".....", ".....", ".....",
-        ],
-    }
+fn format_time_in_zone(now: DateTime<Utc>, timezone: chrono_tz::Tz) -> String {
+    let local = now.with_timezone(&timezone);
+    let offset = timezone.offset_from_utc_datetime(&now.naive_utc());
+    let abbreviation = offset.abbreviation().unwrap_or("UTC");
+    format!("{} {}", local.format("%Y-%m-%d %H:%M:%S"), abbreviation)
+}
+
+// ---------------------------------------------------------------------------
+// Built-in basicfont.Face7x13 data (X11 misc-fixed, public domain)
+// ---------------------------------------------------------------------------
+//
+// Copied from golang.org/x/image/font/basicfont: 96 glyphs (ASCII 0x20-0x7e
+// plus U+FFFD), each 6x13. A set bit is a filled pixel, bit 0 is the leftmost
+// column. Advance is 7 px, ascent 11 px and descent 2 px.
+
+const BASIC_FONT: [[u8; 13]; 96] = [
+    [
+        0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+    ],
+    [
+        0x00, 0x00, 0x08, 0x08, 0x08, 0x08, 0x08, 0x08, 0x08, 0x00, 0x08, 0x00, 0x00,
+    ],
+    [
+        0x00, 0x00, 0x14, 0x14, 0x14, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+    ],
+    [
+        0x00, 0x00, 0x00, 0x14, 0x14, 0x3e, 0x14, 0x3e, 0x14, 0x14, 0x00, 0x00, 0x00,
+    ],
+    [
+        0x00, 0x00, 0x00, 0x08, 0x3c, 0x0a, 0x1c, 0x28, 0x1e, 0x08, 0x00, 0x00, 0x00,
+    ],
+    [
+        0x00, 0x00, 0x22, 0x25, 0x12, 0x08, 0x08, 0x04, 0x12, 0x29, 0x11, 0x00, 0x00,
+    ],
+    [
+        0x00, 0x00, 0x00, 0x00, 0x06, 0x09, 0x09, 0x06, 0x29, 0x11, 0x2e, 0x00, 0x00,
+    ],
+    [
+        0x00, 0x00, 0x08, 0x08, 0x08, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+    ],
+    [
+        0x00, 0x00, 0x10, 0x08, 0x08, 0x04, 0x04, 0x04, 0x08, 0x08, 0x10, 0x00, 0x00,
+    ],
+    [
+        0x00, 0x00, 0x04, 0x08, 0x08, 0x10, 0x10, 0x10, 0x08, 0x08, 0x04, 0x00, 0x00,
+    ],
+    [
+        0x00, 0x00, 0x00, 0x00, 0x12, 0x0c, 0x3f, 0x0c, 0x12, 0x00, 0x00, 0x00, 0x00,
+    ],
+    [
+        0x00, 0x00, 0x00, 0x00, 0x08, 0x08, 0x3e, 0x08, 0x08, 0x00, 0x00, 0x00, 0x00,
+    ],
+    [
+        0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x1c, 0x0c, 0x02, 0x00,
+    ],
+    [
+        0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x3e, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+    ],
+    [
+        0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x08, 0x1c, 0x08, 0x00,
+    ],
+    [
+        0x00, 0x00, 0x20, 0x20, 0x10, 0x10, 0x08, 0x04, 0x04, 0x02, 0x02, 0x00, 0x00,
+    ],
+    [
+        0x00, 0x00, 0x0c, 0x12, 0x21, 0x21, 0x21, 0x21, 0x21, 0x12, 0x0c, 0x00, 0x00,
+    ],
+    [
+        0x00, 0x00, 0x08, 0x0c, 0x0a, 0x08, 0x08, 0x08, 0x08, 0x08, 0x3e, 0x00, 0x00,
+    ],
+    [
+        0x00, 0x00, 0x1e, 0x21, 0x21, 0x20, 0x10, 0x0c, 0x02, 0x01, 0x3f, 0x00, 0x00,
+    ],
+    [
+        0x00, 0x00, 0x3f, 0x20, 0x10, 0x08, 0x1c, 0x20, 0x20, 0x21, 0x1e, 0x00, 0x00,
+    ],
+    [
+        0x00, 0x00, 0x10, 0x18, 0x14, 0x12, 0x11, 0x11, 0x3f, 0x10, 0x10, 0x00, 0x00,
+    ],
+    [
+        0x00, 0x00, 0x3f, 0x01, 0x01, 0x1d, 0x23, 0x20, 0x20, 0x21, 0x1e, 0x00, 0x00,
+    ],
+    [
+        0x00, 0x00, 0x1c, 0x02, 0x01, 0x01, 0x1d, 0x23, 0x21, 0x21, 0x1e, 0x00, 0x00,
+    ],
+    [
+        0x00, 0x00, 0x3f, 0x20, 0x10, 0x08, 0x08, 0x04, 0x04, 0x02, 0x02, 0x00, 0x00,
+    ],
+    [
+        0x00, 0x00, 0x1e, 0x21, 0x21, 0x21, 0x1e, 0x21, 0x21, 0x21, 0x1e, 0x00, 0x00,
+    ],
+    [
+        0x00, 0x00, 0x1e, 0x21, 0x21, 0x31, 0x2e, 0x20, 0x20, 0x10, 0x0e, 0x00, 0x00,
+    ],
+    [
+        0x00, 0x00, 0x00, 0x00, 0x08, 0x1c, 0x08, 0x00, 0x00, 0x08, 0x1c, 0x08, 0x00,
+    ],
+    [
+        0x00, 0x00, 0x00, 0x00, 0x08, 0x1c, 0x08, 0x00, 0x00, 0x1c, 0x0c, 0x02, 0x00,
+    ],
+    [
+        0x00, 0x00, 0x20, 0x10, 0x08, 0x04, 0x02, 0x04, 0x08, 0x10, 0x20, 0x00, 0x00,
+    ],
+    [
+        0x00, 0x00, 0x00, 0x00, 0x00, 0x3f, 0x00, 0x00, 0x3f, 0x00, 0x00, 0x00, 0x00,
+    ],
+    [
+        0x00, 0x00, 0x02, 0x04, 0x08, 0x10, 0x20, 0x10, 0x08, 0x04, 0x02, 0x00, 0x00,
+    ],
+    [
+        0x00, 0x00, 0x1e, 0x21, 0x21, 0x20, 0x10, 0x08, 0x08, 0x00, 0x08, 0x00, 0x00,
+    ],
+    [
+        0x00, 0x00, 0x1e, 0x21, 0x21, 0x39, 0x25, 0x35, 0x29, 0x01, 0x1e, 0x00, 0x00,
+    ],
+    [
+        0x00, 0x00, 0x0c, 0x12, 0x21, 0x21, 0x21, 0x3f, 0x21, 0x21, 0x21, 0x00, 0x00,
+    ],
+    [
+        0x00, 0x00, 0x1f, 0x22, 0x22, 0x22, 0x1e, 0x22, 0x22, 0x22, 0x1f, 0x00, 0x00,
+    ],
+    [
+        0x00, 0x00, 0x1e, 0x21, 0x01, 0x01, 0x01, 0x01, 0x01, 0x21, 0x1e, 0x00, 0x00,
+    ],
+    [
+        0x00, 0x00, 0x1f, 0x22, 0x22, 0x22, 0x22, 0x22, 0x22, 0x22, 0x1f, 0x00, 0x00,
+    ],
+    [
+        0x00, 0x00, 0x3f, 0x01, 0x01, 0x01, 0x0f, 0x01, 0x01, 0x01, 0x3f, 0x00, 0x00,
+    ],
+    [
+        0x00, 0x00, 0x3f, 0x01, 0x01, 0x01, 0x0f, 0x01, 0x01, 0x01, 0x01, 0x00, 0x00,
+    ],
+    [
+        0x00, 0x00, 0x1e, 0x21, 0x01, 0x01, 0x01, 0x39, 0x21, 0x31, 0x2e, 0x00, 0x00,
+    ],
+    [
+        0x00, 0x00, 0x21, 0x21, 0x21, 0x21, 0x3f, 0x21, 0x21, 0x21, 0x21, 0x00, 0x00,
+    ],
+    [
+        0x00, 0x00, 0x3e, 0x08, 0x08, 0x08, 0x08, 0x08, 0x08, 0x08, 0x3e, 0x00, 0x00,
+    ],
+    [
+        0x00, 0x00, 0x38, 0x10, 0x10, 0x10, 0x10, 0x10, 0x10, 0x11, 0x0e, 0x00, 0x00,
+    ],
+    [
+        0x00, 0x00, 0x21, 0x11, 0x09, 0x05, 0x03, 0x05, 0x09, 0x11, 0x21, 0x00, 0x00,
+    ],
+    [
+        0x00, 0x00, 0x01, 0x01, 0x01, 0x01, 0x01, 0x01, 0x01, 0x01, 0x3f, 0x00, 0x00,
+    ],
+    [
+        0x00, 0x00, 0x21, 0x33, 0x33, 0x2d, 0x2d, 0x21, 0x21, 0x21, 0x21, 0x00, 0x00,
+    ],
+    [
+        0x00, 0x00, 0x21, 0x21, 0x23, 0x25, 0x29, 0x31, 0x21, 0x21, 0x21, 0x00, 0x00,
+    ],
+    [
+        0x00, 0x00, 0x1e, 0x21, 0x21, 0x21, 0x21, 0x21, 0x21, 0x21, 0x1e, 0x00, 0x00,
+    ],
+    [
+        0x00, 0x00, 0x1f, 0x21, 0x21, 0x21, 0x1f, 0x01, 0x01, 0x01, 0x01, 0x00, 0x00,
+    ],
+    [
+        0x00, 0x00, 0x1e, 0x21, 0x21, 0x21, 0x21, 0x21, 0x25, 0x29, 0x1e, 0x20, 0x00,
+    ],
+    [
+        0x00, 0x00, 0x1f, 0x21, 0x21, 0x21, 0x1f, 0x05, 0x09, 0x11, 0x21, 0x00, 0x00,
+    ],
+    [
+        0x00, 0x00, 0x1e, 0x21, 0x01, 0x01, 0x1e, 0x20, 0x20, 0x21, 0x1e, 0x00, 0x00,
+    ],
+    [
+        0x00, 0x00, 0x3e, 0x08, 0x08, 0x08, 0x08, 0x08, 0x08, 0x08, 0x08, 0x00, 0x00,
+    ],
+    [
+        0x00, 0x00, 0x21, 0x21, 0x21, 0x21, 0x21, 0x21, 0x21, 0x21, 0x1e, 0x00, 0x00,
+    ],
+    [
+        0x00, 0x00, 0x21, 0x21, 0x21, 0x12, 0x12, 0x12, 0x0c, 0x0c, 0x0c, 0x00, 0x00,
+    ],
+    [
+        0x00, 0x00, 0x21, 0x21, 0x21, 0x21, 0x2d, 0x2d, 0x33, 0x33, 0x21, 0x00, 0x00,
+    ],
+    [
+        0x00, 0x00, 0x21, 0x21, 0x12, 0x12, 0x0c, 0x12, 0x12, 0x21, 0x21, 0x00, 0x00,
+    ],
+    [
+        0x00, 0x00, 0x22, 0x22, 0x14, 0x14, 0x08, 0x08, 0x08, 0x08, 0x08, 0x00, 0x00,
+    ],
+    [
+        0x00, 0x00, 0x3f, 0x20, 0x10, 0x08, 0x0c, 0x04, 0x02, 0x01, 0x3f, 0x00, 0x00,
+    ],
+    [
+        0x00, 0x1e, 0x02, 0x02, 0x02, 0x02, 0x02, 0x02, 0x02, 0x02, 0x02, 0x1e, 0x00,
+    ],
+    [
+        0x00, 0x00, 0x02, 0x02, 0x04, 0x04, 0x08, 0x10, 0x10, 0x20, 0x20, 0x00, 0x00,
+    ],
+    [
+        0x00, 0x1e, 0x10, 0x10, 0x10, 0x10, 0x10, 0x10, 0x10, 0x10, 0x10, 0x1e, 0x00,
+    ],
+    [
+        0x00, 0x00, 0x08, 0x14, 0x22, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+    ],
+    [
+        0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x3f, 0x00,
+    ],
+    [
+        0x00, 0x04, 0x08, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+    ],
+    [
+        0x00, 0x00, 0x00, 0x00, 0x00, 0x1e, 0x20, 0x3e, 0x21, 0x31, 0x2e, 0x00, 0x00,
+    ],
+    [
+        0x00, 0x00, 0x01, 0x01, 0x01, 0x1d, 0x23, 0x21, 0x21, 0x23, 0x1d, 0x00, 0x00,
+    ],
+    [
+        0x00, 0x00, 0x00, 0x00, 0x00, 0x1e, 0x21, 0x01, 0x01, 0x21, 0x1e, 0x00, 0x00,
+    ],
+    [
+        0x00, 0x00, 0x20, 0x20, 0x20, 0x2e, 0x31, 0x21, 0x21, 0x31, 0x2e, 0x00, 0x00,
+    ],
+    [
+        0x00, 0x00, 0x00, 0x00, 0x00, 0x1e, 0x21, 0x3f, 0x01, 0x21, 0x1e, 0x00, 0x00,
+    ],
+    [
+        0x00, 0x00, 0x1c, 0x22, 0x02, 0x02, 0x0f, 0x02, 0x02, 0x02, 0x02, 0x00, 0x00,
+    ],
+    [
+        0x00, 0x00, 0x00, 0x00, 0x00, 0x2e, 0x11, 0x11, 0x0e, 0x01, 0x1e, 0x21, 0x1e,
+    ],
+    [
+        0x00, 0x00, 0x01, 0x01, 0x01, 0x1d, 0x23, 0x21, 0x21, 0x21, 0x21, 0x00, 0x00,
+    ],
+    [
+        0x00, 0x00, 0x00, 0x08, 0x00, 0x0c, 0x08, 0x08, 0x08, 0x08, 0x3e, 0x00, 0x00,
+    ],
+    [
+        0x00, 0x00, 0x00, 0x20, 0x00, 0x30, 0x20, 0x20, 0x20, 0x20, 0x22, 0x22, 0x1c,
+    ],
+    [
+        0x00, 0x00, 0x01, 0x01, 0x01, 0x11, 0x09, 0x07, 0x09, 0x11, 0x21, 0x00, 0x00,
+    ],
+    [
+        0x00, 0x00, 0x0c, 0x08, 0x08, 0x08, 0x08, 0x08, 0x08, 0x08, 0x3e, 0x00, 0x00,
+    ],
+    [
+        0x00, 0x00, 0x00, 0x00, 0x00, 0x16, 0x2a, 0x2a, 0x2a, 0x2a, 0x22, 0x00, 0x00,
+    ],
+    [
+        0x00, 0x00, 0x00, 0x00, 0x00, 0x1d, 0x23, 0x21, 0x21, 0x21, 0x21, 0x00, 0x00,
+    ],
+    [
+        0x00, 0x00, 0x00, 0x00, 0x00, 0x1e, 0x21, 0x21, 0x21, 0x21, 0x1e, 0x00, 0x00,
+    ],
+    [
+        0x00, 0x00, 0x00, 0x00, 0x00, 0x1d, 0x23, 0x21, 0x23, 0x1d, 0x01, 0x01, 0x01,
+    ],
+    [
+        0x00, 0x00, 0x00, 0x00, 0x00, 0x2e, 0x31, 0x21, 0x31, 0x2e, 0x20, 0x20, 0x20,
+    ],
+    [
+        0x00, 0x00, 0x00, 0x00, 0x00, 0x1d, 0x22, 0x02, 0x02, 0x02, 0x02, 0x00, 0x00,
+    ],
+    [
+        0x00, 0x00, 0x00, 0x00, 0x00, 0x1e, 0x21, 0x06, 0x18, 0x21, 0x1e, 0x00, 0x00,
+    ],
+    [
+        0x00, 0x00, 0x00, 0x02, 0x02, 0x0f, 0x02, 0x02, 0x02, 0x22, 0x1c, 0x00, 0x00,
+    ],
+    [
+        0x00, 0x00, 0x00, 0x00, 0x00, 0x21, 0x21, 0x21, 0x21, 0x31, 0x2e, 0x00, 0x00,
+    ],
+    [
+        0x00, 0x00, 0x00, 0x00, 0x00, 0x22, 0x22, 0x22, 0x14, 0x14, 0x08, 0x00, 0x00,
+    ],
+    [
+        0x00, 0x00, 0x00, 0x00, 0x00, 0x22, 0x22, 0x2a, 0x2a, 0x2a, 0x14, 0x00, 0x00,
+    ],
+    [
+        0x00, 0x00, 0x00, 0x00, 0x00, 0x21, 0x12, 0x0c, 0x0c, 0x12, 0x21, 0x00, 0x00,
+    ],
+    [
+        0x00, 0x00, 0x00, 0x00, 0x00, 0x21, 0x21, 0x21, 0x31, 0x2e, 0x20, 0x21, 0x1e,
+    ],
+    [
+        0x00, 0x00, 0x00, 0x00, 0x00, 0x3f, 0x10, 0x08, 0x04, 0x02, 0x3f, 0x00, 0x00,
+    ],
+    [
+        0x00, 0x38, 0x04, 0x04, 0x04, 0x08, 0x06, 0x08, 0x04, 0x04, 0x04, 0x38, 0x00,
+    ],
+    [
+        0x00, 0x00, 0x08, 0x08, 0x08, 0x08, 0x08, 0x08, 0x08, 0x08, 0x08, 0x00, 0x00,
+    ],
+    [
+        0x00, 0x0e, 0x10, 0x10, 0x10, 0x08, 0x30, 0x08, 0x10, 0x10, 0x10, 0x0e, 0x00,
+    ],
+    [
+        0x00, 0x00, 0x24, 0x2a, 0x12, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+    ],
+    [
+        0x00, 0x00, 0x1c, 0x36, 0x2a, 0x2e, 0x36, 0x36, 0x3e, 0x36, 0x1c, 0x00, 0x00,
+    ],
+];
+
+const BASIC_WIDTH: i32 = 6;
+const BASIC_ADVANCE: i32 = 7;
+const BASIC_ASCENT: i32 = 11;
+
+fn basic_glyph(character: char) -> &'static [u8; 13] {
+    let index = match character {
+        '\u{20}'..='\u{7e}' => character as usize - 0x20,
+        _ => 95,
+    };
+    &BASIC_FONT[index]
 }
 
 #[cfg(test)]
@@ -1998,6 +2214,41 @@ mod tests {
 
     fn count_color(image: &RgbImage, color: Rgb<u8>) -> usize {
         image.pixels().filter(|pixel| **pixel == color).count()
+    }
+
+    fn non_white_count(image: &RgbImage) -> usize {
+        image.pixels().filter(|pixel| **pixel != WHITE).count()
+    }
+
+    fn non_white_in_rect(image: &RgbImage, x: u32, y: u32, width: u32, height: u32) -> usize {
+        let mut count = 0;
+        for py in y..(y + height).min(image.height()) {
+            for px in x..(x + width).min(image.width()) {
+                if *image.get_pixel(px, py) != WHITE {
+                    count += 1;
+                }
+            }
+        }
+        count
+    }
+
+    fn fixture_font() -> LoadedFont {
+        let data = include_bytes!("../../tests/fixtures/misans-subset.ttf").to_vec();
+        LoadedFont {
+            font: FontVec::try_from_vec(data).expect("parse fixture font"),
+        }
+    }
+
+    fn jpeg_luma_sampling(jpeg: &[u8]) -> (u8, u8) {
+        for index in 0..jpeg.len().saturating_sub(13) {
+            if jpeg[index] == 0xFF && jpeg[index + 1] == 0xC0 {
+                // SOF0: length(2), precision(1), height(2), width(2),
+                // components(1), component id(1), sampling factors(1).
+                let sampling = jpeg[index + 11];
+                return (sampling >> 4, sampling & 0x0F);
+            }
+        }
+        panic!("JPEG has no SOF0 marker");
     }
 
     #[test]
@@ -2117,6 +2368,16 @@ mod tests {
         assert_eq!(online.dimensions(), (IMAGE_WIDTH, 252));
         assert!(count_color(&online, ONLINE_COLOR) > 0);
         assert_eq!(count_color(&online, OFFLINE_COLOR), 0);
+        assert!(non_white_count(&online) > 1000, "online table is not blank");
+        // The header starts at y=80 and every column has visible text.
+        for x in [
+            25, 155, 225, 280, 340, 430, 480, 620, 760, 830, 900, 970, 1080,
+        ] {
+            assert!(
+                non_white_in_rect(&online, x, 80, 60, 36) > 0,
+                "header column at x={x} is blank"
+            );
+        }
 
         statuses.insert(
             "online".to_owned(),
@@ -2128,6 +2389,10 @@ mod tests {
         let offline = render_status_table_basic(&nodes, &statuses, "Komari", &request);
         assert!(count_color(&offline, OFFLINE_COLOR) > 0);
         assert_eq!(count_color(&offline, ONLINE_COLOR), 0);
+        assert!(
+            non_white_count(&offline) > 1000,
+            "offline table is not blank"
+        );
     }
 
     #[test]
@@ -2148,11 +2413,23 @@ mod tests {
 
         let image = render_status_table_basic(&nodes, &statuses, "Komari", &request);
         // The offline path draws six "-" placeholders in gray and never fills
-        // the CPU/RAM/disk bars with a status colour.
-        assert!(count_color(&image, GRAY_150) > 0);
+        // the CPU/RAM/disk bars with a status colour. Basic table: header ends
+        // at y=116, baseline 138, so the '-' row (basicfont row 6) is y=133.
+        let dash_columns = [390, 440, 560, 670, 740, 810];
+        for x in dash_columns {
+            for offset in 1..=5 {
+                assert_eq!(
+                    image.get_pixel(x + offset, 133),
+                    &GRAY_150,
+                    "offline dash at x={} offset={offset}",
+                    x + offset
+                );
+            }
+        }
         assert_eq!(count_color(&image, BAR_GREEN), 0);
         assert_eq!(count_color(&image, BAR_YELLOW), 0);
         assert_eq!(count_color(&image, BAR_RED), 0);
+        assert!(non_white_count(&image) > 1000, "table is not blank");
     }
 
     #[test]
@@ -2219,9 +2496,33 @@ mod tests {
         let now = Utc.with_ymd_and_hms(2026, 1, 1, 0, 0, 0).unwrap();
         assert_eq!(format_time_at(now, Some(8)), "2026-01-01 08:00:00 GMT+8");
         assert_eq!(format_time_at(now, Some(-5)), "2025-12-31 19:00:00 GMT-5");
-        let local = format_time_at(now, None);
-        assert!(local.contains(' '));
-        assert!(!local.trim().is_empty());
+    }
+
+    #[test]
+    fn time_formatting_uses_tzdb_abbreviations() {
+        let now = Utc.with_ymd_and_hms(2026, 1, 1, 0, 0, 0).unwrap();
+        let shanghai: chrono_tz::Tz = "Asia/Shanghai".parse().expect("Shanghai");
+        let new_york: chrono_tz::Tz = "America/New_York".parse().expect("New York");
+        let utc: chrono_tz::Tz = "UTC".parse().expect("UTC");
+        assert_eq!(
+            format_time_in_zone(now, shanghai),
+            "2026-01-01 08:00:00 CST"
+        );
+        assert_eq!(
+            format_time_in_zone(now, new_york),
+            "2025-12-31 19:00:00 EST"
+        );
+        assert_eq!(format_time_in_zone(now, utc), "2026-01-01 00:00:00 UTC");
+        // The system-zone path must not fall back to a numeric +08:00 suffix
+        // when iana-time-zone can resolve an abbreviation.
+        if system_timezone().is_some() {
+            let formatted = format_time_at(now, None);
+            let suffix = formatted.rsplit(' ').next().expect("suffix");
+            assert!(
+                !suffix.contains(':') && !suffix.is_empty(),
+                "unexpected numeric timezone suffix in {formatted}"
+            );
+        }
     }
 
     #[test]
@@ -2405,7 +2706,7 @@ mod tests {
     }
 
     #[test]
-    fn client_status_fallback_never_marks_node_online() {
+    fn records_rows_are_not_used_without_a_hub_report() {
         let state = test_state();
         let client = state
             .db
@@ -2420,10 +2721,104 @@ mod tests {
 
         let nodes = vec![NodeInfo::from_client(&client)];
         let statuses = fetch_statuses(&state, &nodes);
-        let status = statuses.get(&client.uuid).expect("fallback status");
-        assert!(!status.online);
-        assert_eq!(status.cpu, 12.5);
-        assert_eq!(status.ram_total, 256);
+        // Go's `common:getNodesLatestStatus` has no database fallback; the
+        // node is rendered as offline with "-" placeholders.
+        assert!(!statuses.contains_key(&client.uuid));
+    }
+
+    #[test]
+    fn basic_font_preserves_case_and_dollar() {
+        assert_ne!(basic_glyph('A'), basic_glyph('a'));
+        assert_ne!(basic_glyph('5'), basic_glyph('S'));
+        assert!(basic_glyph('$').iter().any(|bits| *bits != 0));
+        assert_eq!(basic_glyph(' '), &[0u8; 13]);
+        assert_eq!(basic_glyph('服'), basic_glyph('\u{fffd}'));
+
+        let mut image = RgbImage::from_pixel(100, 20, WHITE);
+        draw_basic_text(&mut image, 0, 15, "$Aa5/MO", BLACK);
+        assert!(non_white_count(&image) > 0);
+    }
+
+    #[test]
+    fn sitename_default_is_persisted_as_komari() {
+        let state = test_state();
+        let table = load_table_data(&state).expect("table data");
+        assert_eq!(table.site_name, "Komari");
+        assert_eq!(
+            state
+                .db
+                .config()
+                .get_as::<String>(keys::SITENAME_KEY)
+                .expect("read sitename"),
+            Some("Komari".to_owned())
+        );
+    }
+
+    #[test]
+    fn download_progress_draws_a_border_not_a_filled_background() {
+        let image = render_download_progress(DownloadProgress {
+            total: 1000,
+            downloaded: 500,
+            speed: 100.0,
+        });
+        // bar_x=100, bar_y=150, bar_w=400, bar_h=20; the 50% fill covers
+        // x=100..299 (including the left border), exactly like Go's
+        // drawRect followed by fillRect.
+        assert_eq!(image.get_pixel(300, 150), &GRAY_200);
+        assert_eq!(image.get_pixel(300, 169), &GRAY_200);
+        assert_eq!(image.get_pixel(499, 150), &GRAY_200);
+        assert_eq!(image.get_pixel(499, 169), &GRAY_200);
+        assert_eq!(image.get_pixel(400, 160), &WHITE);
+        assert_eq!(image.get_pixel(150, 160), &DOWNLOAD_BLUE);
+        assert_eq!(format_bytes(-1), "-1B");
+    }
+
+    #[test]
+    fn jpeg_uses_420_chroma_subsampling() {
+        let image = RgbImage::from_pixel(32, 32, WHITE);
+        let jpeg = encode_jpeg(&image).expect("encode JPEG");
+        assert_eq!(jpeg_luma_sampling(&jpeg), (2, 2));
+    }
+
+    #[test]
+    fn ttf_fixture_renders_columns_and_chinese() {
+        let font = fixture_font();
+        let missing = font.font.glyph_id('\u{10ffff}');
+        assert_ne!(
+            font.font.glyph_id('服'),
+            missing,
+            "fixture must contain a Chinese glyph"
+        );
+
+        let nodes = vec![node("node", "节点", 0)];
+        let statuses = HashMap::new();
+        let en_request = FrameRequest {
+            lang: LANG_EN,
+            tz_offset: None,
+        };
+        let zh_request = FrameRequest {
+            lang: LANG_ZH,
+            tz_offset: None,
+        };
+        let english = render_status_table(&nodes, &statuses, "Komari", &en_request, &font);
+        let chinese = render_status_table(&nodes, &statuses, "测试节点", &zh_request, &font);
+
+        assert_eq!(english.dimensions(), (IMAGE_WIDTH, 222));
+        assert_eq!(chinese.dimensions(), (IMAGE_WIDTH, 222));
+        assert!(non_white_count(&english) > 1000);
+        assert!(
+            english.as_raw() != chinese.as_raw(),
+            "EN and ZH frames must differ"
+        );
+        for x in [
+            25, 155, 225, 280, 340, 430, 480, 620, 760, 830, 900, 970, 1080,
+        ] {
+            assert!(
+                non_white_in_rect(&english, x, 80, 60, 36) > 0,
+                "TTF header column at x={x} is blank"
+            );
+        }
+        assert!(non_white_in_rect(&chinese, 20, 20, 300, 40) > 0);
     }
 
     #[test]

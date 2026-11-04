@@ -10,7 +10,7 @@
 //! * `GET  /api/recent/{uuid}` — buffered (in-memory) reports.
 //! * `GET  /api/records/load` — historical metric records.
 //! * `GET  /api/oauth`, `GET /api/oauth_callback` — OAuth login and binding.
-//! * `GET  /api/mjpeg_live` — explicit not-implemented response.
+//! * `GET  /api/mjpeg_live` — live MJPEG status stream.
 //! * `ANY  /ping` — health check (`pong`).
 //!
 //! [`public_router`] returns the routes with `ApiState` state, matching
@@ -42,6 +42,9 @@ use crate::response;
 use crate::state::ApiState;
 
 pub use version::{VERSION, VERSION_HASH};
+
+#[doc(hidden)]
+pub use mjpeg::rendered_frame_count as mjpeg_rendered_frame_count;
 
 /// Cookie carrying the login session (Go `session_token`).
 pub(crate) const SESSION_COOKIE: &str = komari_auth::SESSION_COOKIE_NAME;
