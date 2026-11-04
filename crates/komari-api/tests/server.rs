@@ -796,6 +796,40 @@ async fn backup_upload_path_has_a_larger_body_limit() {
 }
 
 #[tokio::test]
+async fn theme_upload_path_has_a_larger_body_limit() {
+    let dir = TempDir::new().expect("temp dir");
+    let config = ServerConfig {
+        body_limit_bytes: 16 * 1024 * 1024,
+        ..server_config(&dir)
+    };
+    let server = build(config, memory_db()).await;
+    let running = start(server).await;
+    let client = http_client();
+    let body = "x".repeat(17 * 1024 * 1024);
+
+    let response = client
+        .post(format!("{}/api/clients/register", running.base))
+        .body(body.clone())
+        .send()
+        .await
+        .expect("normal oversized request");
+    assert_eq!(response.status(), reqwest::StatusCode::PAYLOAD_TOO_LARGE);
+
+    // Theme uploads use their own 64 MiB cap instead of the normal 16 MiB
+    // limit. Without credentials the request is rejected by the role check,
+    // but it must not hit the normal body limit first.
+    let response = client
+        .put(format!("{}/api/admin/theme/upload", running.base))
+        .body(body)
+        .send()
+        .await
+        .expect("theme upload request");
+    assert_ne!(response.status(), reqwest::StatusCode::PAYLOAD_TOO_LARGE);
+
+    running.stop().await;
+}
+
+#[tokio::test]
 async fn cors_headers_and_options_are_dynamic() {
     let dir = TempDir::new().expect("temp dir");
     let db = memory_db();

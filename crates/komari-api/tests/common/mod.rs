@@ -32,6 +32,7 @@ pub fn default_config() -> ApiConfig {
         // presence expiry and report flushing explicitly.
         presence_sweep_interval: Duration::ZERO,
         report_flush_interval: Duration::ZERO,
+        mjpeg_font_download: false,
         ..ApiConfig::default()
     }
 }

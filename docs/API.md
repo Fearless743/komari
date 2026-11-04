@@ -60,7 +60,7 @@ B04/B05/B06 合并并完成 B13 OAuth HTTP/B14 静态路由装配。
 | JSON-RPC | `GET/POST /api/rpc2` | 已实现（B04/B06） | B04/B06 |
 | OAuth | `/api/oauth`、`/api/oauth_callback` | 已实现（B04，B09 装配） | B04/B09 |
 | 静态资源 | `/`、`/themes/:id/*path`、`/favicon.ico` | 已实现（komari-web + B09 装配） | B09 |
-| MJPEG | `/api/mjpeg_live` | 未实现 | B04 |
+| MJPEG | `/api/mjpeg_live` | 已实现（Go 布局、MiSans 字体下载/回退、`lang`/`tz_offset`） | B18 |
 
 ## 4. 公开路由（Go 参考，Rust 状态）
 
@@ -84,7 +84,7 @@ B04/B05/B06 合并并完成 B13 OAuth HTTP/B14 静态路由装配。
 | `GET` | `/api/version` | 服务端版本。 | B04 |
 | `GET` | `/api/recent/:uuid` | 指定节点最近记录。 | B04 |
 | `GET` | `/api/records/load` | 按 UUID/时间范围读取记录。 | B04 |
-| `GET` | `/api/mjpeg_live` | MJPEG 实时流。 | B04 |
+| `GET` | `/api/mjpeg_live` | MJPEG 实时流。 | B04/B18 |
 
 `/api/clients` 是 WebSocket：客户端发送 `get` 或 `get <uuid>`，服务端返回
 `{"status":"success","data":{"online":[...],"data":{...}}}`。未登录时过滤
@@ -250,7 +250,7 @@ Rust 的 `komari-web`（B14）已实现这些路由：`routes` / `routes_for` �
 
 | 任务 | 范围 | 当前状态 |
 | --- | --- | --- |
-| B04 | public API、JSON-RPC、`/ping`、`/api/mjpeg_live` | 待实现 |
+| B04 | public API、JSON-RPC、`/ping`、`/api/mjpeg_live` | 已实现（B04；MJPEG 由 B18 补齐） |
 | B05 | agent API、agent/browser WebSocket | 未合并（见 PARITY） |
 | B06 | admin API | 待实现 |
 | B13 | OAuth/OIDC | 已合并（crate）；HTTP 登录/绑定待服务器装配 |

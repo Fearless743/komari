@@ -18,6 +18,7 @@ mod providers;
 mod sessions;
 mod settings;
 mod theme;
+mod theme_package;
 mod two_factor;
 mod update;
 

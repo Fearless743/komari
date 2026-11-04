@@ -92,7 +92,7 @@ impl Default for DatabaseConfig {
 }
 
 /// Fully resolved, strongly typed startup configuration.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Config {
     pub listen: String,
     pub db: DatabaseConfig,
@@ -105,6 +105,26 @@ pub struct Config {
     /// Normal HTTP request-body limit in bytes (`KOMARI_BODY_LIMIT`).
     /// `None` lets the server use its default.
     pub body_limit: Option<usize>,
+}
+
+impl fmt::Debug for Config {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter
+            .debug_struct("Config")
+            .field("listen", &self.listen)
+            .field("db", &self.db)
+            .field("log_level", &self.log_level)
+            .field("theme", &self.theme)
+            .field("allow_cors", &self.allow_cors)
+            .field("enable_cloudflared", &self.enable_cloudflared)
+            .field(
+                "cloudflared_token",
+                &self.cloudflared_token.as_ref().map(|_| "<redacted>"),
+            )
+            .field("ws_disable_origin", &self.ws_disable_origin)
+            .field("body_limit", &self.body_limit)
+            .finish()
+    }
 }
 
 impl Default for Config {
@@ -239,18 +259,16 @@ impl Config {
         };
         let enable_cloudflared = match overrides.enable_cloudflared {
             Some(value) => value,
-            None => match read(keys::ENV_ENABLE_CLOUDFLARED) {
-                Some(value) => parse_bool(keys::ENV_ENABLE_CLOUDFLARED, &value)?,
-                None => false,
-            },
+            None => read(keys::ENV_ENABLE_CLOUDFLARED)
+                .map(|value| parse_strict_true(&value))
+                .unwrap_or(false),
         };
         let cloudflared_token = read(keys::ENV_CLOUDFLARED_TOKEN);
         let ws_disable_origin = match overrides.ws_disable_origin {
             Some(value) => value,
-            None => match read(keys::ENV_WS_DISABLE_ORIGIN) {
-                Some(value) => parse_bool(keys::ENV_WS_DISABLE_ORIGIN, &value)?,
-                None => false,
-            },
+            None => read(keys::ENV_WS_DISABLE_ORIGIN)
+                .map(|value| parse_strict_true(&value))
+                .unwrap_or(false),
         };
         let body_limit = match overrides.body_limit {
             Some(value) => Some(value),
@@ -333,4 +351,15 @@ fn parse_bool(key: &str, value: &str) -> Result<bool, ConfigError> {
             expected: "true or false",
         }),
     }
+}
+
+/// Parse a Go-style strict environment boolean.
+///
+/// Go uses `strings.ToLower(os.Getenv(...)) == "true"` for
+/// `KOMARI_ENABLE_CLOUDFLARED` and `strings.EqualFold(..., "true")` for
+/// `KOMARI_WS_DISABLE_ORIGIN`: both accept only a case-insensitive `true`
+/// without trimming. `1`, `yes`, `on`, ` true ` and every other value mean
+/// false, and invalid values are not configuration errors.
+fn parse_strict_true(value: &str) -> bool {
+    value.eq_ignore_ascii_case("true")
 }

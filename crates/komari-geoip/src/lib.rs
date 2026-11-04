@@ -24,4 +24,4 @@ pub use error::GeoIpError;
 pub use factory::{GeoIpConstructor, GeoIpFactory, factory};
 pub use model::{GeoInfo, region_unicode_emoji};
 pub use provider::GeoIpProvider;
-pub use service::GeoIpService;
+pub use service::{DEFAULT_CACHE_TTL, DEFAULT_JANITOR_INTERVAL, GeoIpJanitor, GeoIpService};

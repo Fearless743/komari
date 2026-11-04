@@ -17,7 +17,7 @@
 | CLI / 启动配置 | `komari-cli`、`komari-config` | **已合并（B01）** | 子命令、flag/env 优先级、日志、版本注入。 |
 | 数据库 | `komari-db` | **已合并（B02）** | SQLite schema 兼容、key/value `configs`、仓储层。 |
 | 认证 | `komari-auth` | **已合并（B03）** | 密码、会话、TOTP、角色、私有站点中间件。 |
-| 公开 API / JSON-RPC | `komari-api` | **待实现（B04）** | 当前只有占位 `lib.rs`。 |
+| 公开 API / JSON-RPC | `komari-api` | **已合并（B04/B06/B18）** | public API、JSON-RPC 与 `/api/mjpeg_live`（B18 对齐 Go 布局/字体/语言参数）。 |
 | Agent API / WebSocket | `komari-api` | **待合并（B05）** | 截至 B11 基线（`main@0382eb3`）未合并；实现状态以本表为准。 |
 | 管理 API | `komari-api` | **待实现（B06）** | `/api/admin/*` 尚未移植。 |
 | 通知 | `komari-notify` | **已合并（B07/B16）** | 8 个 provider（含 `Javascript`，`boa_engine` 执行用户脚本）；provider 脱敏（D-011）已合并。 |
@@ -55,7 +55,7 @@
 | --- | --- | --- | --- | --- |
 | D-001 | Javascript 通知 provider 已实现 | 已实现，差异待确认（B16） | 由 `boa_engine` 执行脚本；剩余差异见登记，待用户确认 | 无需改用其他 provider；按登记差异检查脚本。 |
 | D-002 | DDNS 删除记录是 Rust 扩展 | 非 Go 扩展 | 仅 cloudflare 支持；empty 报错 | 不依赖该能力；回退 Go 时改用 provider API。 |
-| D-003 | 旧库历史迁移不自动执行 | 兼容性限制 | 极老库可能缺 OAuth/通知配置或旧客户端信息 | 先用 Go 启动一次，备份后切换。 |
+| D-003 | 旧库历史迁移（已合并 B20） | 已合并 | 极老库自动迁移 `client_infos` / OAuth / 通知配置 | 备份后直接切换；迁移失败会回滚。 |
 | D-004 | GeoIP 缓存上限 10,000 | 有意差异 | 大量唯一 IP 时更早淘汰、增加上游查询 | 通常无需处理；需要时调大常量重建。 |
 | D-005 | `KOMARI_WS_DISABLE_ORIGIN` 字面量更宽松 | 有意差异 | `1`/`yes`/`on` 在 Rust 生效、Go 不生效 | 跨版本统一写 `true`/`false`。 |
 | D-006 | 邮件主题 Q vs B 编码 | 实现差异（语义等价） | 原始字节不同，解码内容一致 | 通常无需处理。 |
@@ -72,7 +72,7 @@ D 条目、不占号**；若后续需要正式登记，使用 `D-012` / `D-013`�
 
 ### 按影响分类
 
-- **会阻断功能**：D-003（仅极老数据库）。
+- **会阻断功能**：无（D-001 已由 B16 实现，D-003 已由 B20 合并）。
 - **行为差异但通常可接受**：D-002、D-004、D-005、D-006、D-008、D-010。
 - **安全/API 契约相关**：D-009、D-011。
 - **数据质量相关**：D-007。
@@ -82,7 +82,7 @@ D 条目、不占号**；若后续需要正式登记，使用 `D-012` / `D-013`�
 
 1. 通知可以使用 `Javascript`（D-001 已实现），剩余差异见 D-001 登记。
 2. DDNS 不依赖删除记录（D-002）。
-3. 极老数据库先用 Go 启动一次（D-003）。
+3. 极老数据库可直接切换；迁移失败会回滚（D-003）。
 4. 跨版本脚本使用 `true`/`false` 布尔值（D-005）。
 5. 检查 `configs` 数值范围（D-007）。
 6. 旧脚本的 `--flag=1`/`--flag=TRUE` 改为 `--flag`/`--flag=true`（D-008）。
@@ -96,7 +96,7 @@ D 条目、不占号**；若后续需要正式登记，使用 `D-012` / `D-013`�
 
 | 缺口 | 责任 | 影响 |
 | --- | --- | --- |
-| MJPEG | B04 | `/api/mjpeg_live` 返回明确的未实现响应；其余公开端点已可用。 |
+| 无 | — | MJPEG 已由 B18 补齐：Go 布局、MiSans 字体下载/回退与 `lang`/`tz_offset` 均可用。 |
 
 Public/Agent/Admin/RPC/OAuth/静态路由与浏览器 WS 均已由 B04/B05/B06/B09 装配。
 生产切换仍建议先按 [MIGRATION.md](MIGRATION.md) 验证；参见
@@ -180,3 +180,7 @@ B09 的服务器装配需要少量跨 crate 改动，均为验收项所需的最
 - `komari-notify`：新增 `renewal` 模块，供上线事件和每日 09:00 调度复用。
 - `komari-oauth`：仅随 main 的 B04/B06 合并同步，B09 未改变 provider 语义。
 - `docs`：更新服务器装配、OAuth、静态资源、浏览器 WS 与 body limit 状态。
+
+B18 提交的 MJPEG 剩余差异（直接读取仓储层、文本度量/JPEG 字节差异、测试开关）
+已按 B11 协议追加到 [parity-deviations.md](parity-deviations.md) 末尾，等待
+B11 统一编号。

@@ -21,10 +21,16 @@ use crate::provider::GeoIpProvider;
 use crate::providers::empty::EmptyProvider;
 
 /// Default cache lifetime, matching Go's `48 * time.Hour`.
+///
+/// Go's `go-cache` instance in `utils/geoip/geoip.go` has no capacity limit:
+/// entries only expire after this TTL, and the janitor's one-hour interval
+/// controls when expired entries are reclaimed. The Rust cache follows the
+/// same policy and grows without a hard entry cap.
 pub const DEFAULT_CACHE_TTL: Duration = Duration::from_secs(48 * 60 * 60);
 
-/// Upper bound on cached lookups so long-running instances stay bounded.
-pub const DEFAULT_CACHE_CAPACITY: usize = 10_000;
+/// Default interval for the background cache janitor, matching Go's
+/// `cache.New(48*time.Hour, 1*time.Hour)` cleanup interval.
+pub const DEFAULT_JANITOR_INTERVAL: Duration = Duration::from_secs(60 * 60);
 
 #[derive(Clone)]
 struct CacheEntry {
@@ -40,7 +46,6 @@ pub struct GeoIpService {
     provider_key: RwLock<String>,
     cache: Mutex<HashMap<String, CacheEntry>>,
     cache_ttl: Duration,
-    cache_capacity: usize,
 }
 
 impl Default for GeoIpService {
@@ -59,7 +64,6 @@ impl GeoIpService {
             provider_key: RwLock::new("empty".to_owned()),
             cache: Mutex::new(HashMap::new()),
             cache_ttl: DEFAULT_CACHE_TTL,
-            cache_capacity: DEFAULT_CACHE_CAPACITY,
         }
     }
 
@@ -76,15 +80,9 @@ impl GeoIpService {
         self
     }
 
-    /// Override the cache lifetime.
+    /// Override the cache lifetime. A zero duration disables caching.
     pub fn with_cache_ttl(mut self, ttl: Duration) -> Self {
         self.cache_ttl = ttl;
-        self
-    }
-
-    /// Override the maximum number of cached lookups. Zero disables caching.
-    pub fn with_cache_capacity(mut self, capacity: usize) -> Self {
-        self.cache_capacity = capacity;
         self
     }
 
@@ -221,13 +219,50 @@ impl GeoIpService {
     /// Number of live cached lookups. Expired entries are evicted while
     /// counting.
     pub fn cache_len(&self) -> usize {
+        self.purge_expired();
+        self.cache.lock().len()
+    }
+
+    /// Remove expired cache entries and return how many were dropped.
+    ///
+    /// Go's `go-cache` runs this from a janitor every hour; [`spawn_janitor`]
+    /// provides the same background cleanup.
+    pub fn purge_expired(&self) -> usize {
         let mut cache = self.cache.lock();
         if self.cache_ttl.is_zero() {
+            let removed = cache.len();
             cache.clear();
-            return 0;
+            return removed;
         }
+        let before = cache.len();
         cache.retain(|_, entry| entry.stored_at.elapsed() <= self.cache_ttl);
-        cache.len()
+        before - cache.len()
+    }
+
+    /// Spawn the hourly cache janitor. The returned handle can abort the task;
+    /// dropping the runtime also stops it.
+    pub fn spawn_janitor(self: &Arc<Self>, interval: Duration) -> GeoIpJanitor {
+        let service = Arc::clone(self);
+        let interval = if interval.is_zero() {
+            DEFAULT_JANITOR_INTERVAL
+        } else {
+            interval
+        };
+        let handle = tokio::spawn(async move {
+            let mut ticker = tokio::time::interval(interval);
+            ticker.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
+            // The first tick is immediate; skip it so the first sweep happens
+            // after one interval, like go-cache.
+            ticker.tick().await;
+            loop {
+                ticker.tick().await;
+                let removed = service.purge_expired();
+                if removed > 0 {
+                    tracing::debug!(removed, "GeoIP janitor removed expired cache entries");
+                }
+            }
+        });
+        GeoIpJanitor { handle }
     }
 
     fn cached(&self, key: &str) -> Option<GeoInfo> {
@@ -245,24 +280,10 @@ impl GeoIpService {
     }
 
     fn store(&self, key: String, info: GeoInfo) {
-        if self.cache_capacity == 0 || self.cache_ttl.is_zero() {
+        if self.cache_ttl.is_zero() {
             return;
         }
-        let mut cache = self.cache.lock();
-        if cache.len() >= self.cache_capacity {
-            cache.retain(|_, entry| entry.stored_at.elapsed() <= self.cache_ttl);
-        }
-        while cache.len() >= self.cache_capacity {
-            let oldest = cache
-                .iter()
-                .min_by_key(|(_, entry)| entry.stored_at)
-                .map(|(key, _)| key.clone());
-            let Some(oldest) = oldest else {
-                break;
-            };
-            cache.remove(&oldest);
-        }
-        cache.insert(
+        self.cache.lock().insert(
             key,
             CacheEntry {
                 stored_at: Instant::now(),
@@ -277,5 +298,103 @@ impl GeoIpService {
         *self.provider.write() = Some(Arc::new(EmptyProvider));
         *self.provider_key.write() = "empty".to_owned();
         self.cache.lock().clear();
+    }
+}
+
+/// Handle for the background GeoIP cache janitor.
+///
+/// The task is aborted when this handle is dropped or [`shutdown`] is called.
+///
+/// [`shutdown`]: GeoIpJanitor::shutdown
+pub struct GeoIpJanitor {
+    handle: tokio::task::JoinHandle<()>,
+}
+
+impl GeoIpJanitor {
+    /// Stop the janitor task.
+    pub fn shutdown(&self) {
+        self.handle.abort();
+    }
+
+    /// Whether the janitor task has stopped.
+    pub fn is_finished(&self) -> bool {
+        self.handle.is_finished()
+    }
+}
+
+impl Drop for GeoIpJanitor {
+    fn drop(&mut self) {
+        self.handle.abort();
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::model::GeoInfo;
+
+    fn service(ttl: Duration) -> Arc<GeoIpService> {
+        Arc::new(GeoIpService::new().with_cache_ttl(ttl))
+    }
+
+    fn insert_expired(service: &GeoIpService, key: &str) {
+        let stored_at = Instant::now()
+            .checked_sub(service.cache_ttl + Duration::from_secs(1))
+            .expect("instant supports subtraction");
+        service.cache.lock().insert(
+            key.to_owned(),
+            CacheEntry {
+                stored_at,
+                info: GeoInfo::default(),
+            },
+        );
+    }
+
+    #[test]
+    fn purge_expired_removes_only_expired_entries() {
+        let service = service(Duration::from_millis(50));
+        insert_expired(&service, "old:1.1.1.1");
+        service.store("live:8.8.8.8".to_owned(), GeoInfo::default());
+
+        assert_eq!(service.purge_expired(), 1);
+        assert_eq!(service.cache.lock().len(), 1);
+        assert_eq!(service.purge_expired(), 0);
+    }
+
+    #[test]
+    fn zero_ttl_purge_clears_everything() {
+        let service = service(Duration::ZERO);
+        service.store("live:8.8.8.8".to_owned(), GeoInfo::default());
+        // `store` is a no-op with a zero TTL, so insert directly to verify the
+        // purge path.
+        service.cache.lock().insert(
+            "manual:8.8.8.8".to_owned(),
+            CacheEntry {
+                stored_at: Instant::now(),
+                info: GeoInfo::default(),
+            },
+        );
+        assert_eq!(service.purge_expired(), 1);
+        assert!(service.cache.lock().is_empty());
+    }
+
+    #[tokio::test]
+    async fn janitor_removes_expired_entries_in_the_background() {
+        let service = service(Duration::from_millis(20));
+        insert_expired(&service, "old:1.1.1.1");
+        assert_eq!(service.cache.lock().len(), 1);
+
+        let janitor = service.spawn_janitor(Duration::from_millis(10));
+        for _ in 0..50 {
+            if service.cache.lock().is_empty() {
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+        assert!(
+            service.cache.lock().is_empty(),
+            "janitor should purge expired entries without a lookup"
+        );
+        janitor.shutdown();
     }
 }

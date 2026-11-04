@@ -231,7 +231,7 @@ for provider in empty geojs ipapi ipinfo mmdb; do
     *) need docs/CONFIGURATION.md "$provider" ;;
   esac
 done
-need crates/komari-geoip/src/service.rs 'DEFAULT_CACHE_CAPACITY: usize = 10_000'
+need crates/komari-geoip/src/service.rs 'DEFAULT_CACHE_TTL: Duration'
 
 section "defaults extracted from config/site/service/providers"
 mapfile -t defaults < <(
@@ -266,9 +266,6 @@ need docs/CONFIGURATION.md info
 ttl_line=$(grep -E 'DEFAULT_CACHE_TTL: Duration' "$root/crates/komari-geoip/src/service.rs")
 ttl_hours=$(printf '%s\n' "$ttl_line" | grep -oE '[0-9]+' | head -1)
 need docs/CONFIGURATION.md "$ttl_hours"
-capacity=$(grep -oE 'DEFAULT_CACHE_CAPACITY: usize = [0-9_]+' \
-  "$root/crates/komari-geoip/src/service.rs" | grep -oE '[0-9_]+$')
-need docs/CONFIGURATION.md "${capacity//_/,}"
 
 section "paths, schema and constants"
 need crates/komari-config/src/config.rs 'DEFAULT_DB_FILE'

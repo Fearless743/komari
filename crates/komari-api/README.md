@@ -20,7 +20,7 @@ Ports of Go `api/public/*.go` plus the route table in `cmd/server.go`:
 | `GET /api/recent/{uuid}` | Reads the B05 in-memory report buffer (`api.Records`); omits `data` when nothing is buffered. |
 | `GET /api/records/load` | `uuid`/`hours`/`load_type` validation, per-metric projection and GPU device grouping. |
 | `GET /api/oauth`, `GET /api/oauth_callback` | Uses the B13 provider installed with `ApiState::set_oauth_provider`; error bodies use Go's `error` key. |
-| `GET /api/mjpeg_live` | `multipart/x-mixed-replace; boundary=frame` JPEG stream rendered from the latest `records` rows with a built-in bitmap font. Frame interval is `ApiConfig::mjpeg_frame_interval` (2 s by default). |
+| `GET /api/mjpeg_live` | `multipart/x-mixed-replace; boundary=frame` JPEG stream with Go's 1280 px layout, `lang`/`tz_offset` parameters (TZDB abbreviations when omitted), MiSans font bootstrap (`data/font.ttf`, then download/extract, then `basicfont.Face7x13` 6x13 fallback), and 4:2:0 JPEG at quality 90. Frame interval is `ApiConfig::mjpeg_frame_interval` (2 s by default). |
 
 `public_router_with_state` additionally installs `komari_auth::PrivateSite`,
 matching the global private-site middleware in `cmd/server.go`. Server
@@ -48,7 +48,11 @@ provider rows and loads `o_auth_provider`) before serving requests.
 - One aggregated `records` row and its `gpu_records` rows are written in a
   single SQLite transaction, so a failed retry cannot duplicate GPU samples.
 - `allow_cors` is read from the database on every browser WebSocket upgrade;
-  `KOMARI_WS_DISABLE_ORIGIN` only accepts a case-insensitive `true`.
+  `KOMARI_WS_DISABLE_ORIGIN` only accepts a case-insensitive `true` (like Go's
+  `strings.EqualFold(value, "true")`). Values such as `1`, `yes`, `on`, or
+  ` true ` do not disable the check. The value is resolved once at startup
+  (`--ws-disable-origin` > environment > default), so an explicit `false` is
+  not overridden by a later environment value.
 - Report POST tokens come from `?token=` or a JSON body `token` for non-GET
   requests. `Authorization: Bearer` is reserved for the admin API key, matching
   B03's `AuthLayer`.
@@ -60,11 +64,16 @@ provider rows and loads `o_auth_provider`) before serving requests.
 
 ## Known differences / follow-up work
 
-- `/api/mjpeg_live` renders from the `records` table instead of the JSON-RPC
-  node snapshot, uses the built-in 5x7 bitmap font instead of the downloaded
-  MiSans font, and drops hidden clients like Go's guest `common:getNodes` call.
-  The `lang` and `tz_offset` query parameters are accepted but the frame text is
-  English and uses the application timezone.
+- `/api/mjpeg_live` reads `clients` and the hub's latest report cache directly
+  instead of going through the JSON-RPC `common:getNodes` /
+  `common:getNodesLatestStatus` methods. The guest filtering, address masking,
+  layout, language packs, node sorting and font bootstrap match Go; there is no
+  `records` fallback, exactly like Go. `ApiConfig::mjpeg_font_download` only
+  exists so tests can disable the network download (production defaults to
+  `true`). Text centering uses `ab_glyph` advances/kerning rather than Go's
+  `font.BoundString` bearings, so a label can shift by a pixel or two; the
+  encoded JPEG comes from `jpeg-encoder` (same 4:2:0 sampling and quality 90),
+  so byte-level output differs from Go's `image/jpeg`.
 - `/api/records/load` rejects `hours` outside `±2_562_047` (the largest whole
   hour offset that fits in Go's `time.Duration`) with 400. Go silently wraps the
   duration for larger values.
@@ -129,9 +138,14 @@ Known differences:
 
 - `GET /api/admin/2fa/generate` returns `image/png` QR code bytes and the
   `2fa_secret` cookie, matching Go. The otpauth URL is not returned as JSON.
-- Theme upload/update/import endpoints are not implemented (listing, switching,
-  deleting and per-theme settings are). They need ZIP/SSRF handling from the Go
-  implementation.
+- Theme upload/update/import match Go's request/response semantics, but add
+  hardening the Go backend lacks: a 64 MiB upload/download cap, a 128 MiB
+  uncompressed/extraction cap and entry-count limit (zip bombs), a 30 s request
+  timeout, redirect targets re-checked for SSRF, and atomic installation
+  (a failed package never removes the previously installed same-`short`
+  theme). Upload accepts both the bundled UI's `multipart/form-data` `file`
+  field and Go's raw ZIP body. Like Go, `dist/` and the preview image are not
+  required for installation.
 - `common:getRecords` iterates the current `clients` table, so records of
   already-deleted clients are not returned.
 - `common:getPublicInfo` does not merge managed-theme defaults from
@@ -142,6 +156,24 @@ Known differences:
   `<data_dir>/backup.zip`; the server assembly must call
   `komari_db::restore_pending_backup` at startup (Go exits and restores on the
   next boot).
+
+## cloudflared 隧道
+
+`server::cloudflared` ports `utils/cloudflared/cloudflared.go`. The server
+assembly starts a tunnel when `ServerConfig::cloudflared_token` is non-empty;
+`ServerBuilder::with_cloudflared` can inject a target/downloader for tests.
+
+Known differences from Go:
+
+- Go and Rust both require `KOMARI_ENABLE_CLOUDFLARED=true` **and** a non-empty
+  token. `ServerBuilder::with_cloudflared` is an explicit bypass for tests.
+- An unexpected `cloudflared` exit is logged with its exit code, triggers a
+  graceful server shutdown and makes `serve` return an error (CLI exit code 1)
+  instead of calling `os.Exit(1)` from library code.
+- stdout/stderr are forwarded line by line through `tracing` with a
+  `[cloudflared]` prefix, and the token is redacted defensively.
+- Existing `data/cloudflared[.exe]` files are reused without re-downloading;
+  non-Windows targets are chmodded to `0755`.
 
 ## 历史提交说明
 
