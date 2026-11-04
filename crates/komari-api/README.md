@@ -143,6 +143,24 @@ Known differences:
   `komari_db::restore_pending_backup` at startup (Go exits and restores on the
   next boot).
 
+## cloudflared 隧道
+
+`server::cloudflared` ports `utils/cloudflared/cloudflared.go`. The server
+assembly starts a tunnel when `ServerConfig::cloudflared_token` is non-empty;
+`ServerBuilder::with_cloudflared` can inject a target/downloader for tests.
+
+Known differences from Go:
+
+- Go requires `KOMARI_ENABLE_CLOUDFLARED=true` **and** a token. Rust only
+  checks that the token is non-empty; `--enable-cloudflared` remains parsed for
+  configuration compatibility.
+- An unexpected `cloudflared` exit is logged with its exit code and triggers a
+  graceful server shutdown instead of calling `os.Exit(1)` from library code.
+- stdout/stderr are forwarded line by line through `tracing` with a
+  `[cloudflared]` prefix, and the token is redacted defensively.
+- Existing `data/cloudflared[.exe]` files are reused without re-downloading;
+  non-Windows targets are chmodded to `0755`.
+
 ## 历史提交说明
 
 首轮 B06 提交 `217231a`（`feat(api): 增加管理 API 的设置与客户端端点`）在

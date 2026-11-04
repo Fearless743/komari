@@ -27,6 +27,7 @@
 
 mod assets;
 mod background;
+pub mod cloudflared;
 pub mod oauth;
 
 pub use assets::{
@@ -34,6 +35,10 @@ pub use assets::{
     refresh_web_assets,
 };
 pub use background::{BackgroundConfig, BackgroundTasks};
+pub use cloudflared::{
+    ArchiveFormat, Cloudflared, CloudflaredConfig, CloudflaredError, CloudflaredExit,
+    CloudflaredTarget, Downloader, HttpDownloader, current_target, install_binary, target_for,
+};
 pub use oauth::{BINDING_COOKIE, OAUTH_STATE_COOKIE, OAuthRuntime, SESSION_COOKIE};
 
 use std::future::{Future, IntoFuture};
@@ -83,6 +88,12 @@ pub struct ServerConfig {
     pub database_path: PathBuf,
     /// Data directory containing themes, favicon and `backup.zip`.
     pub data_dir: PathBuf,
+    /// Start a `cloudflared` tunnel when this token is non-empty.
+    ///
+    /// The binary is installed into [`Self::data_dir`]. Go additionally
+    /// requires `KOMARI_ENABLE_CLOUDFLARED=true`; see
+    /// [`ServerConfig::from_app_config`].
+    pub cloudflared_token: Option<String>,
     pub theme: String,
     pub api: ApiConfig,
     pub background: BackgroundConfig,
@@ -102,6 +113,7 @@ impl Default for ServerConfig {
             listen: DEFAULT_LISTEN.to_owned(),
             database_path: PathBuf::from(DEFAULT_DB_FILE),
             data_dir: PathBuf::from("data"),
+            cloudflared_token: None,
             theme: "default".to_owned(),
             api: ApiConfig::default(),
             background: BackgroundConfig::default(),
@@ -124,6 +136,7 @@ impl ServerConfig {
             listen: config.listen.clone(),
             database_path,
             data_dir,
+            cloudflared_token: config.cloudflared_token.clone(),
             theme: config.theme.clone(),
             api: ApiConfig {
                 allow_cors: config.allow_cors,
@@ -144,6 +157,7 @@ pub struct ServerBuilder {
     state: Option<ApiState>,
     assets: Option<Arc<WebAssets>>,
     oauth: Option<OAuthRuntime>,
+    cloudflared: Option<CloudflaredConfig>,
     public_router: Option<Router>,
     admin_router: Option<Router>,
     rpc_router: Option<Router>,
@@ -160,6 +174,7 @@ impl ServerBuilder {
             state: None,
             assets: None,
             oauth: None,
+            cloudflared: None,
             public_router: None,
             admin_router: None,
             rpc_router: None,
@@ -188,6 +203,14 @@ impl ServerBuilder {
 
     pub fn with_oauth(mut self, oauth: OAuthRuntime) -> Self {
         self.oauth = Some(oauth);
+        self
+    }
+
+    /// Start an explicit cloudflared tunnel. Takes precedence over
+    /// [`ServerConfig::cloudflared_token`] and allows tests to inject a target
+    /// and downloader.
+    pub fn with_cloudflared(mut self, cloudflared: CloudflaredConfig) -> Self {
+        self.cloudflared = Some(cloudflared);
         self
     }
 
@@ -362,6 +385,22 @@ impl ServerBuilder {
             );
         }
 
+        let cloudflared_config = self.cloudflared.or_else(|| {
+            config
+                .cloudflared_token
+                .as_deref()
+                .filter(|token| !token.trim().is_empty())
+                .map(|token| CloudflaredConfig::new(config.data_dir.clone(), token))
+        });
+        let cloudflared = match cloudflared_config {
+            Some(cloudflared) => Some(
+                Cloudflared::start(cloudflared)
+                    .await
+                    .context("failed to start cloudflared")?,
+            ),
+            None => None,
+        };
+
         let background =
             BackgroundTasks::start(&state, assets.clone(), ddns.clone(), &config.background);
 
@@ -380,6 +419,7 @@ impl ServerBuilder {
             assets,
             oauth,
             ddns,
+            cloudflared,
             background,
             router,
         })
@@ -393,6 +433,7 @@ pub struct Server {
     assets: Arc<WebAssets>,
     oauth: OAuthRuntime,
     ddns: Arc<DdnsService>,
+    cloudflared: Option<Cloudflared>,
     background: BackgroundTasks,
     router: Router,
 }
@@ -426,6 +467,11 @@ impl Server {
 
     pub fn background(&self) -> &BackgroundTasks {
         &self.background
+    }
+
+    /// The running tunnel, when `cloudflared_token` was configured.
+    pub fn cloudflared(&self) -> Option<&Cloudflared> {
+        self.cloudflared.as_ref()
     }
 
     /// Stop every background loop owned by the server, including the presence
@@ -506,6 +552,7 @@ impl Server {
         .with_graceful_shutdown(shutdown)
         .into_future();
         tokio::pin!(serve);
+        let cloudflared = self.cloudflared.clone();
         let result = tokio::select! {
             result = &mut serve => result.context("HTTP server failed"),
             _ = shutdown_rx => {
@@ -520,7 +567,23 @@ impl Server {
                     }
                 }
             }
+            _ = wait_for_cloudflared(cloudflared) => {
+                warn!("cloudflared exited; shutting down the server");
+                match tokio::time::timeout(self.config.shutdown_timeout, &mut serve).await {
+                    Ok(result) => result.context("HTTP server failed"),
+                    Err(_) => {
+                        warn!(
+                            timeout = ?self.config.shutdown_timeout,
+                            "graceful shutdown timed out; forcing shutdown"
+                        );
+                        Ok(())
+                    }
+                }
+            }
         };
+        if let Some(cloudflared) = &self.cloudflared {
+            cloudflared.kill().await;
+        }
         let _ = self
             .state
             .db
@@ -537,8 +600,18 @@ impl Server {
 
 impl Drop for Server {
     fn drop(&mut self) {
+        if let Some(cloudflared) = &self.cloudflared {
+            cloudflared.request_kill();
+        }
         self.state.shutdown_background();
         self.background.cancel();
+    }
+}
+
+async fn wait_for_cloudflared(cloudflared: Option<Cloudflared>) {
+    match cloudflared {
+        Some(cloudflared) => cloudflared.exited().await,
+        None => std::future::pending().await,
     }
 }
 
