@@ -8,7 +8,9 @@ use std::str::FromStr;
 use std::sync::Arc;
 
 use async_trait::async_trait;
-use lettre::message::header::{ContentTransferEncoding, ContentType, MIME_VERSION_1_0};
+use lettre::message::header::{
+    ContentTransferEncoding, ContentType, HeaderName, HeaderValue, MIME_VERSION_1_0,
+};
 use lettre::message::{Mailbox, Mailboxes};
 use lettre::transport::smtp::authentication::{Credentials, Mechanism};
 use lettre::transport::smtp::client::{Tls, TlsParameters};
@@ -222,7 +224,7 @@ impl EmailSender {
 
         let mut builder = Message::builder()
             .from(sender.clone())
-            .subject(title.to_owned())
+            .raw_header(subject_header(title))
             .date_now()
             .message_id(Some(format!(
                 "<{}@{}>",
@@ -256,6 +258,83 @@ impl EmailSender {
                 .collect(),
             message,
         })
+    }
+}
+
+fn subject_header(title: &str) -> HeaderValue {
+    // Go builds `Subject: ` + mime.QEncoding.Encode("UTF-8", title) and writes
+    // the header verbatim, so use lettre's pre-encoded escape hatch instead of
+    // its B-encoder. The value is always printable ASCII produced by
+    // `encode_subject`, so header injection is not possible.
+    let encoded = encode_subject(title);
+    HeaderValue::dangerous_new_pre_encoded(
+        HeaderName::new_from_ascii_str("Subject"),
+        encoded.clone(),
+        encoded,
+    )
+}
+
+/// RFC 2047 Q-encoded subject, byte-for-byte compatible with Go's
+/// `mime.QEncoding.Encode("UTF-8", title)`.
+///
+/// Go leaves strings containing only printable ASCII (and tabs) untouched.
+/// Otherwise the string becomes one or more encoded words: spaces become `_`,
+/// printable ASCII except `=`, `?` and `_` stays literal, and every other byte
+/// is written as `=XX` with uppercase hex. Like Go, an encoded word carries at
+/// most 63 content characters and words are joined with a single space;
+/// multi-byte runes are never split.
+pub fn encode_subject(title: &str) -> String {
+    let needs_encoding = title
+        .chars()
+        .any(|character| !(' '..='~').contains(&character) && character != '\t');
+    if !needs_encoding {
+        return title.to_owned();
+    }
+
+    // mime.maxEncodedWordLen (75) - len("=?UTF-8?q?") (10) - len("?=") (2).
+    const MAX_CONTENT_LEN: usize = 63;
+    let mut encoded = String::with_capacity(24 + title.len() * 3);
+    encoded.push_str("=?UTF-8?q?");
+    let mut current_len = 0usize;
+    for (index, character) in title.char_indices() {
+        let rune_len = character.len_utf8();
+        let enc_len = if is_q_literal(character) {
+            1
+        } else {
+            3 * rune_len
+        };
+        if current_len + enc_len > MAX_CONTENT_LEN {
+            encoded.push_str("?= =?UTF-8?q?");
+            current_len = 0;
+        }
+        write_q_string(&title[index..index + rune_len], &mut encoded);
+        current_len += enc_len;
+    }
+    encoded.push_str("?=");
+    encoded
+}
+
+fn is_q_literal(character: char) -> bool {
+    // Go checks the first byte: `b >= ' ' && b <= '~' && b != '=' && b != '?' && b != '_'`.
+    character.is_ascii()
+        && (' '..='~').contains(&character)
+        && !matches!(character, '=' | '?' | '_')
+}
+
+fn write_q_string(value: &str, encoded: &mut String) {
+    const HEX: &[u8; 16] = b"0123456789ABCDEF";
+    for byte in value.as_bytes() {
+        match *byte {
+            b' ' => encoded.push('_'),
+            b'!'..=b'~' if !matches!(*byte, b'=' | b'?' | b'_') => {
+                encoded.push(char::from(*byte));
+            }
+            other => {
+                encoded.push('=');
+                encoded.push(char::from(HEX[usize::from(other >> 4)]));
+                encoded.push(char::from(HEX[usize::from(other & 0x0f)]));
+            }
+        }
     }
 }
 
@@ -336,5 +415,82 @@ impl MessageSender for EmailSender {
     async fn send_text(&self, message: &str, title: &str) -> Result<()> {
         let envelope = self.build_envelope(message, title)?;
         self.transport.send(envelope).await
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::encode_subject;
+
+    #[test]
+    fn q_encoding_matches_go_mime_qencoding() {
+        // Expected values were produced with Go's
+        // `mime.QEncoding.Encode("UTF-8", subject)`.
+        assert_eq!(
+            encode_subject("状态提醒"),
+            "=?UTF-8?q?=E7=8A=B6=E6=80=81=E6=8F=90=E9=86=92?="
+        );
+        assert_eq!(encode_subject("Hello World"), "Hello World");
+        assert_eq!(
+            encode_subject("a=b 中文"),
+            "=?UTF-8?q?a=3Db_=E4=B8=AD=E6=96=87?="
+        );
+        assert_eq!(
+            encode_subject("Komari 监控 告警"),
+            "=?UTF-8?q?Komari_=E7=9B=91=E6=8E=A7_=E5=91=8A=E8=AD=A6?="
+        );
+        assert_eq!(encode_subject("emoji 😀"), "=?UTF-8?q?emoji_=F0=9F=98=80?=");
+        assert_eq!(encode_subject("100% CPU"), "100% CPU");
+        assert_eq!(encode_subject("a_b?c"), "a_b?c");
+        assert_eq!(encode_subject("tab\there"), "tab\there");
+        assert_eq!(encode_subject(""), "");
+    }
+
+    #[test]
+    fn q_encoding_splits_words_at_go_max_content_len() {
+        // Expected values were produced with Go's
+        // `mime.QEncoding.Encode("UTF-8", subject)`.
+        assert_eq!(
+            encode_subject("状态提醒状态提醒状态提醒"),
+            "=?UTF-8?q?=E7=8A=B6=E6=80=81=E6=8F=90=E9=86=92=E7=8A=B6=E6=80=81=E6=8F=90?= \
+             =?UTF-8?q?=E9=86=92=E7=8A=B6=E6=80=81=E6=8F=90=E9=86=92?="
+        );
+        assert_eq!(
+            encode_subject("监控=告警 测试=告警 测试=告警 测试"),
+            "=?UTF-8?q?=E7=9B=91=E6=8E=A7=3D=E5=91=8A=E8=AD=A6_=E6=B5=8B=E8=AF=95=3D?= \
+             =?UTF-8?q?=E5=91=8A=E8=AD=A6_=E6=B5=8B=E8=AF=95=3D=E5=91=8A=E8=AD=A6_?= \
+             =?UTF-8?q?=E6=B5=8B=E8=AF=95?="
+        );
+        assert_eq!(
+            encode_subject("a=b c 中文测试 long ascii = ? _ 中文"),
+            "=?UTF-8?q?a=3Db_c_=E4=B8=AD=E6=96=87=E6=B5=8B=E8=AF=95_long_ascii_=3D_=3F?= \
+             =?UTF-8?q?_=5F_=E4=B8=AD=E6=96=87?="
+        );
+    }
+
+    #[test]
+    fn q_encoding_63_content_boundary_matches_go() {
+        // Seven CJK runes encode to exactly 63 content characters; the eighth
+        // starts a new word instead of splitting a multi-byte rune.
+        assert_eq!(
+            encode_subject("状状状状状状状"),
+            "=?UTF-8?q?=E7=8A=B6=E7=8A=B6=E7=8A=B6=E7=8A=B6=E7=8A=B6=E7=8A=B6=E7=8A=B6?="
+        );
+        assert_eq!(
+            encode_subject("状状状状状状状状"),
+            "=?UTF-8?q?=E7=8A=B6=E7=8A=B6=E7=8A=B6=E7=8A=B6=E7=8A=B6=E7=8A=B6=E7=8A=B6?= \
+             =?UTF-8?q?=E7=8A=B6?="
+        );
+    }
+
+    #[test]
+    fn q_encoding_escapes_control_bytes_and_literal_encoded_words() {
+        assert_eq!(
+            encode_subject("line\r\nbreak"),
+            "=?UTF-8?q?line=0D=0Abreak?="
+        );
+        // Already-encoded ASCII words are not ASCII-only? They are, so Go
+        // leaves them alone even though they look like an encoded word.
+        assert_eq!(encode_subject("=?UTF-8?q?x?="), "=?UTF-8?q?x?=");
     }
 }
