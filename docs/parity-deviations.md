@@ -314,3 +314,55 @@
 - **原因**：保证离线/CI 测试确定性。
 - **影响**：生产默认行为与 Go 一致；该字段不是用户配置项。
 - **迁移**：无需操作。
+
+## 待 B11 编号（B23 提交）
+
+以下条目由 B23 的差分测试（`scripts/differential-test.sh`）发现并提交内容，
+按维护规则不自行分配 D 编号，等待 B11 合并时编号。差分测试的临时编号
+（`DF-001` 等）只用于 [DIFFERENTIAL.md](DIFFERENTIAL.md)，不是正式 D 编号。
+
+### 新装默认站点描述不同
+
+- **Rust**：`/api/public` 首次读取缺失的 `description` 时使用
+  `"Komari Monitor, a simple server monitoring tool."` 并写回 `configs`。
+- **Go**：启动时 `config.GetManyAs[config.Legacy]()` 把 `config.Legacy` 的
+  `default:"A simple server monitor tool."` 写入 `configs`，因此
+  `/api/public`、`common:getPublicInfo` 和管理端设置读到的是该值。
+- **原因**：Rust 的公开设置回退文案沿用了 Go `database.GetPublicInfo` 的
+  缺失键回退，但 Go 实际启动时会先按 `config.Legacy` 的 default tag 落库。
+- **影响**：全新数据库上 `description` 不同；已有 `description` 行的数据库
+  不受影响。差分测试登记为 `DF-001`。
+- **迁移**：新装部署若要求与 Go 完全一致，可把 `description` 显式设为
+  `"A simple server monitor tool."`；或在 Rust 侧统一默认文案（需业务代码
+  变更，B23 未修改）。
+- **状态**：差分测试发现，待 B11 编号与确认。
+
+### 启动时配置默认值落库策略不同
+
+- **Rust**：配置默认值按 API 首次读取时惰性写回；全新库启动后
+  `GET /api/admin/settings` 只包含已被读取过的键。
+- **Go**：启动时 `config.GetManyAs[config.Legacy]()` 把所有带 `default` tag
+  的键写入 `configs`，因此管理端设置一开始就有完整键集。
+- **原因**：Rust 的 `ConfigRepo::get_as_or` 只在调用点写回；没有启动期全量
+  落库步骤。
+- **影响**：全新数据库上 Go 多出 `api_key`、`auto_discovery_key`、
+  `base_scripts_url`、`ddns_enabled`、`ddns_sync_interval`、`eula_accepted`、
+  `expire_notification_enabled`、`expire_notification_lead_days`、
+  `login_notification`、`notification_enabled`、`notification_method`、
+  `notification_template`、`script_domain`、`send_ip_addr_to_guest`、
+  `traffic_limit_percentage` 等行；两边对这些键的读取默认值一致。差分测试
+  登记为 `DF-002`。
+- **迁移**：依赖管理端返回完整键集的客户端需要自行补默认值；已有库通常
+  已包含这些行。
+- **状态**：差分测试发现，待 B11 编号与确认。
+
+### `/api/admin/settings` 尾斜杠重定向不同
+
+- **Rust**（axum）：`/api/admin/settings` 和 `/api/admin/settings/` 都直接
+  返回 200。
+- **Go**（Gin）：`GET /api/admin/settings` 返回 `301` 到
+  `/api/admin/settings/`，跟随重定向后才是 200。
+- **影响**：不跟随重定向的客户端看到 301 vs 200；跟随重定向的客户端最终
+  响应一致。差分测试登记为 `DF-003`。
+- **迁移**：客户端统一使用带尾斜杠的路径，或配置跟随重定向。
+- **状态**：差分测试发现，待 B11 编号与确认。
