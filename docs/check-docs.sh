@@ -82,6 +82,11 @@ for var in "${envs[@]}"; do
       need_any "$var" crates/komari-cli/src/version.rs
       continue
       ;;
+    KOMARI_RPC_ADMIN_METHODS)
+      # Read directly by komari-api's RPC registry, not by komari-config.
+      need_any "$var" crates/komari-api/src/rpc/registry.rs
+      continue
+      ;;
     KOMARI_COMPAT_DB)
       need_any "$var" crates/komari-db/tests/compat.rs
       continue

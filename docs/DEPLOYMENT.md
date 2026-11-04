@@ -4,13 +4,11 @@
 端口 `25774`。配置键的完整说明见 [CONFIGURATION.md](CONFIGURATION.md)，从 Go
 迁移的步骤见 [MIGRATION.md](MIGRATION.md)。
 
-> **当前实现边界（B11 基线）**
+> **当前实现边界**
 >
-> `komari server` 目前只解析配置并打印启动信息，不会 bind `25774`，也不提供
-> HTTP/WebSocket/静态页面。生产部署在 B04/B05/B06 合并并完成 B13 OAuth HTTP/
-> B14 静态路由装配前应继续使用 Go 版。
-> 本文的 systemd/Docker/反代配置是给 Rust 二进制落地后使用的，健康检查也会在
-> HTTP 层可用后才通过。模块状态见 [PARITY.md](PARITY.md)。
+> 第二轮合并后（B01–B21），`komari server` 已装配 HTTP/WebSocket/静态页面、
+> OAuth、后台任务和 cloudflared，并监听 `25774`。本文的 systemd/Docker/反代和
+> 健康检查配置可直接用于 Rust 二进制。模块状态见 [PARITY.md](PARITY.md)。
 
 ## 1. 构建
 
@@ -44,7 +42,7 @@ cargo build --release --locked -p komari-cli
     ├── komari.db          # SQLite 数据库
     ├── komari.db-wal      # 运行时存在
     ├── komari.db-shm      # 运行时存在
-    ├── theme/             # 自定义主题（B14 已实现，服务器装配后生效）
+    ├── theme/             # 自定义主题（B14 已实现并已装配）
     ├── favicon.ico        # 可选
     └── GeoLite2-Country.mmdb  # 使用 mmdb GeoIP 时
 ```
@@ -199,7 +197,7 @@ sudo chown -R 10001:10001 ./data
 - 镜像当前没有 `curl`/`wget`；不要在 compose 中写依赖这些命令的 healthcheck。
   请用宿主机/外部监控检查 `http://127.0.0.1:25774/ping`，或按 `Dockerfile`
   实际安装的工具调整。
-- 当前基线 HTTP 尚未监听，健康检查会失败；HTTP 层合并后才会返回 `pong`。
+- 健康检查应返回 `pong`；若失败，检查 `KOMARI_LISTEN`、端口映射和防火墙。
 - 若容器内需要 mmdb 自动下载，确保 `/app/data` 可写且容器能访问外网。
 - CORS 运行时以数据库 `configs.allow_cors` 为准；不要在 compose 中设置
   `KOMARI_ALLOW_CORS` 来“开启”运行时 CORS。
@@ -307,7 +305,7 @@ systemctl start komari
 - `sqlite3 .backup` 在 WAL 模式下是安全的；直接 `cp komari.db` 可能丢失 WAL 中
   尚未 checkpoint 的事务。
 - 主题、favicon、mmdb 不在数据库里，需要单独备份。
-- Go 版的 `/api/admin/download/backup` 会生成 zip；Rust admin API 由 B06 实现。
+- `/api/admin/download/backup` 会生成与 Go 兼容的 zip；恢复在下次启动时完成。
 
 ### 6.2 定时备份
 
@@ -345,7 +343,7 @@ chown -R komari:komari /opt/komari/data
 
 ### 7.1 HTTP
 
-Go 版和计划中的 Rust HTTP 层都提供：
+Go 版和 Rust 版都提供：
 
 ```sh
 curl -fsS http://127.0.0.1:25774/ping
@@ -368,8 +366,8 @@ ss -ltnp | grep 25774
 journalctl -u komari --since '10 min ago'
 ```
 
-当前 B11 基线不会监听端口，`ss` 看不到 `25774` 是预期行为；HTTP 层合并后再用
-上述检查。
+`ss` 应能看到 `25774`；若没有，检查启动日志中的 `Komari HTTP server assembled`
+和监听地址。
 
 ### 7.3 数据库
 
@@ -427,7 +425,7 @@ systemctl start komari
 
 ## 11. Go 回退部署
 
-Rust HTTP 层合并前，或需要立即回退时，使用同一个 unit，只替换 `ExecStart`：
+需要立即回退时，使用同一个 unit，只替换 `ExecStart`：
 
 ```ini
 ExecStart=/opt/komari/komari-go server
