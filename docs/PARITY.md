@@ -17,7 +17,7 @@
 | CLI / 启动配置 | `komari-cli`、`komari-config` | **已合并（B01）** | 子命令、flag/env 优先级、日志、版本注入。 |
 | 数据库 | `komari-db` | **已合并（B02）** | SQLite schema 兼容、key/value `configs`、仓储层。 |
 | 认证 | `komari-auth` | **已合并（B03）** | 密码、会话、TOTP、角色、私有站点中间件。 |
-| 公开 API / JSON-RPC | `komari-api` | **待实现（B04）** | 当前只有占位 `lib.rs`。 |
+| 公开 API / JSON-RPC | `komari-api` | **已合并（B04/B06/B18）** | public API、JSON-RPC 与 `/api/mjpeg_live`（B18 对齐 Go 布局/字体/语言参数）。 |
 | Agent API / WebSocket | `komari-api` | **待合并（B05）** | 截至 B11 基线（`main@0382eb3`）未合并；实现状态以本表为准。 |
 | 管理 API | `komari-api` | **待实现（B06）** | `/api/admin/*` 尚未移植。 |
 | 通知 | `komari-notify` | **已合并（B07）** | 7 个原生 provider + empty；Javascript 不支持；provider 脱敏（D-011）已合并。 |
@@ -178,3 +178,7 @@ B09 的服务器装配需要少量跨 crate 改动，均为验收项所需的最
 - `komari-notify`：新增 `renewal` 模块，供上线事件和每日 09:00 调度复用。
 - `komari-oauth`：仅随 main 的 B04/B06 合并同步，B09 未改变 provider 语义。
 - `docs`：更新服务器装配、OAuth、静态资源、浏览器 WS 与 body limit 状态。
+
+B18 提交的 MJPEG 剩余差异（直接读取仓储层、文本度量/JPEG 字节差异、测试开关）
+已按 B11 协议追加到 [parity-deviations.md](parity-deviations.md) 末尾，等待
+B11 统一编号。
