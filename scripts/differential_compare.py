@@ -909,7 +909,7 @@ def case_json(results: list[dict[str, Any]], case_id: str, side: str) -> Any:
 
 
 def run_invariants(
-    results: list[dict[str, Any]], visible_uuid: str, hidden_uuid: str
+    results: list[dict[str, Any]], visible_uuid: str, hidden_uuid: str, admin_user: str
 ) -> list[dict[str, Any]]:
     """Assertions that check semantics, not only Go/Rust equality."""
 
@@ -1007,7 +1007,7 @@ def run_invariants(
         me = case_json(results, "me_admin", side) or {}
         check(
             f"{side}: admin session is logged in",
-            me.get("logged_in") is True and me.get("username") == "admin",
+            me.get("logged_in") is True and me.get("username") == admin_user,
             f"body={me}",
         )
 
@@ -1096,7 +1096,9 @@ def main(argv: list[str]) -> int:
     all_diffs = [item for result in results for item in result["diffs"]]
     all_only = [item for result in results for item in result["only"]]
     all_known = [item for result in results for item in result["known"]]
-    invariants = run_invariants(results, args.visible_uuid, args.hidden_uuid)
+    invariants = run_invariants(
+        results, args.visible_uuid, args.hidden_uuid, args.admin_user
+    )
     invariant_failures = [item for item in invariants if not item["ok"]]
 
     if charset_cases:
