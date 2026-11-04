@@ -239,16 +239,15 @@ impl Config {
         };
         let enable_cloudflared = match overrides.enable_cloudflared {
             Some(value) => value,
-            None => match read(keys::ENV_ENABLE_CLOUDFLARED) {
-                Some(value) => parse_bool(keys::ENV_ENABLE_CLOUDFLARED, &value)?,
-                None => false,
-            },
+            None => read(keys::ENV_ENABLE_CLOUDFLARED)
+                .map(|value| parse_strict_true(&value))
+                .unwrap_or(false),
         };
         let cloudflared_token = read(keys::ENV_CLOUDFLARED_TOKEN);
         let ws_disable_origin = match overrides.ws_disable_origin {
             Some(value) => value,
             None => read(keys::ENV_WS_DISABLE_ORIGIN)
-                .map(|value| parse_ws_disable_origin(&value))
+                .map(|value| parse_strict_true(&value))
                 .unwrap_or(false),
         };
         let body_limit = match overrides.body_limit {
@@ -334,12 +333,13 @@ fn parse_bool(key: &str, value: &str) -> Result<bool, ConfigError> {
     }
 }
 
-/// Parse `KOMARI_WS_DISABLE_ORIGIN` exactly like Go's `ws.CheckOrigin`.
+/// Parse a Go-style strict environment boolean.
 ///
-/// Go uses `strings.EqualFold(os.Getenv(...), "true")` without trimming, so
-/// only a case-insensitive `true` disables the check; `1`, `yes`, `on`,
-/// ` true ` and every other value mean "disabled flag is off". Invalid values
-/// are not configuration errors.
-fn parse_ws_disable_origin(value: &str) -> bool {
+/// Go uses `strings.ToLower(os.Getenv(...)) == "true"` for
+/// `KOMARI_ENABLE_CLOUDFLARED` and `strings.EqualFold(..., "true")` for
+/// `KOMARI_WS_DISABLE_ORIGIN`: both accept only a case-insensitive `true`
+/// without trimming. `1`, `yes`, `on`, ` true ` and every other value mean
+/// false, and invalid values are not configuration errors.
+fn parse_strict_true(value: &str) -> bool {
     value.eq_ignore_ascii_case("true")
 }

@@ -55,7 +55,7 @@ fn environment_overrides_defaults() {
             (keys::ENV_LOG_LEVEL, "warn"),
             (keys::ENV_THEME, "dark"),
             (keys::ENV_ALLOW_CORS, "true"),
-            (keys::ENV_ENABLE_CLOUDFLARED, "1"),
+            (keys::ENV_ENABLE_CLOUDFLARED, "TRUE"),
             (keys::ENV_CLOUDFLARED_TOKEN, "token"),
             (keys::ENV_WS_DISABLE_ORIGIN, "TRUE"),
             (keys::ENV_BODY_LIMIT, "1048576"),
@@ -204,6 +204,33 @@ fn ws_disable_origin_env_only_accepts_case_insensitive_true() {
         assert!(
             !config.ws_disable_origin,
             "{value:?} must not disable the check"
+        );
+    }
+}
+
+#[test]
+fn enable_cloudflared_env_only_accepts_case_insensitive_true() {
+    for value in ["true", "TRUE", "True"] {
+        let config = load(
+            &[(keys::ENV_ENABLE_CLOUDFLARED, value)],
+            &ConfigOverrides::default(),
+        )
+        .expect("true values must load");
+        assert!(
+            config.enable_cloudflared,
+            "{value:?} should enable cloudflared"
+        );
+    }
+
+    for value in ["1", "yes", "on", " true ", "false", ""] {
+        let config = load(
+            &[(keys::ENV_ENABLE_CLOUDFLARED, value)],
+            &ConfigOverrides::default(),
+        )
+        .unwrap_or_else(|error| panic!("{value:?} must not be a config error: {error}"));
+        assert!(
+            !config.enable_cloudflared,
+            "{value:?} must not enable cloudflared"
         );
     }
 }
