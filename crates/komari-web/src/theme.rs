@@ -4,7 +4,7 @@ use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use thiserror::Error;
 
-use crate::PREVIEW_FILES;
+use crate::{DEFAULT_THEME, PREVIEW_FILES};
 
 /// Metadata from a theme's `komari-theme.json`.
 ///
@@ -87,5 +87,34 @@ impl ThemeInfo {
             }
         }
         candidates
+    }
+}
+
+/// Validate a theme package's `short` field the way Go's `isValidThemeShort`
+/// does before installing it.
+///
+/// `default` is reserved for the embedded theme; only ASCII letters, digits,
+/// `_` and `-` are accepted. This is stricter than [`crate::is_safe_theme_id`],
+/// which merely guards path traversal for themes that are already installed.
+pub fn is_valid_theme_short(short: &str) -> bool {
+    !short.is_empty()
+        && short != DEFAULT_THEME
+        && short
+            .bytes()
+            .all(|byte| byte.is_ascii_alphanumeric() || byte == b'_' || byte == b'-')
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn installable_short_matches_go() {
+        for valid in ["alpha", "Alpha_2", "my-theme", "0"] {
+            assert!(is_valid_theme_short(valid), "{valid}");
+        }
+        for invalid in ["", "default", "a b", "a/b", "..", "tëma", "a.b", "a\\b"] {
+            assert!(!is_valid_theme_short(invalid), "{invalid}");
+        }
     }
 }
