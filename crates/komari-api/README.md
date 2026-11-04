@@ -129,9 +129,14 @@ Known differences:
 
 - `GET /api/admin/2fa/generate` returns `image/png` QR code bytes and the
   `2fa_secret` cookie, matching Go. The otpauth URL is not returned as JSON.
-- Theme upload/update/import endpoints are not implemented (listing, switching,
-  deleting and per-theme settings are). They need ZIP/SSRF handling from the Go
-  implementation.
+- Theme upload/update/import match Go's request/response semantics, but add
+  hardening the Go backend lacks: a 64 MiB upload/download cap, a 128 MiB
+  uncompressed/extraction cap and entry-count limit (zip bombs), a 30 s request
+  timeout, redirect targets re-checked for SSRF, and atomic installation
+  (a failed package never removes the previously installed same-`short`
+  theme). Upload accepts both the bundled UI's `multipart/form-data` `file`
+  field and Go's raw ZIP body. Like Go, `dist/` and the preview image are not
+  required for installation.
 - `common:getRecords` iterates the current `clients` table, so records of
   already-deleted clients are not returned.
 - `common:getPublicInfo` does not merge managed-theme defaults from

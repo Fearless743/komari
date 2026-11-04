@@ -27,6 +27,7 @@ mod response;
 pub mod rpc;
 pub mod server;
 mod state;
+mod theme_fetch;
 pub mod ws;
 
 pub use admin::{admin_router, admin_router_with_state};
@@ -43,6 +44,7 @@ pub use server::{
     BackgroundConfig, BackgroundTasks, OAuthRuntime, Server, ServerBuilder, ServerConfig,
 };
 pub use state::{ApiConfig, ApiState};
+pub use theme_fetch::{HttpThemeFetcher, ThemeFetchError, ThemeFetcher};
 pub use ws::{ClientEvent, ClientEventKind, ConnectionHandle, PresenceSource, WsHub, check_origin};
 
 use axum::Router;
