@@ -11,6 +11,7 @@ base64 = "0.22"
 chrono = { workspace = true }
 komari-db = { workspace = true }
 parking_lot = { workspace = true }
+p521 = "0.13"
 rand = { workspace = true }
 reqwest = { workspace = true }
 ring = "0.17"
@@ -23,5 +24,7 @@ url = "2"
 
 [dev-dependencies]
 axum = { workspace = true }
-rsa = { version = "0.9", features = ["sha2"] }
+p256 = { version = "0.13", features = ["ecdsa"] }
+p384 = { version = "0.13", features = ["ecdsa"] }
+rsa = { version = "0.9", features = ["sha2", "getrandom"] }
 tokio = { workspace = true }
