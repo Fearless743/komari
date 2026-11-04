@@ -54,7 +54,7 @@ use komari_auth::{
 use komari_config::Config;
 use komari_db::{BackupOptions, Db, DbError, restore_pending_backup};
 use komari_ddns::DdnsService;
-use komari_geoip::GeoIpService;
+use komari_geoip::{DEFAULT_JANITOR_INTERVAL, GeoIpJanitor, GeoIpService};
 use komari_web::WebAssets;
 use tokio::net::TcpListener;
 use tower_http::trace::{DefaultOnResponse, MakeSpan, TraceLayer};
@@ -263,6 +263,7 @@ impl ServerBuilder {
                 warn!(%error, "failed to initialize GeoIP; continuing without lookups");
             }
         }
+        let geoip_janitor = geoip.spawn_janitor(DEFAULT_JANITOR_INTERVAL);
         state = state.with_geoip_service(geoip);
 
         let db = state.db.clone();
@@ -381,6 +382,7 @@ impl ServerBuilder {
             oauth,
             ddns,
             background,
+            geoip_janitor,
             router,
         })
     }
@@ -394,6 +396,7 @@ pub struct Server {
     oauth: OAuthRuntime,
     ddns: Arc<DdnsService>,
     background: BackgroundTasks,
+    geoip_janitor: GeoIpJanitor,
     router: Router,
 }
 
@@ -433,6 +436,7 @@ impl Server {
     pub fn cancel_background(&self) {
         self.state.shutdown_background();
         self.background.cancel();
+        self.geoip_janitor.shutdown();
     }
 
     /// A clone of the assembled router (state already applied).
@@ -530,6 +534,7 @@ impl Server {
         self.background
             .shutdown_with_timeout(self.config.shutdown_timeout)
             .await;
+        self.geoip_janitor.shutdown();
         info!(%address, "server stopped");
         result
     }
@@ -539,6 +544,7 @@ impl Drop for Server {
     fn drop(&mut self) {
         self.state.shutdown_background();
         self.background.cancel();
+        self.geoip_janitor.shutdown();
     }
 }
 

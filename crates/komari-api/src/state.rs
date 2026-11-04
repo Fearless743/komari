@@ -309,35 +309,80 @@ impl ApiState {
 
     /// Whether the `Origin` check is disabled.
     ///
-    /// Go accepts only a case-insensitive `"true"` in
-    /// `KOMARI_WS_DISABLE_ORIGIN`; the environment is read on each upgrade so
-    /// changes take effect without rebuilding the state.
+    /// The value comes from the resolved startup configuration
+    /// (`--ws-disable-origin` flag, then `KOMARI_WS_DISABLE_ORIGIN`, then the
+    /// default). It is not re-read from the environment, so an explicit
+    /// `--ws-disable-origin=false` cannot be overridden by a stale environment
+    /// variable.
     pub fn ws_disable_origin(&self) -> bool {
         self.config.ws_disable_origin
-            || std::env::var(keys::ENV_WS_DISABLE_ORIGIN)
-                .map(|value| parse_ws_disable_origin(&value))
-                .unwrap_or(false)
     }
-}
-
-fn parse_ws_disable_origin(value: &str) -> bool {
-    // Go compares against "true" with `strings.EqualFold` without trimming;
-    // values like "1", "yes" and " true " do *not* disable the check.
-    value.eq_ignore_ascii_case("true")
 }
 
 #[cfg(test)]
 mod tests {
+    use std::ffi::OsString;
+
     use super::*;
 
-    #[test]
-    fn ws_disable_origin_only_accepts_true() {
-        assert!(parse_ws_disable_origin("true"));
-        assert!(parse_ws_disable_origin("TRUE"));
-        assert!(!parse_ws_disable_origin(" True "));
-        assert!(!parse_ws_disable_origin("1"));
-        assert!(!parse_ws_disable_origin("yes"));
-        assert!(!parse_ws_disable_origin("on"));
-        assert!(!parse_ws_disable_origin(""));
+    struct EnvGuard {
+        key: &'static str,
+        previous: Option<OsString>,
+    }
+
+    impl EnvGuard {
+        fn set(key: &'static str, value: &str) -> Self {
+            let previous = std::env::var_os(key);
+            // SAFETY: tests that touch this variable are serialized by the
+            // single state-level test below and restore it on drop.
+            unsafe { std::env::set_var(key, value) };
+            Self { key, previous }
+        }
+    }
+
+    impl Drop for EnvGuard {
+        fn drop(&mut self) {
+            // SAFETY: see `EnvGuard::set`.
+            unsafe {
+                match self.previous.take() {
+                    Some(value) => std::env::set_var(self.key, value),
+                    None => std::env::remove_var(self.key),
+                }
+            }
+        }
+    }
+
+    fn memory_db() -> Db {
+        let db = Db::open_in_memory().expect("open in-memory database");
+        db.migrate().expect("migrate database");
+        db
+    }
+
+    #[tokio::test]
+    async fn ws_disable_origin_uses_resolved_config_not_runtime_env() {
+        let _env = EnvGuard::set(keys::ENV_WS_DISABLE_ORIGIN, "true");
+
+        let disabled = ApiState::with_config(
+            memory_db(),
+            ApiConfig {
+                ws_disable_origin: true,
+                ..ApiConfig::default()
+            },
+        );
+        assert!(disabled.ws_disable_origin());
+        disabled.shutdown_background();
+
+        let enabled = ApiState::with_config(
+            memory_db(),
+            ApiConfig {
+                ws_disable_origin: false,
+                ..ApiConfig::default()
+            },
+        );
+        assert!(
+            !enabled.ws_disable_origin(),
+            "an explicit false must not be overridden by the environment"
+        );
+        enabled.shutdown_background();
     }
 }
