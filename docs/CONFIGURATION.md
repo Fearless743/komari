@@ -13,10 +13,9 @@
 
 > **当前实现边界**
 >
-> 本基线的 `komari server` 只解析配置并打印启动信息，HTTP 监听、WebSocket、
-> CORS 和 cloudflared 启动尚未装配（分别由 B04/B05/B06 及 B13/B14 服务器装配负责）。
-> 下文中标注“已解析”的配置项已经进入 `Config`，但其运行时效果要等对应模块合并后
-> 才会生效；标注“已实现”的模块可以直接使用。部署现状见
+> 本基线的 `komari server` 已经装配 HTTP、WebSocket 与 CORS；cloudflared 的
+> 运行时行为见第 6 节。下文中标注“已解析”的配置项已经进入 `Config`，但其运行时
+> 效果要等对应模块合并后才会生效；标注“已实现”的模块可以直接使用。部署现状见
 > [DEPLOYMENT.md](DEPLOYMENT.md)，模块状态见 [PARITY.md](PARITY.md)。
 
 ## 1. 配置优先级
@@ -45,8 +44,8 @@ CLI 的 `--database` 与 `--db-file` 是同一个参数，`--db-file` 是可见�
 | `KOMARI_LOG_LEVEL` | `--log-level` | 开发构建 `debug`，否则 `info` | `trace`、`debug`、`info`、`warn`、`error`、`off`；另接受别名 `warning`、`none`。 |
 | `KOMARI_THEME` | `--theme` | `default` | 启动配置中的主题名。实际站点主题以数据库 `configs.theme` 为准。 |
 | `KOMARI_ALLOW_CORS` | `--allow-cors[=BOOL]` | `false` | 启动配置中的 CORS 开关。运行时 CORS 由持久化 `allow_cors` 控制。 |
-| `KOMARI_ENABLE_CLOUDFLARED` | `--enable-cloudflared[=BOOL]` | `false` | 是否启用 cloudflared。当前只解析，尚未启动隧道进程。 |
-| `KOMARI_CLOUDFLARED_TOKEN` | 无 | 未设置 | cloudflared tunnel token。当前只解析，尚未使用。 |
+| `KOMARI_ENABLE_CLOUDFLARED` | `--enable-cloudflared[=BOOL]` | `false` | 是否启用 cloudflared；为 `true` 且 token 非空时启动隧道。 |
+| `KOMARI_CLOUDFLARED_TOKEN` | 无 | 未设置 | cloudflared tunnel token；仅在 `KOMARI_ENABLE_CLOUDFLARED=true` 时使用。 |
 | `KOMARI_WS_DISABLE_ORIGIN` | `--ws-disable-origin[=BOOL]` | `false` | 是否关闭 WebSocket Origin 校验。当前只解析，WS 由 B05/B14 装配。 |
 | `KOMARI_BODY_LIMIT` | `--body-limit <BYTES>` | `16777216`（16 MiB） | 普通 HTTP 请求体上限（字节），必须为正整数。`/api/admin/upload/backup` 使用独立的 2 GiB 上限。 |
 
@@ -200,10 +199,19 @@ SQLite 连接由 `crates/komari-db/src/db.rs` 的 `DbOptions` 控制；CLI 只�
 
 ### cloudflared
 
-- `KOMARI_ENABLE_CLOUDFLARED` / `--enable-cloudflared` 默认 `false`。
-- `KOMARI_CLOUDFLARED_TOKEN` 没有对应 CLI 参数。
-- 当前 Rust 只把这两个值读入 `Config`，没有下载/启动 `cloudflared` 的代码；
-  需要隧道时请继续使用 Go 版或外部 systemd 服务。
+- `KOMARI_CLOUDFLARED_TOKEN` 没有对应 CLI 参数；只有
+  `KOMARI_ENABLE_CLOUDFLARED=true` 且 token 非空时服务器才启动隧道，否则不下载
+  也不启动。
+- 首次启动按平台/架构从 GitHub Releases 下载到 `data/cloudflared`
+  （Windows 为 `data/cloudflared.exe`），非 Windows 设置为 `0755`；文件已存在时
+  直接复用，不重复下载。macOS 下载的 `.tgz` 会在安装时解包。
+- 运行参数为 `cloudflared tunnel --no-autoupdate run --token <token>`，
+  stdout/stderr 逐行以 `[cloudflared]` 前缀记录；token 不会出现在日志、
+  `Debug` 输出或错误信息中。
+- 服务器优雅关闭时终止子进程。与 Go 直接 `os.Exit(1)` 不同，Rust 在隧道进程
+  意外退出时记录退出码并触发服务器优雅关闭，不会在库内直接退出进程。
+- 启动门控与 Go 一致：`KOMARI_ENABLE_CLOUDFLARED=true` 且 token 非空。
+  `ServerBuilder::with_cloudflared` 可在测试或自定义装配中显式绕过该门控。
 
 ## 7. 持久化站点设置（`configs` 表）
 

@@ -27,6 +27,7 @@
 
 mod assets;
 mod background;
+pub mod cloudflared;
 pub mod oauth;
 
 pub use assets::{
@@ -34,6 +35,10 @@ pub use assets::{
     refresh_web_assets,
 };
 pub use background::{BackgroundConfig, BackgroundTasks};
+pub use cloudflared::{
+    ArchiveFormat, Cloudflared, CloudflaredConfig, CloudflaredError, CloudflaredExit,
+    CloudflaredTarget, Downloader, HttpDownloader, current_target, install_binary, target_for,
+};
 pub use oauth::{BINDING_COOKIE, OAUTH_STATE_COOKIE, OAuthRuntime, SESSION_COOKIE};
 
 use std::future::{Future, IntoFuture};
@@ -77,12 +82,20 @@ pub const DEFAULT_BODY_LIMIT: usize = 16 * 1024 * 1024;
 pub const DEFAULT_BACKUP_BODY_LIMIT: usize = 2 * 1024 * 1024 * 1024;
 
 /// Startup configuration for the HTTP server.
-#[derive(Clone, Debug)]
+#[derive(Clone)]
 pub struct ServerConfig {
     pub listen: String,
     pub database_path: PathBuf,
     /// Data directory containing themes, favicon and `backup.zip`.
     pub data_dir: PathBuf,
+    /// Go-compatible `KOMARI_ENABLE_CLOUDFLARED` switch. A tunnel only starts
+    /// when this is `true` **and** [`Self::cloudflared_token`] is non-empty.
+    ///
+    /// [`ServerBuilder::with_cloudflared`] is an explicit bypass for tests and
+    /// custom assemblies.
+    pub enable_cloudflared: bool,
+    /// Tunnel token. The binary is installed into [`Self::data_dir`].
+    pub cloudflared_token: Option<String>,
     pub theme: String,
     pub api: ApiConfig,
     pub background: BackgroundConfig,
@@ -96,12 +109,37 @@ pub struct ServerConfig {
     pub shutdown_timeout: Duration,
 }
 
+impl std::fmt::Debug for ServerConfig {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter
+            .debug_struct("ServerConfig")
+            .field("listen", &self.listen)
+            .field("database_path", &self.database_path)
+            .field("data_dir", &self.data_dir)
+            .field("enable_cloudflared", &self.enable_cloudflared)
+            .field(
+                "cloudflared_token",
+                &self.cloudflared_token.as_ref().map(|_| "<redacted>"),
+            )
+            .field("theme", &self.theme)
+            .field("api", &self.api)
+            .field("background", &self.background)
+            .field("body_limit_bytes", &self.body_limit_bytes)
+            .field("backup_body_limit_bytes", &self.backup_body_limit_bytes)
+            .field("request_logging", &self.request_logging)
+            .field("shutdown_timeout", &self.shutdown_timeout)
+            .finish()
+    }
+}
+
 impl Default for ServerConfig {
     fn default() -> Self {
         Self {
             listen: DEFAULT_LISTEN.to_owned(),
             database_path: PathBuf::from(DEFAULT_DB_FILE),
             data_dir: PathBuf::from("data"),
+            enable_cloudflared: false,
+            cloudflared_token: None,
             theme: "default".to_owned(),
             api: ApiConfig::default(),
             background: BackgroundConfig::default(),
@@ -124,6 +162,8 @@ impl ServerConfig {
             listen: config.listen.clone(),
             database_path,
             data_dir,
+            enable_cloudflared: config.enable_cloudflared,
+            cloudflared_token: config.cloudflared_token.clone(),
             theme: config.theme.clone(),
             api: ApiConfig {
                 allow_cors: config.allow_cors,
@@ -144,6 +184,7 @@ pub struct ServerBuilder {
     state: Option<ApiState>,
     assets: Option<Arc<WebAssets>>,
     oauth: Option<OAuthRuntime>,
+    cloudflared: Option<CloudflaredConfig>,
     public_router: Option<Router>,
     admin_router: Option<Router>,
     rpc_router: Option<Router>,
@@ -160,6 +201,7 @@ impl ServerBuilder {
             state: None,
             assets: None,
             oauth: None,
+            cloudflared: None,
             public_router: None,
             admin_router: None,
             rpc_router: None,
@@ -188,6 +230,14 @@ impl ServerBuilder {
 
     pub fn with_oauth(mut self, oauth: OAuthRuntime) -> Self {
         self.oauth = Some(oauth);
+        self
+    }
+
+    /// Start an explicit cloudflared tunnel. Takes precedence over
+    /// [`ServerConfig::cloudflared_token`] and allows tests to inject a target
+    /// and downloader.
+    pub fn with_cloudflared(mut self, cloudflared: CloudflaredConfig) -> Self {
+        self.cloudflared = Some(cloudflared);
         self
     }
 
@@ -362,6 +412,30 @@ impl ServerBuilder {
             );
         }
 
+        let cloudflared_config = self.cloudflared.or_else(|| {
+            (config.enable_cloudflared
+                && !config
+                    .cloudflared_token
+                    .as_deref()
+                    .unwrap_or("")
+                    .trim()
+                    .is_empty())
+            .then(|| {
+                CloudflaredConfig::new(
+                    config.data_dir.clone(),
+                    config.cloudflared_token.as_deref().unwrap_or_default(),
+                )
+            })
+        });
+        let cloudflared = match cloudflared_config {
+            Some(cloudflared) => Some(
+                Cloudflared::start(cloudflared)
+                    .await
+                    .context("failed to start cloudflared")?,
+            ),
+            None => None,
+        };
+
         let background =
             BackgroundTasks::start(&state, assets.clone(), ddns.clone(), &config.background);
 
@@ -380,6 +454,7 @@ impl ServerBuilder {
             assets,
             oauth,
             ddns,
+            cloudflared,
             background,
             router,
         })
@@ -393,6 +468,7 @@ pub struct Server {
     assets: Arc<WebAssets>,
     oauth: OAuthRuntime,
     ddns: Arc<DdnsService>,
+    cloudflared: Option<Cloudflared>,
     background: BackgroundTasks,
     router: Router,
 }
@@ -426,6 +502,11 @@ impl Server {
 
     pub fn background(&self) -> &BackgroundTasks {
         &self.background
+    }
+
+    /// The running tunnel, when `cloudflared_token` was configured.
+    pub fn cloudflared(&self) -> Option<&Cloudflared> {
+        self.cloudflared.as_ref()
     }
 
     /// Stop every background loop owned by the server, including the presence
@@ -492,35 +573,80 @@ impl Server {
         // `Server` implements `Drop`, so the router is moved out instead of
         // destructuring `self`.
         let router = std::mem::replace(&mut self.router, Router::new());
-        // Signal the select branch only after the caller's shutdown future
-        // completes. The timeout must not start when the server starts.
-        let (shutdown_tx, shutdown_rx) = tokio::sync::oneshot::channel();
-        let shutdown = async move {
-            shutdown.await;
-            let _ = shutdown_tx.send(());
+        // Both the caller's shutdown future and a cloudflared exit feed the
+        // same watch channel. Axum's graceful-shutdown future waits on it, so
+        // a tunnel exit stops accepting connections immediately instead of
+        // waiting for the timeout to expire.
+        let (shutdown_tx, shutdown_rx) = tokio::sync::watch::channel(None::<ShutdownReason>);
+        let cloudflared = self.cloudflared.clone();
+        let trigger = async move {
+            let reason = tokio::select! {
+                () = shutdown => ShutdownReason::Caller,
+                () = wait_for_cloudflared(cloudflared) => ShutdownReason::Cloudflared,
+            };
+            let _ = shutdown_tx.send(Some(reason));
         };
         let serve = axum::serve(
             listener,
             router.into_make_service_with_connect_info::<SocketAddr>(),
         )
-        .with_graceful_shutdown(shutdown)
+        .with_graceful_shutdown(trigger)
         .into_future();
         tokio::pin!(serve);
+        let mut reason_rx = shutdown_rx.clone();
         let result = tokio::select! {
-            result = &mut serve => result.context("HTTP server failed"),
-            _ = shutdown_rx => {
-                match tokio::time::timeout(self.config.shutdown_timeout, &mut serve).await {
-                    Ok(result) => result.context("HTTP server failed"),
+            result = &mut serve => {
+                let result = result.context("HTTP server failed");
+                // Axum can finish draining before this task observes the
+                // watch change; the recorded reason still decides the exit
+                // status.
+                match *shutdown_rx.borrow() {
+                    Some(ShutdownReason::Cloudflared) => Err(anyhow::anyhow!(
+                        "cloudflared exited; shutting down the server"
+                    )),
+                    _ => result,
+                }
+            }
+            _ = reason_rx.changed() => {
+                let reason = *reason_rx.borrow();
+                if let Some(reason) = reason {
+                    info!(?reason, "shutdown requested");
+                }
+                // Go's OnShutdown kills cloudflared before shutting the HTTP
+                // server down.
+                if let Some(cloudflared) = &self.cloudflared {
+                    cloudflared.request_kill();
+                }
+                let drained =
+                    tokio::time::timeout(self.config.shutdown_timeout, &mut serve).await;
+                match drained {
+                    Ok(result) => {
+                        let result = result.context("HTTP server failed");
+                        match reason {
+                            Some(ShutdownReason::Cloudflared) => Err(anyhow::anyhow!(
+                                "cloudflared exited; shutting down the server"
+                            )),
+                            _ => result,
+                        }
+                    }
                     Err(_) => {
                         warn!(
                             timeout = ?self.config.shutdown_timeout,
                             "graceful shutdown timed out; forcing shutdown"
                         );
-                        Ok(())
+                        match reason {
+                            Some(ShutdownReason::Cloudflared) => Err(anyhow::anyhow!(
+                                "cloudflared exited; graceful shutdown timed out"
+                            )),
+                            _ => Ok(()),
+                        }
                     }
                 }
             }
         };
+        if let Some(cloudflared) = &self.cloudflared {
+            cloudflared.kill().await;
+        }
         let _ = self
             .state
             .db
@@ -537,8 +663,24 @@ impl Server {
 
 impl Drop for Server {
     fn drop(&mut self) {
+        if let Some(cloudflared) = &self.cloudflared {
+            cloudflared.request_kill();
+        }
         self.state.shutdown_background();
         self.background.cancel();
+    }
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum ShutdownReason {
+    Caller,
+    Cloudflared,
+}
+
+async fn wait_for_cloudflared(cloudflared: Option<Cloudflared>) {
+    match cloudflared {
+        Some(cloudflared) => cloudflared.exited().await,
+        None => std::future::pending().await,
     }
 }
 

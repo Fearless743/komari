@@ -188,3 +188,58 @@
 - **调用点**：B06 的 GET/list 响应路径调用 `redact_addition`；写路径始终使用原始
   `addition`。
 - **状态**：已合并（B07）；待 B06 接入 API 并对等验收。
+
+## 待 B11 编号（D-012 起）
+
+以下条目由 B17 提交内容，编号与最终措辞由 B11 统一分配。
+
+### cloudflared macOS 下载会解包 `.tgz`
+
+- **Rust**：macOS 目标下载 `cloudflared-darwin-*.tgz` 后，从归档中提取
+  `cloudflared` 成员写入 `data/cloudflared`，再设置 `0755`。
+- **Go**：`utils/cloudflared` 把 `.tgz` 响应直接写入 `data/cloudflared` 并尝试
+  执行，没有解包步骤；在 macOS 上通常无法直接运行。
+- **原因**：让 macOS 上的隧道实际可用。
+- **影响**：Rust 生成的 `data/cloudflared` 是真正的可执行文件；从 Go 迁移时，如果
+  `data/cloudflared` 已存在且实际是 `.tgz`，Rust 会按“已存在则复用”直接使用并
+  启动失败。
+- **迁移**：macOS 从 Go 切到 Rust 前删除旧的 `data/cloudflared`，让 Rust 重新下载
+  并解包；其他平台不受影响。
+- **状态**：有意修正，待 B17 对等验收确认。
+
+### cloudflared 下载严格检查 HTTP 状态码
+
+- **Rust**：`HttpDownloader` 只在 `2xx` 时写入文件；非 `2xx` 返回
+  `CloudflaredError::Download`，不会安装响应体。
+- **Go**：`http.Get` 后不检查 `StatusCode`，会把 404/重定向错误页当作可执行文件
+  写入 `data/cloudflared`。
+- **原因**：避免把 HTML 错误页安装成二进制并产生难以诊断的启动错误。
+- **影响**：GitHub 不可达、代理返回 403/404 时 Rust 启动失败并保留原文件；Go 可能
+  先写入错误内容再启动失败。两者都不会启动隧道，但磁盘状态不同。
+- **迁移**：确保服务器可访问 GitHub Releases；失败时按错误提示检查代理/网络。
+- **状态**：有意安全差异，待 B17 对等验收确认。
+
+### cloudflared 意外退出的关闭方式与退出码
+
+- **Rust**：记录子进程退出码，向 HTTP 服务发送关闭信号，按
+  `shutdown_timeout` 完成 drain 后让 `serve` 返回错误，CLI 最终以退出码 `1`
+  结束。
+- **Go**：在等待 goroutine 中记录日志后直接 `os.Exit(1)`，HTTP 服务没有机会
+  graceful shutdown。
+- **原因**：Rust 库代码不应直接终止进程；同时保留 Go 的非零退出码语义。
+- **影响**：退出码一致（`1`）；Rust 会短暂等待连接排空并执行后台任务清理，Go 立即
+  退出。若 `shutdown_timeout` 内仍有长连接，Rust 会在超时后强制结束。
+- **迁移**：依赖退出码的编排逻辑无需修改；需要立即退出时可缩短
+  `ServerConfig::shutdown_timeout`。
+- **状态**：有意差异，待 B17 对等验收确认。
+
+### `KOMARI_ENABLE_CLOUDFLARED` 布尔字面量更宽松
+
+- **Rust**：沿用配置层布尔解析，接受 `true` / `1` / `yes` / `on`（大小写不敏感）。
+- **Go**：`cmd/server.go` 只把 `strings.ToLower(value) == "true"` 视为启用。
+- **原因**：与 `KOMARI_ALLOW_CORS`、`KOMARI_WS_DISABLE_ORIGIN` 共用解析器，行为
+  一致（参见 D-005）。
+- **影响**：部署脚本写 `KOMARI_ENABLE_CLOUDFLARED=1` 时 Rust 会启动隧道而 Go 不会；
+  从 Rust 回退 Go 时可能出现“配置没变但隧道不再启动”。
+- **迁移**：跨版本部署统一使用 `true` / `false`。
+- **状态**：有意差异（更宽松），待 B17 对等验收确认。
