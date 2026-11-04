@@ -18,7 +18,7 @@ use komari_geoip::providers::ipapi::IpApiProvider;
 use komari_geoip::providers::ipinfo::IpInfoProvider;
 use komari_geoip::providers::mmdb::MaxMindProvider;
 use komari_geoip::region_unicode_emoji;
-use komari_geoip::service::GeoIpService;
+use komari_geoip::service::{DEFAULT_CACHE_TTL, GeoIpService};
 use support::{MockResponse, MockServer};
 
 const MMDB_FIXTURE: &str = concat!(
@@ -581,7 +581,7 @@ async fn cache_expires_and_reinvokes_provider() {
 }
 
 #[tokio::test]
-async fn cache_capacity_evicts_old_entries() {
+async fn cache_has_no_capacity_limit_like_go_cache() {
     let db = database();
     db.config().set(GEO_IP_ENABLED_KEY, &true).expect("enable");
     db.config()
@@ -602,18 +602,28 @@ async fn cache_capacity_evicts_old_entries() {
 
     let service = GeoIpService::new()
         .with_factory(factory)
-        .with_database(Arc::clone(&db))
-        .with_cache_capacity(2);
+        .with_database(Arc::clone(&db));
     service.initialize().await.expect("initialize");
 
-    for address in ["8.8.8.8", "1.1.1.1", "9.9.9.9"] {
-        let _ = service.lookup(ip(address)).await;
+    // More unique addresses than the old 10_000 entry cap. Go's go-cache has
+    // no capacity limit, so every lookup must stay cached until the TTL.
+    let total = 10_050_u32;
+    for index in 0..total {
+        let address = IpAddr::from(std::net::Ipv4Addr::from(0x0a00_0000 + index));
+        let _ = service.lookup(address).await;
     }
-    assert_eq!(service.cache_len(), 2);
-    assert_eq!(calls.load(Ordering::SeqCst), 3);
+    assert_eq!(service.cache_len(), total as usize);
+    assert_eq!(calls.load(Ordering::SeqCst), total as usize);
 
-    let _ = service.lookup(ip("8.8.8.8")).await;
-    assert_eq!(calls.load(Ordering::SeqCst), 4);
+    // The first entry is still cached, so the provider is not called again.
+    let first = IpAddr::from(std::net::Ipv4Addr::from(0x0a00_0000));
+    let _ = service.lookup(first).await;
+    assert_eq!(calls.load(Ordering::SeqCst), total as usize);
+}
+
+#[test]
+fn default_cache_ttl_matches_go() {
+    assert_eq!(DEFAULT_CACHE_TTL, Duration::from_secs(48 * 60 * 60));
 }
 
 #[tokio::test]

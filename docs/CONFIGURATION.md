@@ -13,11 +13,10 @@
 
 > **当前实现边界**
 >
-> 本基线的 `komari server` 只解析配置并打印启动信息，HTTP 监听、WebSocket、
-> CORS 和 cloudflared 启动尚未装配（分别由 B04/B05/B06 及 B13/B14 服务器装配负责）。
-> 下文中标注“已解析”的配置项已经进入 `Config`，但其运行时效果要等对应模块合并后
-> 才会生效；标注“已实现”的模块可以直接使用。部署现状见
-> [DEPLOYMENT.md](DEPLOYMENT.md)，模块状态见 [PARITY.md](PARITY.md)。
+> 本基线的 `komari server` 已装配 HTTP 监听、WebSocket、CORS、后台任务和
+> GeoIP/DDNS/通知/OAuth 服务；cloudflared 的运行时行为见第 6 节。
+> 下文中标注“已解析”的配置项已经进入 `Config`；标注“已实现”的模块可以直接使用。
+> 部署现状见 [DEPLOYMENT.md](DEPLOYMENT.md)，模块状态见 [PARITY.md](PARITY.md)。
 
 ## 1. 配置优先级
 
@@ -45,9 +44,9 @@ CLI 的 `--database` 与 `--db-file` 是同一个参数，`--db-file` 是可见�
 | `KOMARI_LOG_LEVEL` | `--log-level` | 开发构建 `debug`，否则 `info` | `trace`、`debug`、`info`、`warn`、`error`、`off`；另接受别名 `warning`、`none`。 |
 | `KOMARI_THEME` | `--theme` | `default` | 启动配置中的主题名。实际站点主题以数据库 `configs.theme` 为准。 |
 | `KOMARI_ALLOW_CORS` | `--allow-cors[=BOOL]` | `false` | 启动配置中的 CORS 开关。运行时 CORS 由持久化 `allow_cors` 控制。 |
-| `KOMARI_ENABLE_CLOUDFLARED` | `--enable-cloudflared[=BOOL]` | `false` | 是否启用 cloudflared。当前只解析，尚未启动隧道进程。 |
-| `KOMARI_CLOUDFLARED_TOKEN` | 无 | 未设置 | cloudflared tunnel token。当前只解析，尚未使用。 |
-| `KOMARI_WS_DISABLE_ORIGIN` | `--ws-disable-origin[=BOOL]` | `false` | 是否关闭 WebSocket Origin 校验。当前只解析，WS 由 B05/B14 装配。 |
+| `KOMARI_ENABLE_CLOUDFLARED` | `--enable-cloudflared[=BOOL]` | `false` | 是否启用 cloudflared；环境变量只接受大小写不敏感的 `true`，为 `true` 且 token 非空时启动隧道。 |
+| `KOMARI_CLOUDFLARED_TOKEN` | 无 | 未设置 | cloudflared tunnel token；仅在 `KOMARI_ENABLE_CLOUDFLARED=true` 时使用。 |
+| `KOMARI_WS_DISABLE_ORIGIN` | `--ws-disable-origin[=BOOL]` | `false` | 是否关闭 WebSocket Origin 校验；环境变量只接受大小写不敏感的 `true`。 |
 | `KOMARI_BODY_LIMIT` | `--body-limit <BYTES>` | `16777216`（16 MiB） | 普通 HTTP 请求体上限（字节），必须为正整数。`/api/admin/upload/backup` 使用独立的 2 GiB 上限。 |
 
 ### 编译期与测试变量
@@ -76,6 +75,9 @@ CLI 的 `--database` 与 `--db-file` 是同一个参数，`--db-file` 是可见�
 
 - 环境变量：`1` / `true` / `yes` / `on` 为真，`0` / `false` / `no` / `off` 为假；
   大小写不敏感，前后空白会被忽略。
+- 例外：`KOMARI_WS_DISABLE_ORIGIN` 与 `KOMARI_ENABLE_CLOUDFLARED` 只接受大小写
+  不敏感的 `true`；`1`、`yes`、`on`、` true ` 以及其他值都视为 `false`，且不会
+  产生配置错误。
 - CLI flag：clap 的 `BoolValueParser` **只接受小写 `true` / `false`**；
   `--flag` 等价于 `--flag=true`。`--flag=1`、`--flag=TRUE`、`--flag=yes` 会报
   `invalid value` 并以退出码 `2` 退出。
@@ -181,29 +183,41 @@ SQLite 连接由 `crates/komari-db/src/db.rs` 的 `DbOptions` 控制；CLI 只�
 - 站点实际主题读取数据库 `configs` 表的 `theme` 键（默认 `default`）。
 - Go 版从 `public/defaultTheme` 嵌入前端，并从 `data/theme/<name>` 读取自定义主题；
   Rust 的 `komari-web`（B14）已实现默认主题嵌入、`/themes/{id}/{path}`、
-  `/favicon.ico` 和 SPA 回退；服务器装配 `routes_for` / `serve_fallback` 后才会
-  通过 HTTP 提供页面。
+  `/favicon.ico` 和 SPA 回退；服务器已装配 `routes_for` / `serve_fallback`，通过
+  HTTP 提供页面。主题上传接口为 `/api/admin/theme/upload`，单次归档上限 64 MiB。
 
 ### CORS
 
 - 启动配置：`KOMARI_ALLOW_CORS` / `--allow-cors`，默认 `false`。
 - 运行时配置：数据库 `configs.allow_cors`，默认 `false`。
-- Go 版在每次请求时读取持久化值并动态设置 CORS 头；Rust 的 HTTP 层尚未装配，
-  B04/B06 接入时应以持久化 `allow_cors` 为准。
+- Rust 的 CORS 中间件在每次请求时读取持久化 `allow_cors` 并设置响应头；浏览器
+  WebSocket 升级也按同一值放行。
 
 ### WebSocket Origin
 
 - 启动配置：`KOMARI_WS_DISABLE_ORIGIN` / `--ws-disable-origin`，默认 `false`。
+- 环境变量只接受大小写不敏感的 `true`（与 Go 一致）；`1`/`yes`/`on` 不会关闭
+  校验。
 - 预期行为：为 `true` 时跳过 Origin 校验；否则要求 `Origin` 的 host 与请求
   `Host` 一致。浏览器 WebSocket 还会在 `allow_cors=true` 时直接放行。
-- 当前只有配置解析；具体升级逻辑由 B05（agent/browser WS）和 B14（页面）装配。
+- 该值在启动时解析为 `Config`，运行时不重新读取环境变量；`--ws-disable-origin=false`
+  不会被残留的 `KOMARI_WS_DISABLE_ORIGIN=true` 覆盖。
 
 ### cloudflared
 
-- `KOMARI_ENABLE_CLOUDFLARED` / `--enable-cloudflared` 默认 `false`。
-- `KOMARI_CLOUDFLARED_TOKEN` 没有对应 CLI 参数。
-- 当前 Rust 只把这两个值读入 `Config`，没有下载/启动 `cloudflared` 的代码；
-  需要隧道时请继续使用 Go 版或外部 systemd 服务。
+- `KOMARI_CLOUDFLARED_TOKEN` 没有对应 CLI 参数；只有
+  `KOMARI_ENABLE_CLOUDFLARED=true` 且 token 非空时服务器才启动隧道，否则不下载
+  也不启动。
+- 首次启动按平台/架构从 GitHub Releases 下载到 `data/cloudflared`
+  （Windows 为 `data/cloudflared.exe`），非 Windows 设置为 `0755`；文件已存在时
+  直接复用，不重复下载。macOS 下载的 `.tgz` 会在安装时解包。
+- 运行参数为 `cloudflared tunnel --no-autoupdate run --token <token>`，
+  stdout/stderr 逐行以 `[cloudflared]` 前缀记录；token 不会出现在日志、
+  `Debug` 输出或错误信息中。
+- 服务器优雅关闭时终止子进程。与 Go 直接 `os.Exit(1)` 不同，Rust 在隧道进程
+  意外退出时记录退出码并触发服务器优雅关闭，不会在库内直接退出进程。
+- 启动门控与 Go 一致：`KOMARI_ENABLE_CLOUDFLARED=true` 且 token 非空。
+  `ServerBuilder::with_cloudflared` 可在测试或自定义装配中显式绕过该门控。
 
 ## 7. 持久化站点设置（`configs` 表）
 
@@ -292,8 +306,8 @@ Time: {{time}}
 - `ip-api` 使用 `http://ip-api.com/json/<ip>`；`ipinfo` 使用
   `https://ipinfo.io/<ip>/json`；`geojs` 使用
   `https://get.geojs.io/v1/ip/geo/<ip>.json`。
-- 查询结果缓存 48 小时，缓存容量上限 10,000 条（Rust 扩展，见
-  [parity-deviations.md](parity-deviations.md) D-004）。
+- 查询结果缓存 48 小时，与 Go 的 `go-cache` 一致没有容量上限；后台 janitor
+  每小时清理一次过期条目，查询时也会惰性清理。
 - provider 初始化失败或 `geo_ip_enabled=false` 时回退到 empty provider，
   查询返回空 `GeoInfo`，不会 panic。
 - GeoIP 没有 `KOMARI_*` 环境变量，全部通过数据库配置。

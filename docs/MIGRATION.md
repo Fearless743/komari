@@ -114,12 +114,14 @@ Rust 的 `komari-db` 直接读写 Go/GORM 生成的 SQLite schema：
   `task_results`、`tasks` 等表；Rust **不创建、不迁移**这些表，回退时需保留，
   或继续由 Go 管理；
 - `migrate()` 只做 `CREATE TABLE/INDEX IF NOT EXISTS`、缺失列
-  `ALTER TABLE ... ADD COLUMN`、缺失唯一索引补齐；除旧版 `configs` 转换外，
-  **不会删除或重写已有数据**；
+  `ALTER TABLE ... ADD COLUMN`、缺失唯一索引补齐；历史迁移与 legacy
+  `configs` 转换在同一个事务中执行，失败会整体回滚；
 - 旧版单行 `configs` 表会转换为 key/value 形式，原表保留为
   `configs_legacy_backup`；
-- 旧版 `client_infos` 合并、pre-1.0.2 的 OAuth/通知配置迁移**不会自动执行**，
-  见 [parity-deviations.md](parity-deviations.md) D-003。
+- 旧版 `client_infos` 会合并到 `clients`，原表重命名为
+  `client_infos_backup`；pre-1.0.2 的 OAuth/通知配置会迁移到
+  `oidc_providers` / `message_sender_providers`，与 Go `MergeDatabase` 对齐；
+  旧凭据列不会进入新的 key/value `configs`，只保留在 `configs_legacy_backup`。
 
 验证 schema 兼容性（使用数据库副本，避免污染生产库）：
 
@@ -133,13 +135,14 @@ KOMARI_COMPAT_DB=/tmp/komari-compat.db cargo test -p komari-db --test compat
 
 ### 非常老的数据库
 
-如果数据库来自以下时期，先用 Go 版启动一次，让 Go 完成历史迁移，再切换 Rust：
+Rust 会直接执行 Go 的历史迁移，因此以下数据库不需要先用 Go 启动：
 
 - pre-1.0.2：OAuth/通知配置仍在旧 `configs` 列中；
 - 仍有 `client_infos` 表、尚未合并到 `clients`；
 - 仍使用单行 `configs` 且包含 `id` 列。
 
-Go 启动并正常退出后，重新备份，再执行 Rust 切换。
+迁移在单个事务中完成；失败不会修改原库。建议切换前仍先备份 `data/komari.db`，
+迁移后确认 `client_infos_backup` / `configs_legacy_backup` 内容再删除。
 
 ## 5. 替换服务
 
@@ -258,7 +261,7 @@ systemctl start komari
 | --- | --- | --- |
 | D-001 | `Javascript` 通知 provider 不可用 | 改用 telegram/bark/webhook/email 等原生 provider。 |
 | D-002 | DDNS `delete_record` 是 Rust 扩展 | 不要依赖 Go 提供该能力；仅 cloudflare 实现。 |
-| D-003 | 旧库历史迁移不自动执行 | 极老数据库先用 Go 启动一次。 |
+| D-003 | 旧库历史迁移（已合并） | 直接切换即可；迁移失败会回滚。 |
 | D-004 | GeoIP 缓存上限 10,000 | 大量唯一 IP 时可能增加上游查询。 |
 | D-005 | `KOMARI_WS_DISABLE_ORIGIN` 接受更多布尔字面量 | 回退 Go 时统一写 `true`/`false`。 |
 | D-006 | 邮件主题 RFC 2047 编码 Q vs B | 解码后语义相同，通常无需处理。 |

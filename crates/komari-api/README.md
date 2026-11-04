@@ -48,7 +48,11 @@ provider rows and loads `o_auth_provider`) before serving requests.
 - One aggregated `records` row and its `gpu_records` rows are written in a
   single SQLite transaction, so a failed retry cannot duplicate GPU samples.
 - `allow_cors` is read from the database on every browser WebSocket upgrade;
-  `KOMARI_WS_DISABLE_ORIGIN` only accepts a case-insensitive `true`.
+  `KOMARI_WS_DISABLE_ORIGIN` only accepts a case-insensitive `true` (like Go's
+  `strings.EqualFold(value, "true")`). Values such as `1`, `yes`, `on`, or
+  ` true ` do not disable the check. The value is resolved once at startup
+  (`--ws-disable-origin` > environment > default), so an explicit `false` is
+  not overridden by a later environment value.
 - Report POST tokens come from `?token=` or a JSON body `token` for non-GET
   requests. `Authorization: Bearer` is reserved for the admin API key, matching
   B03's `AuthLayer`.
@@ -134,9 +138,14 @@ Known differences:
 
 - `GET /api/admin/2fa/generate` returns `image/png` QR code bytes and the
   `2fa_secret` cookie, matching Go. The otpauth URL is not returned as JSON.
-- Theme upload/update/import endpoints are not implemented (listing, switching,
-  deleting and per-theme settings are). They need ZIP/SSRF handling from the Go
-  implementation.
+- Theme upload/update/import match Go's request/response semantics, but add
+  hardening the Go backend lacks: a 64 MiB upload/download cap, a 128 MiB
+  uncompressed/extraction cap and entry-count limit (zip bombs), a 30 s request
+  timeout, redirect targets re-checked for SSRF, and atomic installation
+  (a failed package never removes the previously installed same-`short`
+  theme). Upload accepts both the bundled UI's `multipart/form-data` `file`
+  field and Go's raw ZIP body. Like Go, `dist/` and the preview image are not
+  required for installation.
 - `common:getRecords` iterates the current `clients` table, so records of
   already-deleted clients are not returned.
 - `common:getPublicInfo` does not merge managed-theme defaults from
@@ -147,6 +156,24 @@ Known differences:
   `<data_dir>/backup.zip`; the server assembly must call
   `komari_db::restore_pending_backup` at startup (Go exits and restores on the
   next boot).
+
+## cloudflared 隧道
+
+`server::cloudflared` ports `utils/cloudflared/cloudflared.go`. The server
+assembly starts a tunnel when `ServerConfig::cloudflared_token` is non-empty;
+`ServerBuilder::with_cloudflared` can inject a target/downloader for tests.
+
+Known differences from Go:
+
+- Go and Rust both require `KOMARI_ENABLE_CLOUDFLARED=true` **and** a non-empty
+  token. `ServerBuilder::with_cloudflared` is an explicit bypass for tests.
+- An unexpected `cloudflared` exit is logged with its exit code, triggers a
+  graceful server shutdown and makes `serve` return an error (CLI exit code 1)
+  instead of calling `os.Exit(1)` from library code.
+- stdout/stderr are forwarded line by line through `tracing` with a
+  `[cloudflared]` prefix, and the token is redacted defensively.
+- Existing `data/cloudflared[.exe]` files are reused without re-downloading;
+  non-Windows targets are chmodded to `0755`.
 
 ## 历史提交说明
 

@@ -16,9 +16,11 @@ use komari_oauth::{
     AccountLinker, CallbackQuery, CallbackRequest, ExchangeRequest, OAuthError, OAuthManager,
     SsoIdentity, factory,
 };
+use p256::ecdsa::SigningKey as P256SigningKey;
+use p256::ecdsa::signature::Signer;
 use rsa::RsaPrivateKey;
 use rsa::pkcs1v15::SigningKey;
-use rsa::signature::{SignatureEncoding, Signer};
+use rsa::signature::SignatureEncoding;
 use rsa::traits::PublicKeyParts;
 use serde_json::{Value, json};
 use sha2::{Digest, Sha256};
@@ -85,6 +87,35 @@ fn jwks(key: &RsaPrivateKey, kid: &str) -> Value {
             "n": b64(public.n().to_bytes_be()),
             "e": b64(public.e().to_bytes_be()),
         }]
+    })
+}
+
+fn sign_ec_jwt(key: &P256SigningKey, kid: &str, claims: Value) -> String {
+    let header = json!({"alg": "ES256", "typ": "JWT", "kid": kid});
+    let header = b64(serde_json::to_vec(&header).unwrap());
+    let payload = b64(serde_json::to_vec(&claims).unwrap());
+    let input = format!("{header}.{payload}");
+    let signature: p256::ecdsa::Signature = key.sign(input.as_bytes());
+    format!("{input}.{}", b64(signature.to_bytes()))
+}
+
+fn ec_jwk(key: &P256SigningKey, kid: &str) -> Value {
+    let point = key.verifying_key().to_encoded_point(false);
+    let bytes = point.as_bytes();
+    json!({
+        "kty": "EC",
+        "kid": kid,
+        "use": "sig",
+        "alg": "ES256",
+        "crv": "P-256",
+        "x": b64(&bytes[1..33]),
+        "y": b64(&bytes[33..]),
+    })
+}
+
+fn ec_jwks(keys: &[(&P256SigningKey, &str)]) -> Value {
+    json!({
+        "keys": keys.iter().map(|(key, kid)| ec_jwk(key, kid)).collect::<Vec<_>>()
     })
 }
 
@@ -1259,6 +1290,56 @@ async fn jwks_is_not_refreshed_for_invalid_signatures_but_is_for_unknown_kids() 
     assert!(verifier.verify(&unknown_kid).await.is_err());
     assert_eq!(fetches.load(Ordering::SeqCst), 2);
     assert!(verifier.verify(&unknown_kid).await.is_err());
+    assert_eq!(fetches.load(Ordering::SeqCst), 2);
+}
+
+#[tokio::test]
+async fn jwks_rotation_picks_up_a_new_ec_signing_key() {
+    let old_key = P256SigningKey::random(&mut rand::thread_rng());
+    let new_key = P256SigningKey::random(&mut rand::thread_rng());
+    let key_set = Arc::new(Mutex::new(ec_jwks(&[(&old_key, "old-key")])));
+    let fetches = Arc::new(AtomicUsize::new(0));
+    let served = Arc::clone(&key_set);
+    let counter = Arc::clone(&fetches);
+    let app = Router::new().route(
+        "/jwks",
+        get(move || {
+            let served = Arc::clone(&served);
+            let counter = Arc::clone(&counter);
+            async move {
+                counter.fetch_add(1, Ordering::SeqCst);
+                Json(served.lock().unwrap().clone())
+            }
+        }),
+    );
+    let base = spawn(app).await;
+    let verifier = komari_oauth::jwt::JwtVerifier::new(
+        reqwest::Client::new(),
+        format!("{base}/jwks"),
+        Some(base.clone()),
+        Some("aud".to_owned()),
+    );
+    let claims = || {
+        json!({
+            "iss": base,
+            "aud": "aud",
+            "sub": "user",
+            "exp": chrono::Utc::now().timestamp() + 600
+        })
+    };
+
+    let old_token = sign_ec_jwt(&old_key, "old-key", claims());
+    verifier.verify(&old_token).await.unwrap();
+    assert_eq!(fetches.load(Ordering::SeqCst), 1);
+
+    // Rotate by publishing the new key next to the old one, as providers do.
+    *key_set.lock().unwrap() = ec_jwks(&[(&old_key, "old-key"), (&new_key, "new-key")]);
+    let new_token = sign_ec_jwt(&new_key, "new-key", claims());
+    verifier.verify(&new_token).await.unwrap();
+    assert_eq!(fetches.load(Ordering::SeqCst), 2);
+
+    // The old key is still part of the rotated set and needs no refresh.
+    verifier.verify(&old_token).await.unwrap();
     assert_eq!(fetches.load(Ordering::SeqCst), 2);
 }
 
