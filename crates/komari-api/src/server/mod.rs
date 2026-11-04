@@ -82,7 +82,7 @@ pub const DEFAULT_BODY_LIMIT: usize = 16 * 1024 * 1024;
 pub const DEFAULT_BACKUP_BODY_LIMIT: usize = 2 * 1024 * 1024 * 1024;
 
 /// Startup configuration for the HTTP server.
-#[derive(Clone, Debug)]
+#[derive(Clone)]
 pub struct ServerConfig {
     pub listen: String,
     pub database_path: PathBuf,
@@ -107,6 +107,29 @@ pub struct ServerConfig {
     pub request_logging: bool,
     /// Maximum time graceful shutdown waits for half-open connections.
     pub shutdown_timeout: Duration,
+}
+
+impl std::fmt::Debug for ServerConfig {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter
+            .debug_struct("ServerConfig")
+            .field("listen", &self.listen)
+            .field("database_path", &self.database_path)
+            .field("data_dir", &self.data_dir)
+            .field("enable_cloudflared", &self.enable_cloudflared)
+            .field(
+                "cloudflared_token",
+                &self.cloudflared_token.as_ref().map(|_| "<redacted>"),
+            )
+            .field("theme", &self.theme)
+            .field("api", &self.api)
+            .field("background", &self.background)
+            .field("body_limit_bytes", &self.body_limit_bytes)
+            .field("backup_body_limit_bytes", &self.backup_body_limit_bytes)
+            .field("request_logging", &self.request_logging)
+            .field("shutdown_timeout", &self.shutdown_timeout)
+            .finish()
+    }
 }
 
 impl Default for ServerConfig {

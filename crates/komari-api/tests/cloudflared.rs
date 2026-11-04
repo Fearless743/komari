@@ -288,6 +288,22 @@ fn debug_output_redacts_the_token() {
     let debug = format!("{config:?}");
     assert!(!debug.contains("super-secret-token"), "{debug}");
     assert!(debug.contains("<redacted>"), "{debug}");
+
+    let app = Config {
+        cloudflared_token: Some("super-secret-token".to_owned()),
+        ..Config::default()
+    };
+    let debug = format!("{app:?}");
+    assert!(!debug.contains("super-secret-token"), "{debug}");
+    assert!(debug.contains("<redacted>"), "{debug}");
+
+    let server = ServerConfig {
+        cloudflared_token: Some("super-secret-token".to_owned()),
+        ..ServerConfig::default()
+    };
+    let debug = format!("{server:?}");
+    assert!(!debug.contains("super-secret-token"), "{debug}");
+    assert!(debug.contains("<redacted>"), "{debug}");
 }
 
 #[cfg(unix)]
