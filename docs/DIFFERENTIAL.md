@@ -29,7 +29,7 @@
 | `curl` | 就绪探测和前端冒烟 |
 | `sqlite3`（可选） | 手工查看临时数据库；脚本本身用 Python `sqlite3` |
 | `npm` + `node_modules` | 仅前端 E2E 的完整构建需要；`--skip-frontend-build` 不需要 |
-| Chromium/Chrome（可选） | 浏览器 DOM 冒烟；没有则记录 skipped |
+| Chromium/Chrome（可选） | 浏览器 DOM 冒烟；未安装或 `--no-browser` 时 `browser.available=false`，不产生 skipped 检查 |
 
 Go 参考仓库默认自动探测以下位置，也可以用 `--go-repo` / `KOMARI_GO_REPO`
 显式指定：
@@ -72,6 +72,8 @@ scripts/differential-test.sh --allow-dirty
 1. 默认要求 Go 与 Rust 源码工作区干净（`git status --porcelain` 为空），
    并记录两侧 `git rev-parse HEAD`、dirty 状态、二进制 SHA-256；开发期可用
    `--allow-dirty` 放宽为警告。
+   提供 `--go-bin` 但未提供 `--go-repo` 时仍会尝试自动探测参考仓库；探测不到
+   则警告并在报告中留空 Go 的 rev/dirty（二进制 SHA-256 仍会记录）。
 2. 在 `mktemp` 临时目录下分别为两个后端创建 `data/`，使用各自的
    `data/komari.db`；**不会读取或修改用户现有的 `data/komari.db`**。
 3. 通过 `ADMIN_USERNAME` / `ADMIN_PASSWORD` 让两边创建相同的测试管理员
@@ -128,8 +130,10 @@ KOMARI_DEFAULT_THEME_DIR=<临时主题目录> cargo build -p komari-cli
 asset hash 与 `$THEME/dist/index.html` 一致。若环境里有 Chromium/Chrome，还会用
 `--headless --dump-dom` 渲染 `/` 和 `/admin`；要求 DOM 中出现
 `data-is-root-theme="true"`、`#root` 有子元素且 DOM 大于静态 index，避免被
-静态 `<title>Komari` 误通过。浏览器缺失或已知环境错误（缺共享库、sandbox）
-记为 `skipped`（`ok=false`，不增加 failures）；未知非零退出记为 failure。
+静态 `<title>Komari` 误通过。未安装浏览器或 `--no-browser` 时
+`browser.available=false`，不产生浏览器检查；浏览器存在但启动失败时，已知
+环境错误（缺共享库、sandbox）记为 `skipped`（`ok=false`，`browser.available`
+置 false，不增加 failures），未知非零退出记为 failure。
 当前环境没有安装 Playwright/Puppeteer，因此没有做点击/输入级交互；登录流程
 由 `POST /api/login` + 带 cookie 的 `/api/me` 覆盖。
 
@@ -160,12 +164,18 @@ asset hash 与 `$THEME/dist/index.html` 一致。若环境里有 Chromium/Chrome
 | 18 | `admin_settings` | `GET /api/admin/settings`（跟随重定向） | session | 配置键/值、完整默认键集 |
 | 19 | `admin_settings_no_slash` | `GET /api/admin/settings`（不跟随） | session | 301 + `Location` |
 | 20 | `admin_settings_post_no_slash` | `POST /api/admin/settings`（不跟随） | session | 307 + `Location`，不执行写入 |
-| 21 | `recent_seeded` | `GET /api/recent/<visible>` | 无 | 无内存报告时的空响应 |
-| 22 | `records_seeded` | `GET /api/records/load?uuid=<visible>&hours=24` | 无 | 记录序列化、顺序、GPU 聚合、时间/数值格式 |
-| 23 | `records_seeded_cpu` | 同上 + `load_type=cpu` | 无 | 过滤后的 `{client,time,cpu}` 形状 |
-| 24 | `records_seeded_gpu` | 同上 + `load_type=gpu` | 无 | 两侧都拒绝 `gpu` 作为 load_type |
-| 25 | `recent_hidden_guest` | `GET /api/recent/<hidden>` | 无 | 访客不能读取隐藏节点 |
-| 26 | `records_hidden_guest` | `GET /api/records/load?uuid=<hidden>` | 无 | 访客不能读取隐藏节点记录 |
+| 21 | `admin_settings_head_no_slash` | `HEAD /api/admin/settings`（不跟随） | session | 404（Gin 无 HEAD 路由） |
+| 22 | `admin_settings_put_no_slash` | `PUT /api/admin/settings`（不跟随） | session | 404 |
+| 23 | `admin_settings_patch_no_slash` | `PATCH /api/admin/settings`（不跟随） | session | 404 |
+| 24 | `admin_settings_delete_no_slash` | `DELETE /api/admin/settings`（不跟随） | session | 404 |
+| 25 | `admin_settings_options_no_slash` | `OPTIONS /api/admin/settings`（不跟随） | session | 404 |
+| 26 | `admin_settings_head_slash` | `HEAD /api/admin/settings/`（不跟随） | session | 404（带斜杠的 HEAD 也不回退 GET） |
+| 27 | `recent_seeded` | `GET /api/recent/<visible>` | 无 | 无内存报告时的空响应 |
+| 28 | `records_seeded` | `GET /api/records/load?uuid=<visible>&hours=24` | 无 | 记录序列化、顺序、GPU 聚合、时间/数值格式 |
+| 29 | `records_seeded_cpu` | 同上 + `load_type=cpu` | 无 | 过滤后的 `{client,time,cpu}` 形状 |
+| 30 | `records_seeded_gpu` | 同上 + `load_type=gpu` | 无 | 两侧都拒绝 `gpu` 作为 load_type |
+| 31 | `recent_hidden_guest` | `GET /api/recent/<hidden>` | 无 | 访客不能读取隐藏节点 |
+| 32 | `records_hidden_guest` | `GET /api/records/load?uuid=<hidden>` | 无 | 访客不能读取隐藏节点记录 |
 
 种子数据字段覆盖：`uuid/token/name/cpu_name/virtualization/arch/cpu_cores/os/
 kernel_version/gpu_name/ipv4/ipv6/region/remark/public_remark/mem_total/
@@ -257,7 +267,21 @@ expired_at/group/tags/ddns_*/hidden/traffic_limit*/created_at/updated_at`，以�
 | --- | --- | --- |
 | `DF-001` | 新装默认站点描述不同 | **已修复**：两侧统一使用 `komari_config::DEFAULT_DESCRIPTION`（`A simple server monitor tool.`）。白名单与 parity 条目已删除。 |
 | `DF-002` | 启动默认键落库策略不同 | **已修复**：Rust 启动时在 `prepare_database` 中幂等 seed 全部 `SiteConfig` 默认键。白名单与 parity 条目已删除。 |
-| `DF-003` | `/api/admin/settings` 尾斜杠重定向不同 | **已修复**：Rust 在鉴权前对 GET/HEAD 返回 301、其他方法返回 307，并保留 query；与 Gin 一致。白名单与 parity 条目已删除。 |
+| `DF-003` | `/api/admin/settings` 尾斜杠重定向不同 | **已修复**：Rust 对齐 Gin 实测的方法矩阵（见下表），白名单与 parity 条目已删除。 |
+
+DF-003 最终行为对照（Gin 实测，Rust 已对齐）：
+
+| 方法 | `/api/admin/settings` | `/api/admin/settings/` |
+| --- | --- | --- |
+| `GET` | 301，`Location: /api/admin/settings/`，`Content-Type: text/html; charset=utf-8`，body `<a href="/api/admin/settings/">Moved Permanently</a>.\n\n`（55 B），无 `Cache-Control` | 进入鉴权/处理器：未登录 401，登录后 200 JSON |
+| `POST` | 307，`Location: /api/admin/settings/`，无 body/`Content-Type`，无 `Cache-Control` | 进入鉴权/处理器：未登录 401，登录后 200 |
+| `HEAD` | 404，`Content-Type: text/plain`，`Cache-Control: no-store`，body 长度 18 | 404（Gin 无 HEAD 路由，axum 用 `any` 分发显式排除 HEAD） |
+| `PUT` / `PATCH` / `DELETE` / `OPTIONS` | 404，`Content-Type: text/plain`，`Cache-Control: no-store`，body `404 page not found` | 404，同上 |
+
+实现要点：重定向/404 在鉴权层之前完成；`/api/admin/settings/` 使用
+`any(...)` 分发并在非 GET/POST 时直接返回 404，避免 axum 的 405 和
+`Allow` 头；服务端 `/api` 的 `Cache-Control: no-store` 对这两个重定向
+（301/307）跳过，其他 `/api` 响应（包括 404）保留。
 
 DF-001/002/003 编号保留但**不再复用**；它们不再出现在
 `differential-known-differences.json` 的 `cases` 中，只在 `retired` 里留档。
@@ -307,8 +331,8 @@ scripts/differential-test.sh --report-out /tmp/b23-diff-report.json
 
 | 指标 | 值 |
 | --- | --- |
-| case 数 | 26 |
-| match_cases | 22 |
+| case 数 | 32 |
+| match_cases | 28 |
 | known_cases | 4 |
 | diff_cases | 0 |
 | known_findings | 5（DF-004×2、DF-005×1、DF-006×2） |
@@ -335,9 +359,9 @@ scripts/frontend-e2e.sh --report-out /tmp/b23-e2e-report.json
 | `/` 渲染 | 通过（`data-is-root-theme` + 非空 `#root` + dashboard 文案） |
 | `/admin` 登录 UI 渲染 | 通过 |
 
-`--no-browser` 运行：25 项检查、0 失败、0 skipped，浏览器标记为不可用。
-`CHROME_BIN` 指向“No usable sandbox”假脚本时：2 项 skipped、0 失败、退出码 0；
-指向未知崩溃假脚本时：2 项失败、退出码 1。
+`--no-browser` 运行：25 项检查、0 失败、0 skipped，`browser.available=false`。
+`CHROME_BIN` 指向“No usable sandbox”假脚本时：1 项 skipped、0 失败、
+`browser.available=false`、退出码 0；指向未知崩溃假脚本时：2 项失败、退出码 1。
 
 ## 7. 限制与维护
 
