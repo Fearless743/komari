@@ -126,12 +126,9 @@ impl HttpThemeFetcher {
                     .ok_or_else(|| {
                         profile.request("redirect response without a Location header")
                     })?;
-                let next = current
-                    .join(location)
-                    .map_err(|error| profile.request(format!("invalid redirect URL: {error}")))?;
                 // Re-resolve and re-check the redirect target: Go's client
                 // would follow it blindly, which is an SSRF bypass.
-                current = validate_url(next.as_str()).await?;
+                current = resolve_redirect(&current, location, profile).await?;
                 continue;
             }
 
@@ -239,6 +236,21 @@ impl ErrorProfile {
             Self::Github => ThemeFetchError::new("解析GitHub API响应失败: empty response"),
         }
     }
+}
+
+/// Resolve a `Location` header and re-run the scheme/host checks.
+///
+/// `current` is always the URL of the previous hop, so relative redirects work
+/// while the final target still has to be a public `http`/`https` URL.
+async fn resolve_redirect(
+    current: &Url,
+    location: &str,
+    profile: ErrorProfile,
+) -> Result<Url, ThemeFetchError> {
+    let next = current
+        .join(location)
+        .map_err(|error| profile.request(format!("invalid redirect URL: {error}")))?;
+    validate_url(next.as_str()).await
 }
 
 /// Parse and SSRF-check a download URL.
@@ -407,6 +419,36 @@ mod tests {
         assert_eq!(github_repo("https://gist.github.com/owner/repo"), None);
         assert_eq!(github_repo("https://example.com/github.com/owner"), None);
         assert_eq!(github_repo(""), None);
+    }
+
+    #[tokio::test]
+    async fn redirect_targets_are_revalidated() {
+        let current = Url::parse("https://1.1.1.1/theme.zip").unwrap();
+
+        // Relative redirects stay on the same public host.
+        let next = resolve_redirect(&current, "/other.zip", ErrorProfile::Theme)
+            .await
+            .expect("relative redirect");
+        assert_eq!(next.as_str(), "https://1.1.1.1/other.zip");
+
+        for target in [
+            "http://127.0.0.1/theme.zip",
+            "http://192.168.1.10/theme.zip",
+            "http://[::1]/theme.zip",
+        ] {
+            let error = resolve_redirect(&current, target, ErrorProfile::Theme)
+                .await
+                .expect_err("private redirect target");
+            assert!(
+                error.message().contains("private/internal addresses"),
+                "{target}: {error}"
+            );
+        }
+
+        let error = resolve_redirect(&current, "file:///tmp/theme.zip", ErrorProfile::Theme)
+            .await
+            .expect_err("non-http redirect target");
+        assert!(error.message().contains("only http and https"), "{error}");
     }
 
     #[tokio::test]
