@@ -161,15 +161,15 @@ jobs:
             target: aarch64-unknown-linux-musl
             use_cross: true
             extension: ""
-          # macos-14 is Apple Silicon; both macOS targets can be built there
-          # because the Xcode SDK ships the x86_64 slice as well.
           - name: darwin-amd64
-            os: macos-14
+            # Intel runner: native x86_64 build, and avoids the arm64 macOS
+            # runner pool that intermittently fails to acquire a machine.
+            os: macos-15-intel
             target: x86_64-apple-darwin
             use_cross: false
             extension: ""
           - name: darwin-arm64
-            os: macos-14
+            os: macos-15
             target: aarch64-apple-darwin
             use_cross: false
             extension: ""
