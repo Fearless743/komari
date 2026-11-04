@@ -1,25 +1,22 @@
 # Rust API 路由概览
 
 本文档列出 Komari Go 版的现有路由，以及它们在 `komari-rs` 当前基线中的实现状态。
-**只有标注“已实现”的路由才由 Rust 代码提供**；其余是 Go 参考路由或后续任务范围，
-不要据此认为 Rust 已经提供对应端点。
+第二轮合并后，下列路由均已由 Rust 代码提供；行为差异以
+[parity-deviations.md](parity-deviations.md) 为准。
 
-基线：`main@0382eb3`（B07/B08/B10/B13/B14）。
+基线：第二轮合并后（B01–B21 已合并）。
 **模块状态只在 [PARITY.md](PARITY.md) 维护**，本文只描述路由范围和 Go 参考。
 
 ## 1. 当前状态
 
-- `crates/komari-api/src/lib.rs` 目前只有占位注释，没有 `Router`、handler 或
-  HTTP server。
-- `crates/komari-oauth`（B13）已实现 provider/回调/账户绑定；OAuth HTTP 登录/
-  绑定端点尚未装配。
-- `crates/komari-web`（B14）已实现静态资源/主题/SPA 路由，但 `komari server`
-  尚未合并这些路由，当前不会监听端口。
-- 截至 B11 基线（`main@0382eb3`），B05 的 agent API 和 WebSocket **尚未合并**；
-  状态以 [PARITY.md](PARITY.md) 为准，本文不重复分支状态。
+- `crates/komari-api` 已实现 public/agent/admin API、JSON-RPC、浏览器与 agent
+  WebSocket，并由 `komari-api::server` 装配成可监听的 HTTP 服务。
+- `crates/komari-oauth`（B13）的 provider/回调/账户绑定与 HTTP 登录/绑定路由均已
+  装配（B09）。
+- `crates/komari-web`（B14）的静态资源/主题/SPA 路由已合并进服务器 fallback。
+- `komari server` 会监听 `0.0.0.0:25774`，本文列出的路由均可通过 HTTP 使用。
 
-因此当前基线**没有可调用的 Rust HTTP 端点**。部署时应继续使用 Go 版，直到
-B04/B05/B06 合并并完成 B13 OAuth HTTP/B14 静态路由装配。
+模块状态以 [PARITY.md](PARITY.md) 为准。
 
 ## 2. 认证模型（B03 已实现）
 
@@ -54,7 +51,7 @@ B04/B05/B06 合并并完成 B13 OAuth HTTP/B14 静态路由装配。
 | --- | --- | --- | --- |
 | 健康检查 | `GET /ping`（Go 用 `Any`） | 已实现（B04 public router；B09 默认装配） | B04/B09 |
 | 公开 API | `/api/login`、`/api/public`、`/api/nodes`、`/api/version` 等 | 已实现（B04） | B04 |
-| Agent API | `/api/clients/register`、`/api/clients/report`、`/api/clients/uploadBasicInfo` | 见 PARITY | B05 |
+| Agent API | `/api/clients/register`、`/api/clients/report`、`/api/clients/uploadBasicInfo` | 已实现（B05/B09） | B05/B09 |
 | 浏览器 WebSocket | `GET /api/clients` | 已实现（B05/B09） | B05/B09 |
 | 管理 API | `/api/admin/*` | 已实现（B06） | B06 |
 | JSON-RPC | `GET/POST /api/rpc2` | 已实现（B04/B06） | B04/B06 |
@@ -75,7 +72,7 @@ B04/B05/B06 合并并完成 B13 OAuth HTTP/B14 静态路由装配。
 | `ANY` | `/ping` | 返回纯文本 `pong`。 | B04 |
 | `POST` | `/api/login` | 密码登录，设置 `session_token`。 | B04 |
 | `GET` | `/api/me` | 当前身份信息。 | B04 |
-| `GET` | `/api/clients` | 浏览器实时数据 WebSocket（不是普通 JSON）。 | B05（见 PARITY） |
+| `GET` | `/api/clients` | 浏览器实时数据 WebSocket（不是普通 JSON）。 | B05/B09 |
 | `GET` | `/api/nodes` | 节点列表/公开信息。 | B04 |
 | `GET` | `/api/public` | 公开站点设置。 | B04 |
 | `GET` | `/api/oauth` | 发起 OAuth 登录。 | B13 |
@@ -92,14 +89,12 @@ B04/B05/B06 合并并完成 B13 OAuth HTTP/B14 静态路由装配。
 
 ## 5. Agent 路由
 
-### 5.1 本基线
+### 5.1 实现状态
 
-`komari-api` 是占位 crate，以下端点在本基线**不存在**。
+以下端点已由 `komari-api::client_router` 实现，并由 B09 装配进服务器；边界与剩余
+差异以 [PARITY.md](PARITY.md) 为准。
 
-### 5.2 B05 的实现范围
-
-B05 计划覆盖以下路由；是否已合并、有哪些边界，统一以
-[PARITY.md](PARITY.md) 和 B05 分支文档为准：
+### 5.2 路由
 
 | 方法 | 路径 | 说明 |
 | --- | --- | --- |
@@ -109,10 +104,10 @@ B05 计划覆盖以下路由；是否已合并、有哪些边界，统一以
 | `POST` | `/api/clients/uploadBasicInfo` | 静态硬件/OS/网络信息上报。 |
 | `GET` | `/api/clients` | 浏览器 WebSocket 实时数据。 |
 
-## 6. 管理路由（Go 参考，Rust 待 B06）
+## 6. 管理路由（Rust 已实现，B06）
 
-以下路由均来自 Go `cmd/server.go`，需要 `Admin` 角色。Rust 当前未实现，列在这里
-是为了明确 B06 的范围，不代表 Rust 已有这些端点。
+以下路由均来自 Go `cmd/server.go`，需要 `Admin` 角色，已由 `komari-api::admin`
+实现并装配。
 
 ### 备份与测试
 
@@ -207,10 +202,12 @@ B05 计划覆盖以下路由；是否已合并、有哪些边界，统一以
 
 | 方法 | 路径 | Rust 状态 |
 | --- | --- | --- |
-| `GET` / `POST` | `/api/rpc2` | 未实现，B04 |
+| `GET` / `POST` | `/api/rpc2` | 已实现（B04/B06） |
 
-Go 的 JSON-RPC 方法分发在 `api/jsonRpc/`。Rust 的 `komari-api` 目前没有 RPC
-分发器；不要在客户端依赖任何 Rust RPC 方法，直到 B04 合并。
+Go 的 JSON-RPC 方法分发在 `api/jsonRpc/`。Rust 的 `komari-api::rpc` 已实现
+`/api/rpc2` 的 POST 与 WebSocket 分发，包含 `guest`/`client`/`admin`/`common`
+命名空间和 Go 的错误码。Go 没有 `admin:*` RPC 方法；Rust 的扩展方法默认关闭，
+设置 `KOMARI_RPC_ADMIN_METHODS=true` 才会注册。
 
 ## 8. 静态资源与 SPA
 
@@ -224,8 +221,8 @@ Go 版由 `public.Static` 提供：
 
 Rust 的 `komari-web`（B14）已实现这些路由：`routes` / `routes_for` 提供
 `/favicon.ico` 与 `/themes/{id}/{path}`，`serve_fallback` 提供 SPA/静态回退。
-服务器装配时需把 `routes_for` 合并进主 Router，并把 `serve_fallback` 作为 fallback；
-在 B04/B05/B06 的 HTTP server 合并前，二进制仍不会提供页面或主题资源。
+服务器装配（B09）已把 `routes_for` 合并进主 Router，并把 `serve_fallback` 作为
+fallback；`komari server` 会直接提供页面和主题资源。
 
 ## 9. 响应与错误约定
 
@@ -243,17 +240,17 @@ Rust 的 `komari-web`（B14）已实现这些路由：`routes` / `routes_for` �
 {"status":"error","message":"Failed to get configuration."}
 ```
 
-成功响应由各 handler 决定（Go 版常见 `{"status":"success", ...}`）。当前 Rust
-没有 handler，因此没有可依赖的成功响应格式。
+成功响应由各 handler 决定（Go 版常见 `{"status":"success", ...}`），Rust 的
+handler 已按 Go 的形状返回。
 
 ## 10. 责任边界
 
 | 任务 | 范围 | 当前状态 |
 | --- | --- | --- |
-| B04 | public API、JSON-RPC、`/ping`、`/api/mjpeg_live` | 已实现（B04；MJPEG 由 B18 补齐） |
-| B05 | agent API、agent/browser WebSocket | 未合并（见 PARITY） |
-| B06 | admin API | 待实现 |
-| B13 | OAuth/OIDC | 已合并（crate）；HTTP 登录/绑定待服务器装配 |
-| B14 | Web 静态资源、主题、隐藏节点过滤 | 已合并（crate）；待服务器装配 |
+| B04 | public API、JSON-RPC、`/ping`、`/api/mjpeg_live` | 已合并（B04；MJPEG 由 B18 补齐） |
+| B05 | agent API、agent/browser WebSocket | 已合并（B05/B09） |
+| B06 | admin API | 已合并（B06） |
+| B13 | OAuth/OIDC | 已合并（B13/B09） |
+| B14 | Web 静态资源、主题、隐藏节点过滤 | 已合并（B14/B09） |
 
 本文件只描述现有 Go 路由和规划状态，不新增未在 `cmd/server.go` 中出现的端点。
