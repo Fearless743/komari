@@ -6,6 +6,7 @@ rust-version.workspace = true
 license.workspace = true
 
 [dependencies]
+ab_glyph = "0.2"
 anyhow = { workspace = true }
 axum = { workspace = true }
 bytes = { workspace = true }
