@@ -8,7 +8,7 @@ use std::time::{SystemTime, UNIX_EPOCH};
 use axum::extract::State;
 use axum::http::{HeaderMap, StatusCode};
 use axum::response::Response;
-use komari_config::keys;
+use komari_config::{DEFAULT_DESCRIPTION, DEFAULT_SITENAME, keys};
 use serde::Deserialize;
 use serde_json::{Map, Value, json};
 
@@ -16,8 +16,6 @@ use crate::state::ApiState;
 
 use super::{cookie_value, respond_error, respond_success};
 
-const DEFAULT_SITENAME: &str = "Komari";
-const DEFAULT_DESCRIPTION: &str = "Komari Monitor, a simple server monitoring tool.";
 const DEFAULT_THEME: &str = "default";
 const DEFAULT_OAUTH_PROVIDER: &str = "github";
 const DEFAULT_RECORD_PRESERVE_TIME: i64 = 720;

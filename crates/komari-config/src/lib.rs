@@ -17,4 +17,4 @@ pub mod site;
 
 pub use config::{Config, ConfigError, ConfigOverrides, DatabaseConfig, DatabaseType};
 pub use log_level::LogLevel;
-pub use site::SiteConfig;
+pub use site::{DEFAULT_DESCRIPTION, DEFAULT_SITENAME, SiteConfig};

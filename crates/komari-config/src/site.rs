@@ -6,6 +6,8 @@
 
 use serde::{Deserialize, Serialize};
 
+pub const DEFAULT_SITENAME: &str = "Komari";
+pub const DEFAULT_DESCRIPTION: &str = "A simple server monitor tool.";
 pub const DEFAULT_NOTIFICATION_TEMPLATE: &str = "{{emoji}}{{emoji}}{{emoji}}\nEvent: {{event}}\nClients: {{client}}\nMessage: {{message}}\nTime: {{time}}";
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -45,8 +47,8 @@ pub struct SiteConfig {
 impl Default for SiteConfig {
     fn default() -> Self {
         Self {
-            sitename: "Komari".to_owned(),
-            description: "A simple server monitor tool.".to_owned(),
+            sitename: DEFAULT_SITENAME.to_owned(),
+            description: DEFAULT_DESCRIPTION.to_owned(),
             allow_cors: false,
             theme: "default".to_owned(),
             private_site: false,

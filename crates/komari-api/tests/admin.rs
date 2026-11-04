@@ -3,8 +3,8 @@ mod common;
 use std::io::{Cursor, Read, Write};
 
 use axum::Router;
-use axum::body::Body;
-use axum::http::{Method, Request, StatusCode, header};
+use axum::body::{Body, to_bytes};
+use axum::http::{HeaderMap, Method, Request, StatusCode, header};
 use common::{admin_app, call, create_admin_session, create_client, request, set_api_key};
 use komari_api::ApiState;
 use komari_db::models::Provider;
@@ -46,6 +46,28 @@ fn admin_key(state: &ApiState) {
     set_api_key(state, API_KEY);
 }
 
+async fn response_parts(
+    app: &Router,
+    method: Method,
+    uri: &str,
+) -> (StatusCode, HeaderMap, String) {
+    let response = app
+        .clone()
+        .oneshot(request(method, uri, Body::empty()))
+        .await
+        .expect("router response");
+    let status = response.status();
+    let headers = response.headers().clone();
+    let bytes = to_bytes(response.into_body(), usize::MAX)
+        .await
+        .expect("read body");
+    (
+        status,
+        headers,
+        String::from_utf8_lossy(&bytes).into_owned(),
+    )
+}
+
 fn json_body(value: Value) -> Body {
     Body::from(value.to_string())
 }
@@ -55,9 +77,38 @@ async fn admin_settings_requires_admin() {
     let directory = tempfile::tempdir().unwrap();
     let (state, app) = admin_app(directory.path());
 
+    // Gin redirects the no-slash form before auth.
+    let response = app
+        .clone()
+        .oneshot(request(Method::GET, "/api/admin/settings", Body::empty()))
+        .await
+        .expect("redirect response");
+    assert_eq!(response.status(), StatusCode::MOVED_PERMANENTLY);
+    assert_eq!(
+        response
+            .headers()
+            .get(header::LOCATION)
+            .expect("location header"),
+        "/api/admin/settings/"
+    );
+
+    let response = app
+        .clone()
+        .oneshot(request(Method::POST, "/api/admin/settings", Body::empty()))
+        .await
+        .expect("post redirect response");
+    assert_eq!(response.status(), StatusCode::TEMPORARY_REDIRECT);
+    assert_eq!(
+        response
+            .headers()
+            .get(header::LOCATION)
+            .expect("location header"),
+        "/api/admin/settings/"
+    );
+
     let (status, body) = call(
         &app,
-        request(Method::GET, "/api/admin/settings", Body::empty()),
+        request(Method::GET, "/api/admin/settings/", Body::empty()),
     )
     .await;
     assert_eq!(status, StatusCode::UNAUTHORIZED);
@@ -68,7 +119,7 @@ async fn admin_settings_requires_admin() {
         &app,
         request(
             Method::GET,
-            &format!("/api/admin/settings?token={}", client.token),
+            &format!("/api/admin/settings/?token={}", client.token),
             Body::empty(),
         ),
     )
@@ -78,12 +129,96 @@ async fn admin_settings_requires_admin() {
     admin_key(&state);
     let (status, body) = call(
         &app,
-        bearer(Method::GET, "/api/admin/settings", Body::empty()),
+        bearer(Method::GET, "/api/admin/settings/", Body::empty()),
     )
     .await;
     assert_eq!(status, StatusCode::OK);
     assert_eq!(body["status"], "success");
     assert!(body["data"].is_object());
+}
+
+#[tokio::test]
+async fn admin_settings_redirect_matrix_matches_gin() {
+    let directory = tempfile::tempdir().unwrap();
+    let (_state, app) = admin_app(directory.path());
+
+    let (status, headers, body) = response_parts(&app, Method::GET, "/api/admin/settings").await;
+    assert_eq!(status, StatusCode::MOVED_PERMANENTLY);
+    assert_eq!(
+        headers[header::LOCATION].to_str().unwrap(),
+        "/api/admin/settings/"
+    );
+    assert_eq!(
+        headers[header::CONTENT_TYPE].to_str().unwrap(),
+        "text/html; charset=utf-8"
+    );
+    assert_eq!(
+        body,
+        "<a href=\"/api/admin/settings/\">Moved Permanently</a>.\n\n"
+    );
+    assert!(!headers.contains_key(header::CACHE_CONTROL));
+
+    let (status, headers, body) = response_parts(&app, Method::POST, "/api/admin/settings").await;
+    assert_eq!(status, StatusCode::TEMPORARY_REDIRECT);
+    assert_eq!(
+        headers[header::LOCATION].to_str().unwrap(),
+        "/api/admin/settings/"
+    );
+    assert!(!headers.contains_key(header::CONTENT_TYPE));
+    assert!(body.is_empty());
+    assert!(!headers.contains_key(header::CACHE_CONTROL));
+
+    for method in [
+        Method::HEAD,
+        Method::PUT,
+        Method::PATCH,
+        Method::DELETE,
+        Method::OPTIONS,
+    ] {
+        let (status, headers, body) =
+            response_parts(&app, method.clone(), "/api/admin/settings").await;
+        assert_eq!(status, StatusCode::NOT_FOUND, "{method} no-slash");
+        assert_eq!(
+            headers[header::CONTENT_TYPE].to_str().unwrap(),
+            "text/plain"
+        );
+        assert_eq!(headers[header::CACHE_CONTROL].to_str().unwrap(), "no-store");
+        if method != Method::HEAD {
+            assert_eq!(body, "404 page not found");
+        }
+    }
+
+    for method in [
+        Method::HEAD,
+        Method::PUT,
+        Method::PATCH,
+        Method::DELETE,
+        Method::OPTIONS,
+    ] {
+        let (status, headers, body) =
+            response_parts(&app, method.clone(), "/api/admin/settings/").await;
+        assert_eq!(status, StatusCode::NOT_FOUND, "{method} trailing slash");
+        assert_eq!(
+            headers[header::CONTENT_TYPE].to_str().unwrap(),
+            "text/plain"
+        );
+        assert_eq!(headers[header::CACHE_CONTROL].to_str().unwrap(), "no-store");
+        assert!(
+            !headers.contains_key(header::ALLOW),
+            "{method} trailing-slash Allow header"
+        );
+        if method != Method::HEAD {
+            assert_eq!(body, "404 page not found");
+        }
+    }
+
+    let (status, _, body) = response_parts(&app, Method::GET, "/api/admin/settings/").await;
+    assert_eq!(status, StatusCode::UNAUTHORIZED);
+    assert_eq!(body, r#"{"status":"error","message":"Unauthorized."}"#);
+
+    let (status, _, body) = response_parts(&app, Method::POST, "/api/admin/settings/").await;
+    assert_eq!(status, StatusCode::UNAUTHORIZED);
+    assert_eq!(body, r#"{"status":"error","message":"Unauthorized."}"#);
 }
 
 #[tokio::test]
@@ -96,7 +231,7 @@ async fn admin_settings_round_trip() {
         &app,
         bearer(
             Method::POST,
-            "/api/admin/settings",
+            "/api/admin/settings/",
             json_body(json!({"sitename": "Example", "allow_cors": true})),
         ),
     )
@@ -107,7 +242,7 @@ async fn admin_settings_round_trip() {
 
     let (_, body) = call(
         &app,
-        bearer(Method::GET, "/api/admin/settings", Body::empty()),
+        bearer(Method::GET, "/api/admin/settings/", Body::empty()),
     )
     .await;
     assert_eq!(body["data"]["sitename"], "Example");
@@ -115,7 +250,7 @@ async fn admin_settings_round_trip() {
 
     let (status, body) = call(
         &app,
-        bearer(Method::POST, "/api/admin/settings", Body::from("[1,2]")),
+        bearer(Method::POST, "/api/admin/settings/", Body::from("[1,2]")),
     )
     .await;
     assert_eq!(status, StatusCode::BAD_REQUEST);
@@ -149,7 +284,7 @@ async fn admin_settings_apply_provider_and_theme_side_effects() {
         &app,
         bearer(
             Method::POST,
-            "/api/admin/settings",
+            "/api/admin/settings/",
             json_body(json!({
                 "ddns_provider": "cloudflare",
                 "ddns_enabled": true,
@@ -1075,7 +1210,7 @@ async fn admin_user_update_and_favicon() {
     let (status, _) = call(
         &app,
         with_cookie(
-            request(Method::GET, "/api/admin/settings", Body::empty()),
+            request(Method::GET, "/api/admin/settings/", Body::empty()),
             &format!("session_token={session}"),
         ),
     )
@@ -1129,7 +1264,7 @@ async fn admin_router_can_be_merged_without_layers() {
 
     let (status, _) = call(
         &app,
-        bearer(Method::GET, "/api/admin/settings", Body::empty()),
+        bearer(Method::GET, "/api/admin/settings/", Body::empty()),
     )
     .await;
     assert_eq!(status, StatusCode::OK);

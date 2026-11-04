@@ -225,6 +225,21 @@ async fn default_server_mounts_public_admin_rpc_client_and_static() {
         .header(COOKIE, format!("session_token={session}"))
         .send()
         .await
+        .expect("admin settings redirect");
+    assert_eq!(response.status(), reqwest::StatusCode::MOVED_PERMANENTLY);
+    assert_eq!(
+        response
+            .headers()
+            .get(reqwest::header::LOCATION)
+            .expect("location header"),
+        "/api/admin/settings/"
+    );
+
+    let response = client
+        .get(format!("{}/api/admin/settings/", running.base))
+        .header(COOKIE, format!("session_token={session}"))
+        .send()
+        .await
         .expect("admin settings");
     assert_eq!(response.status(), reqwest::StatusCode::OK);
     let settings: Value = response.json().await.expect("settings json");

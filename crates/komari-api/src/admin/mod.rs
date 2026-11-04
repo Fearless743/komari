@@ -26,6 +26,7 @@ use axum::Router;
 use axum::body::Bytes;
 use axum::http::header::COOKIE;
 use axum::http::{HeaderMap, StatusCode};
+use axum::middleware;
 use axum::response::{IntoResponse, Response};
 use komari_auth::{AuthLayer, RequireAdmin, RequireRole};
 use serde::de::DeserializeOwned;
@@ -61,6 +62,10 @@ pub fn admin_router_with_state(state: ApiState) -> Router {
     admin_router()
         .layer(RequireRole::admin(auth.clone()))
         .layer(AuthLayer::new(auth))
+        // Outermost layer: Gin redirects the no-slash settings path before
+        // authentication, so unauthenticated callers see 301/307 rather than
+        // 401. Keep this above both auth layers.
+        .layer(middleware::from_fn(settings::redirect_settings_middleware))
         .with_state(state)
 }
 

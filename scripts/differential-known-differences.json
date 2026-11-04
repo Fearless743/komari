@@ -1,0 +1,105 @@
+{
+  "version": 2,
+  "notes": [
+    "Machine-readable whitelist for scripts/differential-test.sh.",
+    "DF-xxx are differential-harness identifiers documented in docs/DIFFERENTIAL.md.",
+    "DF-001 (default description), DF-002 (startup config seeding) and DF-003",
+    "(settings trailing slash) were fixed in business code and retired; their",
+    "numbers are not reused. Only DF-004/DF-005/DF-006 remain.",
+    "The authoritative D-xxx registry remains docs/parity-deviations.md; this",
+    "file does not assign D numbers."
+  ],
+  "retired": {
+    "DF-001": "Fixed: both backends now use komari_config::DEFAULT_DESCRIPTION.",
+    "DF-002": "Fixed: server startup seeds every SiteConfig default key.",
+    "DF-003": "Fixed: /api/admin/settings redirects 301/307 before auth."
+  },
+  "cases": {
+    "version": {
+      "validators": {
+        "data.version": "non_empty_string",
+        "data.hash": "non_empty_string"
+      },
+      "known_paths": {
+        "data.version": {
+          "id": "DF-004",
+          "reason": "Build metadata differs: Go utils.CurrentVersion defaults to 0.0.1, Rust uses CARGO_PKG_VERSION (0.1.0). Not an API contract difference."
+        },
+        "data.hash": {
+          "id": "DF-004",
+          "reason": "Build metadata differs: release builds inject different commit hashes; both default to `unknown`."
+        }
+      }
+    },
+    "rpc_version": {
+      "validators": {
+        "result.version": "non_empty_string",
+        "result.hash": "non_empty_string"
+      },
+      "known_paths": {
+        "result.version": {
+          "id": "DF-004",
+          "reason": "Build metadata differs: Go utils.CurrentVersion defaults to 0.0.1, Rust uses CARGO_PKG_VERSION (0.1.0)."
+        },
+        "result.hash": {
+          "id": "DF-004",
+          "reason": "Build metadata differs: release builds inject different commit hashes; both default to `unknown`."
+        }
+      }
+    },
+    "admin_settings_no_slash": {
+      "status_only": true
+    },
+    "admin_settings_post_no_slash": {
+      "status_only": true
+    },
+    "me_admin": {
+      "validators": {
+        "uuid": "uuid"
+      },
+      "known_paths": {
+        "uuid": {
+          "id": "DF-006",
+          "reason": "The default administrator UUID is generated randomly in each temporary database."
+        }
+      }
+    },
+    "rpc_me_admin": {
+      "validators": {
+        "result.uuid": "uuid"
+      },
+      "known_paths": {
+        "result.uuid": {
+          "id": "DF-006",
+          "reason": "The default administrator UUID is generated randomly in each temporary database."
+        }
+      }
+    },
+    "login": {
+      "validators": {
+        "data.set-cookie.session_token": "session_token"
+      },
+      "ignore_paths": [
+        "data.set-cookie.session_token"
+      ]
+    },
+    "admin_settings_head_no_slash": {
+      "status_only": true
+    },
+    "admin_settings_put_no_slash": {
+      "status_only": true
+    },
+    "admin_settings_patch_no_slash": {
+      "status_only": true
+    },
+    "admin_settings_delete_no_slash": {
+      "status_only": true
+    },
+    "admin_settings_options_no_slash": {
+      "status_only": true
+    },
+    "admin_settings_head_slash": {
+      "status_only": true
+    }
+  }
+}
