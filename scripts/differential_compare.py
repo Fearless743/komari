@@ -48,16 +48,21 @@ def build_cases(visible_uuid: str, hidden_uuid: str) -> list[dict[str, Any]]:
     whereas Go seeds every ``config.Legacy`` default during startup.
     """
 
-    def rpc(case_id: str, method: str, params: Any | None = None) -> dict[str, Any]:
+    def rpc(
+        case_id: str, method: str, params: Any | None = None, *, auth: bool = False
+    ) -> dict[str, Any]:
         payload: dict[str, Any] = {"jsonrpc": "2.0", "id": 1, "method": method}
         if params is not None:
             payload["params"] = params
-        return {
+        case: dict[str, Any] = {
             "id": case_id,
             "method": "POST",
             "path": "/api/rpc2",
             "json": payload,
         }
+        if auth:
+            case["auth"] = True
+        return case
 
     return [
         {"id": "ping", "method": "GET", "path": "/ping"},
@@ -90,7 +95,7 @@ def build_cases(visible_uuid: str, hidden_uuid: str) -> list[dict[str, Any]]:
             "capture_session": True,
         },
         {"id": "me_admin", "method": "GET", "path": "/api/me", "auth": True},
-        rpc("rpc_me_admin", "common:getMe", {}),
+        rpc("rpc_me_admin", "common:getMe", {}, auth=True),
         {"id": "nodes_admin", "method": "GET", "path": "/api/nodes", "auth": True},
         {"id": "admin_settings", "method": "GET", "path": "/api/admin/settings", "auth": True},
         {
