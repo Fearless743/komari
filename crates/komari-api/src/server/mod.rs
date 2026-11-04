@@ -1000,10 +1000,25 @@ async fn cors_and_cache(State(state): State<ApiState>, request: Request, next: N
     if cors {
         apply_cors_headers(response.headers_mut());
     }
-    if path == "/api" || path.starts_with("/api/") {
+    // Gin's RedirectTrailingSlash runs before the global middleware stack, so
+    // its 301/307 responses do not get `Cache-Control: no-store`. Keep the
+    // header for every other `/api` response (including the 404s for methods
+    // Gin has no route for).
+    let settings_redirect = matches!(
+        response.status(),
+        StatusCode::MOVED_PERMANENTLY | StatusCode::TEMPORARY_REDIRECT
+    ) && (path == "/api/admin/settings" || path == "/api/admin/settings/");
+    if (path == "/api" || path.starts_with("/api/")) && !settings_redirect {
         response
             .headers_mut()
             .insert(header::CACHE_CONTROL, HeaderValue::from_static("no-store"));
+    }
+    // axum's MethodRouter adds an `Allow` header to method-not-allowed
+    // fallbacks; Gin's 404 for these settings paths has no such header.
+    if response.status() == StatusCode::NOT_FOUND
+        && (path == "/api/admin/settings" || path == "/api/admin/settings/")
+    {
+        response.headers_mut().remove(header::ALLOW);
     }
     response
 }

@@ -3,8 +3,8 @@ mod common;
 use std::io::{Cursor, Read, Write};
 
 use axum::Router;
-use axum::body::Body;
-use axum::http::{Method, Request, StatusCode, header};
+use axum::body::{Body, to_bytes};
+use axum::http::{HeaderMap, Method, Request, StatusCode, header};
 use common::{admin_app, call, create_admin_session, create_client, request, set_api_key};
 use komari_api::ApiState;
 use komari_db::models::Provider;
@@ -44,6 +44,28 @@ fn with_header(mut request: Request<Body>, name: header::HeaderName, value: &str
 
 fn admin_key(state: &ApiState) {
     set_api_key(state, API_KEY);
+}
+
+async fn response_parts(
+    app: &Router,
+    method: Method,
+    uri: &str,
+) -> (StatusCode, HeaderMap, String) {
+    let response = app
+        .clone()
+        .oneshot(request(method, uri, Body::empty()))
+        .await
+        .expect("router response");
+    let status = response.status();
+    let headers = response.headers().clone();
+    let bytes = to_bytes(response.into_body(), usize::MAX)
+        .await
+        .expect("read body");
+    (
+        status,
+        headers,
+        String::from_utf8_lossy(&bytes).into_owned(),
+    )
 }
 
 fn json_body(value: Value) -> Body {
@@ -113,6 +135,90 @@ async fn admin_settings_requires_admin() {
     assert_eq!(status, StatusCode::OK);
     assert_eq!(body["status"], "success");
     assert!(body["data"].is_object());
+}
+
+#[tokio::test]
+async fn admin_settings_redirect_matrix_matches_gin() {
+    let directory = tempfile::tempdir().unwrap();
+    let (_state, app) = admin_app(directory.path());
+
+    let (status, headers, body) = response_parts(&app, Method::GET, "/api/admin/settings").await;
+    assert_eq!(status, StatusCode::MOVED_PERMANENTLY);
+    assert_eq!(
+        headers[header::LOCATION].to_str().unwrap(),
+        "/api/admin/settings/"
+    );
+    assert_eq!(
+        headers[header::CONTENT_TYPE].to_str().unwrap(),
+        "text/html; charset=utf-8"
+    );
+    assert_eq!(
+        body,
+        "<a href=\"/api/admin/settings/\">Moved Permanently</a>.\n\n"
+    );
+    assert!(!headers.contains_key(header::CACHE_CONTROL));
+
+    let (status, headers, body) = response_parts(&app, Method::POST, "/api/admin/settings").await;
+    assert_eq!(status, StatusCode::TEMPORARY_REDIRECT);
+    assert_eq!(
+        headers[header::LOCATION].to_str().unwrap(),
+        "/api/admin/settings/"
+    );
+    assert!(!headers.contains_key(header::CONTENT_TYPE));
+    assert!(body.is_empty());
+    assert!(!headers.contains_key(header::CACHE_CONTROL));
+
+    for method in [
+        Method::HEAD,
+        Method::PUT,
+        Method::PATCH,
+        Method::DELETE,
+        Method::OPTIONS,
+    ] {
+        let (status, headers, body) =
+            response_parts(&app, method.clone(), "/api/admin/settings").await;
+        assert_eq!(status, StatusCode::NOT_FOUND, "{method} no-slash");
+        assert_eq!(
+            headers[header::CONTENT_TYPE].to_str().unwrap(),
+            "text/plain"
+        );
+        assert_eq!(headers[header::CACHE_CONTROL].to_str().unwrap(), "no-store");
+        if method != Method::HEAD {
+            assert_eq!(body, "404 page not found");
+        }
+    }
+
+    for method in [
+        Method::HEAD,
+        Method::PUT,
+        Method::PATCH,
+        Method::DELETE,
+        Method::OPTIONS,
+    ] {
+        let (status, headers, body) =
+            response_parts(&app, method.clone(), "/api/admin/settings/").await;
+        assert_eq!(status, StatusCode::NOT_FOUND, "{method} trailing slash");
+        assert_eq!(
+            headers[header::CONTENT_TYPE].to_str().unwrap(),
+            "text/plain"
+        );
+        assert_eq!(headers[header::CACHE_CONTROL].to_str().unwrap(), "no-store");
+        assert!(
+            !headers.contains_key(header::ALLOW),
+            "{method} trailing-slash Allow header"
+        );
+        if method != Method::HEAD {
+            assert_eq!(body, "404 page not found");
+        }
+    }
+
+    let (status, _, body) = response_parts(&app, Method::GET, "/api/admin/settings/").await;
+    assert_eq!(status, StatusCode::UNAUTHORIZED);
+    assert_eq!(body, r#"{"status":"error","message":"Unauthorized."}"#);
+
+    let (status, _, body) = response_parts(&app, Method::POST, "/api/admin/settings/").await;
+    assert_eq!(status, StatusCode::UNAUTHORIZED);
+    assert_eq!(body, r#"{"status":"error","message":"Unauthorized."}"#);
 }
 
 #[tokio::test]

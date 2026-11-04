@@ -8,7 +8,7 @@ use axum::extract::{Request, State};
 use axum::http::{HeaderValue, Method, StatusCode, Uri, header};
 use axum::middleware::Next;
 use axum::response::{IntoResponse, Response};
-use axum::routing::{any, get};
+use axum::routing::any;
 use komari_auth::RequireAdmin;
 use komari_config::keys;
 use komari_web::SiteMeta;
@@ -20,28 +20,43 @@ use crate::state::ApiState;
 
 pub(crate) fn routes() -> Router<ApiState> {
     Router::new()
-        // Go/Gin redirects the no-slash form before auth: 301 for GET/HEAD,
-        // 307 for other methods (method and body preserved).
-        .route("/api/admin/settings", any(redirect_settings))
-        .route(
-            "/api/admin/settings/",
-            get(get_settings).post(edit_settings),
-        )
+        // Gin's RedirectTrailingSlash only redirects GET (301) and POST (307).
+        // HEAD and all other methods are 404, including on the trailing-slash
+        // path. `MethodFilter::GET` deliberately excludes HEAD (unlike `get()`).
+        .route("/api/admin/settings", any(settings_no_slash_handler))
+        .route("/api/admin/settings/", any(settings_slash_handler))
 }
 
-fn settings_redirect(uri: &Uri, method: &Method) -> Response {
+fn redirect_location(uri: &Uri) -> String {
     let mut location = String::from(uri.path());
     location.push('/');
     if let Some(query) = uri.query() {
         location.push('?');
         location.push_str(query);
     }
-    let status = if matches!(*method, Method::GET | Method::HEAD) {
-        StatusCode::MOVED_PERMANENTLY
-    } else {
-        StatusCode::TEMPORARY_REDIRECT
-    };
-    let mut response = status.into_response();
+    location
+}
+
+fn settings_get_redirect(uri: &Uri) -> Response {
+    let location = redirect_location(uri);
+    // Go's http.Redirect writes this body for GET (including two newlines:
+    // one from the body template and one from fmt.Fprintln).
+    let body = format!("<a href=\"{location}\">Moved Permanently</a>.\n\n");
+    let mut response = (StatusCode::MOVED_PERMANENTLY, body).into_response();
+    response.headers_mut().insert(
+        header::LOCATION,
+        HeaderValue::from_str(&location).expect("settings redirect location is valid"),
+    );
+    response.headers_mut().insert(
+        header::CONTENT_TYPE,
+        HeaderValue::from_static("text/html; charset=utf-8"),
+    );
+    response
+}
+
+fn settings_post_redirect(uri: &Uri) -> Response {
+    let location = redirect_location(uri);
+    let mut response = StatusCode::TEMPORARY_REDIRECT.into_response();
     response.headers_mut().insert(
         header::LOCATION,
         HeaderValue::from_str(&location).expect("settings redirect location is valid"),
@@ -49,15 +64,53 @@ fn settings_redirect(uri: &Uri, method: &Method) -> Response {
     response
 }
 
-async fn redirect_settings(uri: Uri, method: Method) -> Response {
-    settings_redirect(&uri, &method)
+fn settings_not_found() -> Response {
+    // Go's default 404 body and headers for methods Gin has no route for.
+    let mut response = (StatusCode::NOT_FOUND, "404 page not found").into_response();
+    response
+        .headers_mut()
+        .insert(header::CONTENT_TYPE, HeaderValue::from_static("text/plain"));
+    response
+        .headers_mut()
+        .insert(header::CACHE_CONTROL, HeaderValue::from_static("no-store"));
+    response
 }
 
-/// Redirect `/api/admin/settings` before the auth layers run, matching Gin's
-/// `RedirectTrailingSlash` behaviour (unauthenticated callers see 301/307).
+async fn settings_slash_handler(
+    State(state): State<ApiState>,
+    admin: RequireAdmin,
+    method: Method,
+    body: Bytes,
+) -> Response {
+    match method {
+        Method::GET => get_settings(State(state), admin).await,
+        Method::POST => edit_settings(State(state), admin, body).await,
+        _ => settings_not_found(),
+    }
+}
+
+fn settings_no_slash(uri: Uri, method: Method) -> Response {
+    match method {
+        Method::GET => settings_get_redirect(&uri),
+        Method::POST => settings_post_redirect(&uri),
+        _ => settings_not_found(),
+    }
+}
+
+async fn settings_no_slash_handler(uri: Uri, method: Method) -> Response {
+    settings_no_slash(uri, method)
+}
+
+/// Match Gin's redirect/404 matrix before the auth layers run:
+/// GET no-slash -> 301, POST no-slash -> 307, everything else -> 404.
+/// On the trailing-slash path only GET/POST continue to auth and handlers.
 pub(crate) async fn redirect_settings_middleware(request: Request, next: Next) -> Response {
-    if request.uri().path() == "/api/admin/settings" {
-        return settings_redirect(request.uri(), request.method());
+    let path = request.uri().path();
+    if path == "/api/admin/settings" {
+        return settings_no_slash(request.uri().clone(), request.method().clone());
+    }
+    if path == "/api/admin/settings/" && !matches!(*request.method(), Method::GET | Method::POST) {
+        return settings_not_found();
     }
     next.run(request).await
 }
