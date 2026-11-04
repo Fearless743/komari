@@ -1,12 +1,8 @@
 name: Build
 
 on:
-  push:
-    branches:
-      - main
-  pull_request:
-    branches:
-      - main
+  # 只在手动触发时运行。发布构建由 release.yml 在 GitHub Release
+  # published 时执行；普通 push / PR 不再触发构建。
   workflow_dispatch:
 
 permissions:
