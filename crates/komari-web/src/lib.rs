@@ -49,7 +49,7 @@ pub use server::{
     router_for, routes, routes_for, sanitize_relative, serve_fallback, serve_favicon,
     serve_theme_asset,
 };
-pub use theme::{ThemeError, ThemeInfo, is_valid_theme_short};
+pub use theme::{ThemeConfiguration, ThemeError, ThemeInfo, is_valid_theme_short};
 
 use rust_embed::Embed;
 

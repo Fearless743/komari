@@ -190,8 +190,11 @@ before falling back to the embedded default.
 
 ## Known limitations and integration responsibilities
 
-* `configuration` is kept as opaque JSON; theme settings persistence belongs to
-  the API/database crates.
+* `configuration` is a typed struct matching Go's `models.Configuration`:
+  missing or `null` serializes as
+  `{"type":"","icon":"","name":null,"data":null}`, while non-object values are
+  rejected. Its `name`/`data` members stay opaque JSON; theme settings
+  persistence belongs to the API/database crates.
 * Theme upload, import, deletion and update (Go `api/admin/theme.go`) are not
   implemented here.
 * The API/database layer owns persistence of the selected theme. Call
