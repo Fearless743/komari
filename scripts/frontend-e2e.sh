@@ -17,7 +17,7 @@
 #   scripts/frontend-e2e.sh
 #   scripts/frontend-e2e.sh --keep
 #   scripts/frontend-e2e.sh --web-dir /path/to/komari-web
-#   scripts/frontend-e2e.sh --skip-build --dist /path/to/dist
+#   scripts/frontend-e2e.sh --skip-frontend-build --dist /path/to/dist
 #   scripts/frontend-e2e.sh --no-browser
 #
 # Environment:
@@ -39,7 +39,7 @@ PORT="${KOMARI_E2E_PORT:-}"
 ADMIN_USER="${KOMARI_ADMIN_USER:-admin}"
 ADMIN_PASS="${KOMARI_ADMIN_PASS:-testpass}"
 KEEP=0
-SKIP_BUILD=0
+SKIP_FRONTEND_BUILD=0
 NO_BROWSER=0
 REPORT_OUT=""
 WORKDIR_OVERRIDE=""
@@ -82,8 +82,14 @@ while [[ $# -gt 0 ]]; do
       KEEP=1
       shift
       ;;
+    --skip-frontend-build)
+      SKIP_FRONTEND_BUILD=1
+      shift
+      ;;
     --skip-build)
-      SKIP_BUILD=1
+      # Deprecated alias: still rebuilds the Rust binary with the provided
+      # theme, so the served assets are guaranteed to match --dist.
+      SKIP_FRONTEND_BUILD=1
       shift
       ;;
     --no-browser)
@@ -112,8 +118,9 @@ require_command() {
 require_command curl
 require_command python3
 require_command cargo
-if [[ "$SKIP_BUILD" -eq 0 ]]; then
+if [[ "$SKIP_FRONTEND_BUILD" -eq 0 ]]; then
   require_command npm
+  require_command tar
 fi
 
 detect_web_dir() {
@@ -129,7 +136,8 @@ detect_web_dir() {
     "/home/fearless/github/komari/komari-web"
   )
   for candidate in "${candidates[@]}"; do
-    if [[ -f "$candidate/package.json" && -d "$candidate/node_modules" ]]; then
+    if [[ -f "$candidate/package.json" ]] \
+      && { [[ "$SKIP_FRONTEND_BUILD" -eq 1 ]] || [[ -d "$candidate/node_modules" ]]; }; then
       (cd "$candidate" && pwd)
       return 0
     fi
@@ -151,20 +159,25 @@ EOF
   fi
 fi
 
-if [[ "$SKIP_BUILD" -eq 1 && -z "$DIST_DIR" ]]; then
-  echo "error: --skip-build requires --dist <directory> (or use the normal build)" >&2
+if [[ "$SKIP_FRONTEND_BUILD" -eq 1 && -z "$DIST_DIR" ]]; then
+  echo "error: --skip-frontend-build requires --dist <directory> (or use the normal build)" >&2
   exit 2
 fi
 
 if [[ -n "$WORKDIR_OVERRIDE" ]]; then
   WORK="$WORKDIR_OVERRIDE"
   mkdir -p "$WORK"
+  if [[ -d "$WORK/theme" || -d "$WORK/server/data" ]]; then
+    echo "warning: --workdir reuse: clearing previous theme/server data under $WORK" >&2
+    rm -rf "$WORK/theme" "$WORK/server/data" "$WORK/web-build"
+  fi
   KEEP=1
 else
   WORK="$(mktemp -d "${TMPDIR:-/tmp}/komari-e2e.XXXXXX")"
 fi
 THEME="$WORK/theme"
 SERVER_DIR="$WORK/server"
+BUILD_DIR="$WORK/web-build"
 mkdir -p "$THEME/dist" "$SERVER_DIR"
 
 SERVER_PID=""
@@ -201,15 +214,37 @@ trap cleanup EXIT INT TERM
 # Build theme + backend
 # ---------------------------------------------------------------------------
 
-if [[ "$SKIP_BUILD" -eq 0 ]]; then
-  echo "building komari-web frontend into $THEME/dist ..."
-  (
+if [[ "$SKIP_FRONTEND_BUILD" -eq 0 ]]; then
+  echo "building komari-web frontend in a temporary copy into $THEME/dist ..."
+  mkdir -p "$BUILD_DIR"
+  # Build in a temporary copy with a symlinked node_modules so Vite's
+  # `bundle-analysis.html` and TypeScript build info never modify the user's
+  # komari-web checkout.
+  if ! (
     cd "$WEB_DIR"
+    tar --exclude=./node_modules --exclude=./.git --exclude=./dist \
+      --exclude=./bundle-analysis.html -cf - .
+  ) | (
+    cd "$BUILD_DIR"
+    tar -xf -
+  ); then
+    echo "error: failed to copy komari-web into $BUILD_DIR" >&2
+    exit 2
+  fi
+  ln -s "$WEB_DIR/node_modules" "$BUILD_DIR/node_modules"
+  if ! (
+    cd "$BUILD_DIR"
     npm run build -- --outDir "$THEME/dist"
-  )
+  ); then
+    echo "error: komari-web frontend build failed" >&2
+    exit 2
+  fi
 else
   echo "reusing frontend dist from $DIST_DIR ..."
-  cp -a "$DIST_DIR/." "$THEME/dist/"
+  if ! cp -a "$DIST_DIR/." "$THEME/dist/"; then
+    echo "error: failed to copy --dist $DIST_DIR" >&2
+    exit 2
+  fi
 fi
 
 for name in komari-theme.json preview.png perview.png; do
@@ -231,13 +266,16 @@ if [[ ! -f "$THEME/preview.png" && ! -f "$THEME/perview.png" ]]; then
   exit 2
 fi
 
-if [[ "$SKIP_BUILD" -eq 0 ]]; then
-  echo "rebuilding komari-web with the real theme ..."
-  (
-    cd "$ROOT_DIR"
-    KOMARI_DEFAULT_THEME_DIR="$THEME" cargo build -p komari-web
-    KOMARI_DEFAULT_THEME_DIR="$THEME" cargo build -p komari-cli
-  )
+# Always rebuild with the selected theme, including --skip-frontend-build.
+# This guarantees the served asset hashes come from $THEME/dist.
+echo "rebuilding komari-web with the real theme ..."
+if ! (
+  cd "$ROOT_DIR"
+  KOMARI_DEFAULT_THEME_DIR="$THEME" cargo build -p komari-web
+  KOMARI_DEFAULT_THEME_DIR="$THEME" cargo build -p komari-cli
+); then
+  echo "error: Rust backend rebuild with KOMARI_DEFAULT_THEME_DIR failed" >&2
+  exit 2
 fi
 
 RUST_BIN="$ROOT_DIR/target/debug/komari"
@@ -270,7 +308,7 @@ echo "starting Rust backend on 127.0.0.1:$PORT (workdir $SERVER_DIR) ..."
   KOMARI_LISTEN="127.0.0.1:$PORT" \
   KOMARI_LOG_LEVEL=error \
   TZ=UTC \
-  "$RUST_BIN" server
+  exec "$RUST_BIN" server
 ) >"$SERVER_DIR/server.log" 2>&1 &
 SERVER_PID=$!
 
@@ -299,16 +337,30 @@ CHECKS_JSON="$WORK/checks.jsonl"
 : >"$CHECKS_JSON"
 FAILURES=0
 CHECKS=0
+SKIPPED=0
 
 record_check() {
   local name="$1" ok="$2" detail="$3"
+  local skipped=false
+  if [[ "$ok" == "skipped" ]]; then
+    skipped=true
+    ok=false
+  fi
   CHECKS=$((CHECKS + 1))
-  python3 - "$name" "$ok" "$detail" >>"$CHECKS_JSON" <<'PY'
+  python3 - "$name" "$ok" "$skipped" "$detail" >>"$CHECKS_JSON" <<'PY'
 import json, sys
-print(json.dumps({"name": sys.argv[1], "ok": sys.argv[2] == "true", "detail": sys.argv[3]}, ensure_ascii=False))
+print(json.dumps({
+    "name": sys.argv[1],
+    "ok": sys.argv[2] == "true",
+    "skipped": sys.argv[3] == "true",
+    "detail": sys.argv[4],
+}, ensure_ascii=False))
 PY
   if [[ "$ok" == "true" ]]; then
     printf '  PASS  %s\n' "$name"
+  elif [[ "$skipped" == "true" ]]; then
+    printf '  SKIP  %s — %s\n' "$name" "$detail"
+    SKIPPED=$((SKIPPED + 1))
   else
     printf '  FAIL  %s — %s\n' "$name" "$detail"
     FAILURES=$((FAILURES + 1))
@@ -368,8 +420,14 @@ else
   record_check "GET / references a hashed JS asset" false "no /assets/*.js in index.html"
 fi
 
-ASSET_JS="$(grep -oE 'src="[^"]*/assets/[^"]+\.js"' "$WORK/index.html" | head -1 | sed 's/^src="//;s/"$//')"
-ASSET_CSS="$(grep -oE 'href="[^"]*/assets/[^"]+\.css"' "$WORK/index.html" | head -1 | sed 's/^href="//;s/"$//')"
+ASSET_JS="$(grep -oE 'src="[^"]*/assets/[^"]+\.js"' "$WORK/index.html" | head -1 | sed 's/^src="//;s/"$//' || true)"
+ASSET_CSS="$(grep -oE 'href="[^"]*/assets/[^"]+\.css"' "$WORK/index.html" | head -1 | sed 's/^href="//;s/"$//' || true)"
+THEME_ASSET_JS="$(grep -oE 'src="[^"]*/assets/[^"]+\.js"' "$THEME/dist/index.html" | head -1 | sed 's/^src="//;s/"$//' || true)"
+if [[ -n "$ASSET_JS" && -n "$THEME_ASSET_JS" && "$ASSET_JS" == "$THEME_ASSET_JS" ]]; then
+  record_check "served index uses the theme asset hash" true ""
+else
+  record_check "served index uses the theme asset hash" false "served=$ASSET_JS theme=$THEME_ASSET_JS"
+fi
 if [[ -n "$ASSET_JS" ]]; then
   check_status_and_type "GET $ASSET_JS" "$ASSET_JS" "200" "javascript"
   if [[ "$(wc -c <"$WORK/body")" -gt 1000 ]]; then
@@ -475,7 +533,7 @@ else
 fi
 
 SETTINGS_STATUS="$(curl -sS --max-time 15 -b "$WORK/cookies.txt" -o "$WORK/settings.json" -w '%{http_code}' \
-  "http://127.0.0.1:$PORT/api/admin/settings" || true)"
+  "http://127.0.0.1:$PORT/api/admin/settings/" || true)"
 if [[ "$SETTINGS_STATUS" == "200" ]] && python3 - "$WORK/settings.json" <<'PY'
 import json, sys
 data = json.load(open(sys.argv[1], encoding="utf-8"))
@@ -516,6 +574,7 @@ fi
 browser_check() {
   local name="$1" url="$2" marker_regex="$3" output="$4"
   local stderr="$WORK/chrome.err"
+  local static_size dom_size
   if timeout 90 "$CHROME_BIN" \
       --headless --no-sandbox --disable-gpu --disable-dev-shm-usage \
       --user-data-dir="$WORK/chrome-profile" --virtual-time-budget=8000 \
@@ -524,22 +583,45 @@ browser_check() {
       record_check "$name" false "headless browser produced an empty DOM"
       return
     fi
+    # A static title/root is not enough: require Radix to have mounted inside
+    # #root, and require the rendered DOM to be larger than the static index.
+    if ! grep -q 'data-is-root-theme="true"' "$output"; then
+      record_check "$name" false "rendered DOM lacks data-is-root-theme (JS did not render)"
+      return
+    fi
+    if ! grep -qE '<div id="root"><[^>]' "$output"; then
+      record_check "$name" false "rendered #root has no child element"
+      return
+    fi
+    static_size="$(wc -c <"$WORK/index.html")"
+    dom_size="$(wc -c <"$output")"
+    if (( dom_size <= static_size )); then
+      record_check "$name" false "rendered DOM ($dom_size B) is not larger than static index ($static_size B)"
+      return
+    fi
     if grep -Eqi "$marker_regex" "$output"; then
       record_check "$name" true ""
     else
       record_check "$name" false "rendered DOM lacks /$marker_regex/"
     fi
   else
-    # Environment limitation (sandbox, missing shared library, ...): the curl
-    # checks above already cover the HTTP contract. Report a skip, not a fail.
-    BROWSER_AVAILABLE=false
-    BROWSER_SKIP_REASON="headless browser failed: $(tail -n 1 "$stderr" 2>/dev/null || true)"
-    record_check "$name (skipped)" true "$BROWSER_SKIP_REASON"
+    local stderr_text
+    stderr_text="$(tail -n 3 "$stderr" 2>/dev/null || true)"
+    if grep -Eqi \
+        'error while loading shared libraries|No usable sandbox|Failed to move to new namespace|Operation not permitted|cannot open shared object|zygote|DevToolsActivePort|Failed to launch' \
+        <<<"$stderr_text"; then
+      # Known environment limitation (sandbox, missing shared library, ...):
+      # the curl checks above already cover the HTTP contract.
+      BROWSER_SKIP_REASON="headless browser unavailable: $stderr_text"
+      record_check "$name" skipped "$BROWSER_SKIP_REASON"
+    else
+      record_check "$name" false "headless browser failed: $stderr_text"
+    fi
   fi
 }
 
 if [[ "$BROWSER_AVAILABLE" == true ]]; then
-  browser_check "browser: / renders the dashboard" "http://127.0.0.1:$PORT/" "Komari" "$WORK/dom-index.html"
+  browser_check "browser: / renders the dashboard" "http://127.0.0.1:$PORT/" "登录|Login|暂无|No nodes|No data" "$WORK/dom-index.html"
 fi
 if [[ "$BROWSER_AVAILABLE" == true ]]; then
   browser_check "browser: /admin renders the login UI" "http://127.0.0.1:$PORT/admin" "login|登录|用户名|username|密码|password" "$WORK/dom-admin.html"
@@ -549,16 +631,20 @@ fi
 # Report
 # ---------------------------------------------------------------------------
 
-python3 - "$CHECKS_JSON" "$BROWSER_AVAILABLE" "$BROWSER_SKIP_REASON" "$FAILURES" "$CHECKS" \
+python3 - "$CHECKS_JSON" "$BROWSER_AVAILABLE" "$BROWSER_SKIP_REASON" "$FAILURES" "$CHECKS" "$SKIPPED" \
   "$THEME" "$RUST_BIN" "$PORT" "$REPORT_OUT" <<'PY'
-import json, sys
+import json, os, sys
 
-checks_path, available, skip_reason, failures, total_checks, theme, binary, port, report_out = sys.argv[1:]
+checks_path, available, skip_reason, failures, total_checks, skipped, theme, binary, port, report_out = sys.argv[1:]
 rows = [json.loads(line) for line in open(checks_path, encoding="utf-8") if line.strip()]
 report = {
     "ok": int(failures) == 0,
     "checks": rows,
-    "summary": {"checks": int(total_checks), "failures": int(failures)},
+    "summary": {
+        "checks": int(total_checks),
+        "failures": int(failures),
+        "skipped": int(skipped),
+    },
     "browser": {
         "available": available == "true",
         "skipped_reason": skip_reason or None,
@@ -569,10 +655,12 @@ report = {
 }
 text = json.dumps(report, indent=2, ensure_ascii=False)
 if report_out:
+    parent = os.path.dirname(os.path.abspath(report_out))
+    os.makedirs(parent, exist_ok=True)
     open(report_out, "w", encoding="utf-8").write(text + "\n")
 print()
 print("=" * 72)
-print(f"frontend E2E: checks={total_checks} failures={failures} browser_available={available}")
+print(f"frontend E2E: checks={total_checks} failures={failures} skipped={skipped} browser_available={available}")
 print(f"report: {report_out or '(not written; use --report-out)'}")
 if skip_reason:
     print(f"browser note: {skip_reason}")
