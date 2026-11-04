@@ -169,7 +169,10 @@ jobs:
             use_cross: false
             extension: ""
           - name: darwin-arm64
-            os: macos-15
+            # Build on the Intel runner as well: the macOS arm64 hosted-runner
+            # pool intermittently fails to acquire a machine. Xcode ships the
+            # arm64 SDK slice, so cross-compiling from x86_64 is supported.
+            os: macos-15-intel
             target: aarch64-apple-darwin
             use_cross: false
             extension: ""
