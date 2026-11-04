@@ -518,7 +518,39 @@ async fn email_body_is_quoted_printable_and_subject_is_rfc2047() {
     let raw = envelope.raw_text();
     assert!(raw.contains("Content-Transfer-Encoding: quoted-printable"));
     assert!(raw.contains("=3D"), "body should be QP encoded: {raw}");
-    assert!(raw.contains("=?utf-8?"), "subject should be RFC2047: {raw}");
+    assert!(
+        raw.contains("Subject: =?UTF-8?q?=E7=8A=B6=E6=80=81=E6=8F=90=E9=86=92?=\r\n"),
+        "subject should use Go-compatible Q-encoding: {raw}"
+    );
+    assert!(
+        !raw.contains("?b?"),
+        "subject must not use B-encoding: {raw}"
+    );
+}
+
+#[tokio::test]
+async fn email_ascii_subject_is_left_unencoded_like_go() {
+    let sender = EmailSender::with_transport(
+        EmailConfig {
+            host: "smtp.example".to_owned(),
+            port: 587,
+            username: "user".to_owned(),
+            password: "pass".to_owned(),
+            sender: "bot@example.com".to_owned(),
+            receiver: "a@example.com".to_owned(),
+            ..EmailConfig::default()
+        },
+        Arc::new(MockEmail::new()),
+    );
+    let envelope = sender
+        .build_envelope("body", "Komari alert 100% CPU")
+        .unwrap();
+    let raw = envelope.raw_text();
+    assert!(
+        raw.contains("Subject: Komari alert 100% CPU\r\n"),
+        "ASCII subjects are not encoded by Go: {raw}"
+    );
+    assert!(!raw.contains("=?UTF-8?"), "{raw}");
 }
 
 #[tokio::test]
