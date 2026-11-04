@@ -42,21 +42,20 @@
   外部脚本需要改为直接调用 provider API。
 - **状态**：非 Go 扩展，已记录在 `crates/komari-ddns/README.md`。
 
-## D-003 旧数据库历史迁移不自动执行
+## D-003 旧数据库历史迁移（已合并）
 
-- **Rust**：`komari-db` 的 `migrate()` 只做加法式 schema 迁移、缺失列补齐和
-  legacy `configs` 转换；不执行以下 Go 历史迁移：
-  - pre-1.0.2 将 OAuth/通知设置从旧 `configs` 列搬出的迁移；
-  - `client_infos` 合并到 `clients`；
-  - MySQL 路径（Go 的 MySQL 分支同样被注释，但 Rust 会显式返回
-    `UnsupportedDatabase`）。
-- **Go**：启动时 `AutoMigrate` 会执行上述历史迁移。
-- **原因**：这些迁移只影响很老的数据库，Rust 选择不自动改写用户数据，降低误迁移
-  风险。
-- **影响**：极老数据库直接用 Rust 打开时，可能缺少 OAuth/通知配置或旧客户端信息。
-- **迁移**：先用 Go 版启动一次并正常退出，让 Go 完成历史迁移；备份后再切换 Rust。
-  参见 [MIGRATION.md](MIGRATION.md) 第 4 节。
-- **状态**：兼容性限制，已记录在 `crates/komari-db/README.md`。
+- **Rust**：`komari-db` 的 `migrate()` 在单个事务中执行以下 Go 历史迁移：
+  - `client_infos` 合并到 `clients`，原表重命名为 `client_infos_backup`；
+  - pre-1.0.2 将 OAuth/通知设置从旧 `configs` 列搬出到
+    `oidc_providers` / `message_sender_providers`；
+  - 现有加法式 schema 迁移、缺失列补齐和 legacy `configs` 转换保持不变。
+- **Go**：启动时 `MergeDatabase` + `AutoMigrate` 会执行上述历史迁移。
+- **差异**：Rust 把旧 `configs` 表保留为 `configs_legacy_backup`，Go 会直接
+  删除/重写；旧凭据列不会复制到新的 key/value `configs`，只保留在备份表中。
+- **迁移**：无需再先用 Go 启动一次；直接备份数据库后切换即可。
+- **状态**：已合并（B20），由 `crates/komari-db/tests/legacy_migration.rs`
+  覆盖合并、重命名、OIDC/通知迁移、幂等、缺列、空表、异常 JSON、回滚和
+  现有库不变。
 
 ## D-004 GeoIP 缓存容量上限 10,000
 
