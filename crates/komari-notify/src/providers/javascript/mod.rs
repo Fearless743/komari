@@ -236,7 +236,15 @@ impl JavaScriptSender {
 
     async fn execute(&self, invocation: engine::Invocation) -> Result<()> {
         let worker = self.worker().await?;
-        let reply = worker.invoke(invocation, self.timeout)?;
+        let reply = match worker.invoke(invocation, self.timeout) {
+            Ok(reply) => reply,
+            Err(error) => {
+                // The runtime thread is gone; drop the handle so the next call
+                // starts a fresh runtime.
+                self.poison().await;
+                return Err(error);
+            }
+        };
 
         match tokio::time::timeout(self.timeout, reply).await {
             Ok(Ok(result)) => result,
@@ -363,6 +371,20 @@ mod tests {
             message,
             format!("🔴🔴🔴\nEvent: Offline\nClients: [alpha u-2]\nMessage: gone\nTime: {time}")
         );
+    }
+
+    #[tokio::test]
+    async fn sender_recovers_after_the_runtime_is_poisoned() {
+        let sender = JavaScriptSender::new(JavaScriptConfig {
+            script: "function sendMessage() { return true; }".to_owned(),
+        });
+        sender.init().await.unwrap();
+
+        // Fault injection: drop the runtime thread without telling the sender,
+        // as a timeout or panic would.
+        sender.poison().await;
+
+        sender.send_text("hello", "title").await.unwrap();
     }
 
     #[test]

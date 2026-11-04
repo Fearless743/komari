@@ -6,6 +6,7 @@
 //! jobs over a channel: top-level script state and side effects run once, at
 //! `Init`, exactly like Go.
 
+use std::panic::{AssertUnwindSafe, catch_unwind};
 use std::sync::Arc;
 use std::sync::Mutex;
 use std::sync::mpsc::{Receiver, Sender, channel};
@@ -121,7 +122,19 @@ fn worker_main(
             timeout,
             reply,
         } = command;
-        let result = runtime.invoke(invocation, timeout);
-        let _ = reply.send(result);
+        // A panic must not leave a half-dead worker behind: drop the reply so
+        // the caller poisons the slot and creates a fresh runtime.
+        match catch_unwind(AssertUnwindSafe(|| runtime.invoke(invocation, timeout))) {
+            Ok(result) => {
+                let _ = reply.send(result);
+            }
+            Err(_) => {
+                tracing::error!(
+                    target: "komari_notify::javascript",
+                    "JavaScript runtime panicked; the next call will start a new runtime"
+                );
+                break;
+            }
+        }
     }
 }
