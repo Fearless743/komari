@@ -104,6 +104,9 @@ impl HttpRequest {
 #[derive(Clone, PartialEq, Eq)]
 pub struct HttpResponse {
     pub status: u16,
+    /// Response headers in wire order. Only the JavaScript `fetch` bridge reads
+    /// them; provider validation ignores them.
+    pub headers: Vec<(String, String)>,
     pub body: Vec<u8>,
 }
 
@@ -111,6 +114,10 @@ impl std::fmt::Debug for HttpResponse {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("HttpResponse")
             .field("status", &self.status)
+            .field(
+                "headers",
+                &format!("<{} headers redacted>", self.headers.len()),
+            )
             .field("body", &format!("<{} bytes redacted>", self.body.len()))
             .finish()
     }
@@ -120,12 +127,35 @@ impl HttpResponse {
     pub fn new(status: u16, body: impl Into<Vec<u8>>) -> Self {
         Self {
             status,
+            headers: Vec::new(),
             body: body.into(),
         }
     }
 
     pub fn ok_json(value: &serde_json::Value) -> Self {
         Self::new(200, serde_json::to_vec(value).unwrap_or_default())
+    }
+
+    /// Append a response header (builder style).
+    pub fn with_header(mut self, name: impl Into<String>, value: impl Into<String>) -> Self {
+        self.headers.push((name.into(), value.into()));
+        self
+    }
+
+    /// Case-insensitive header lookup.
+    pub fn header_value(&self, name: &str) -> Option<&str> {
+        self.headers
+            .iter()
+            .find(|(key, _)| key.eq_ignore_ascii_case(name))
+            .map(|(_, value)| value.as_str())
+    }
+
+    /// Status line reason phrase (`OK`, `Not Found`, …), if the code is known.
+    pub fn reason(&self) -> &'static str {
+        reqwest::StatusCode::from_u16(self.status)
+            .ok()
+            .and_then(|status| status.canonical_reason())
+            .unwrap_or("")
     }
 
     pub fn body_text(&self) -> &str {
@@ -203,8 +233,22 @@ impl HttpTransport for ReqwestTransport {
 
         let response = builder.send().await.map_err(reqwest_error)?;
         let status = response.status().as_u16();
+        let headers = response
+            .headers()
+            .iter()
+            .map(|(name, value)| {
+                (
+                    name.as_str().to_owned(),
+                    value.to_str().unwrap_or("").to_owned(),
+                )
+            })
+            .collect();
         let body = response.bytes().await.map_err(reqwest_error)?.to_vec();
-        Ok(HttpResponse { status, body })
+        Ok(HttpResponse {
+            status,
+            headers,
+            body,
+        })
     }
 }
 

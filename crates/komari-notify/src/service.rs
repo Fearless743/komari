@@ -109,13 +109,43 @@ impl<'a> NotificationService<'a> {
         Err(error)
     }
 
-    /// Port of `SendEvent`: template the event, then retry three times.
+    /// Port of `SendEvent`: prefer the provider's structured event handler,
+    /// then retry three times.
     pub async fn send_event(&self, event: &EventMessage) -> Result<bool> {
         let Some(sender) = self.sender.as_ref() else {
             return Err(NotifyError::NotInitialized);
         };
         if !self.settings.enabled {
             return Ok(false);
+        }
+
+        // Go type-asserts the provider to `IEventMessageSender` and only falls
+        // back to the templated text when that assertion fails.
+        if let Some(event_sender) = sender.as_event_sender() {
+            let mut last_error = None;
+            for _ in 0..3 {
+                match event_sender.send_event(event).await {
+                    Ok(()) => {
+                        self.log(&format!("Event message sent: {}", event.event), "info");
+                        return Ok(true);
+                    }
+                    Err(NotifyError::Send(message)) if message == QQ_SHORT_RESPONSE_ERROR => {
+                        self.log(&format!("Event message sent: {}", event.event), "info");
+                        return Ok(true);
+                    }
+                    Err(error) => last_error = Some(error),
+                }
+            }
+
+            let error = last_error.unwrap_or(NotifyError::Send("unknown send failure".to_owned()));
+            self.log(
+                &format!(
+                    "Failed to send event message after 3 attempts: {error},{}",
+                    event.event
+                ),
+                "error",
+            );
+            return Err(error);
         }
 
         let message = format_event(&self.settings.template, event);

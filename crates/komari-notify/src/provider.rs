@@ -33,6 +33,15 @@ pub trait MessageSender: Send + Sync {
     /// Send one text message. `title` may be empty.
     async fn send_text(&self, message: &str, title: &str) -> Result<()>;
 
+    /// Downcast to an event-capable sender.
+    ///
+    /// This is the Rust equivalent of Go's `provider.(IEventMessageSender)`
+    /// type assertion in `SendEvent`: providers that return `None` receive the
+    /// templated text message instead of a structured event.
+    fn as_event_sender(&self) -> Option<&dyn EventMessageSender> {
+        None
+    }
+
     /// Provider initialisation hook (`Init`).
     async fn init(&self) -> Result<()> {
         Ok(())
