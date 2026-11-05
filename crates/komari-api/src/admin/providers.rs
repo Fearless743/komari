@@ -422,14 +422,30 @@ struct ZonesBody {
 }
 
 /// `POST /api/admin/settings/ddns/cloudflare/zones` — Go `GetCloudflareZones`.
-pub(crate) async fn cloudflare_zones(_admin: RequireAdmin, body: Bytes) -> Response {
+///
+/// GET responses redact `api_token` (D-009), so the admin UI cannot send it
+/// back for an already-configured provider. An empty request token therefore
+/// falls back to the token stored in `ddns_providers`.
+pub(crate) async fn cloudflare_zones(
+    State(state): State<ApiState>,
+    _admin: RequireAdmin,
+    body: Bytes,
+) -> Response {
     let request: ZonesBody = match parse_json(&body, "Invalid request") {
         Ok(request) => request,
         Err(response) => return response,
     };
-    if request.token.is_empty() {
-        return bad_request("Token is required");
-    }
+    let token = match normalize_cloudflare_token(&request.token) {
+        token if !token.is_empty() => token,
+        _ => match stored_cloudflare_token(&state) {
+            Some(token) => token,
+            None => {
+                return bad_request(
+                    "Token is required. Configure and save the Cloudflare API token first.",
+                );
+            }
+        },
+    };
 
     let client = match reqwest::Client::builder()
         .timeout(Duration::from_secs(10))
@@ -440,7 +456,7 @@ pub(crate) async fn cloudflare_zones(_admin: RequireAdmin, body: Bytes) -> Respo
     };
     let response = client
         .get("https://api.cloudflare.com/client/v4/zones?status=active&per_page=50")
-        .bearer_auth(&request.token)
+        .bearer_auth(&token)
         .header("Content-Type", "application/json")
         .send()
         .await;
@@ -449,9 +465,11 @@ pub(crate) async fn cloudflare_zones(_admin: RequireAdmin, body: Bytes) -> Respo
         Err(_) => return internal("Failed to connect to Cloudflare API"),
     };
     if response.status() != reqwest::StatusCode::OK {
+        let status = response.status().as_u16();
+        let body = response.text().await.unwrap_or_default();
         return internal(format!(
-            "Cloudflare API Error: status {}",
-            response.status().as_u16()
+            "Cloudflare API Error: status {status}{}",
+            cloudflare_error_detail(&body)
         ));
     }
     let value: Value = match response.json().await {
@@ -466,6 +484,82 @@ pub(crate) async fn cloudflare_zones(_admin: RequireAdmin, body: Bytes) -> Respo
         .cloned()
         .unwrap_or(Value::Array(Vec::new()));
     response::success(result).into_response()
+}
+
+/// Trim whitespace and an accidental `Bearer ` prefix from a pasted token.
+fn normalize_cloudflare_token(raw: &str) -> String {
+    let token = raw.trim();
+    let token = if token
+        .get(..7)
+        .is_some_and(|prefix| prefix.eq_ignore_ascii_case("bearer "))
+    {
+        token[7..].trim()
+    } else {
+        token
+    };
+    token.to_owned()
+}
+
+/// Read the stored Cloudflare API token. GET responses never expose it, so the
+/// zones endpoint reads the full value straight from the database row.
+fn stored_cloudflare_token(state: &ApiState) -> Option<String> {
+    let provider = state.db.ddns_providers().get("cloudflare").ok().flatten()?;
+    let addition: Value = serde_json::from_str(&provider.addition).ok()?;
+    let token = addition.get("api_token").and_then(Value::as_str)?;
+    let token = normalize_cloudflare_token(token);
+    (!token.is_empty()).then_some(token)
+}
+
+/// Summarize Cloudflare's `errors[].message` without echoing the token.
+fn cloudflare_error_detail(body: &str) -> String {
+    let Ok(value) = serde_json::from_str::<Value>(body) else {
+        return String::new();
+    };
+    let messages = value
+        .get("errors")
+        .and_then(Value::as_array)
+        .map(|errors| {
+            errors
+                .iter()
+                .filter_map(|error| {
+                    let message = error.get("message").and_then(Value::as_str)?;
+                    match error.get("code").and_then(Value::as_i64) {
+                        Some(code) => Some(format!("{message} (code {code})")),
+                        None => Some(message.to_owned()),
+                    }
+                })
+                .collect::<Vec<_>>()
+        })
+        .unwrap_or_default();
+    if messages.is_empty() {
+        String::new()
+    } else {
+        format!(": {}", messages.join("; "))
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{cloudflare_error_detail, normalize_cloudflare_token};
+
+    #[test]
+    fn cloudflare_tokens_are_trimmed_and_stripped_of_bearer() {
+        assert_eq!(normalize_cloudflare_token("  token-1 \n"), "token-1");
+        assert_eq!(normalize_cloudflare_token("Bearer token-2"), "token-2");
+        assert_eq!(normalize_cloudflare_token("bearer   token-3"), "token-3");
+        assert_eq!(normalize_cloudflare_token("   "), "");
+    }
+
+    #[test]
+    fn cloudflare_errors_are_summarized_without_the_token() {
+        let body =
+            r#"{"success":false,"errors":[{"code":10000,"message":"Authentication error"}]}"#;
+        assert_eq!(
+            cloudflare_error_detail(body),
+            ": Authentication error (code 10000)"
+        );
+        assert_eq!(cloudflare_error_detail("not json"), "");
+    }
 }
 
 #[derive(Default, serde::Deserialize)]
