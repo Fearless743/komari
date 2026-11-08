@@ -7,7 +7,7 @@ use crate::db::Db;
 use crate::error::{DbError, Result};
 use crate::models::User;
 use crate::time::LocalTime;
-use crate::util::{generate_password, hash_password};
+use crate::util::{generate_password, hash_secure_password};
 
 /// Access to the `users` table.
 pub struct Accounts<'a> {
@@ -128,7 +128,7 @@ impl Accounts<'_> {
         let conn = self.db.conn();
         Ok(conn.execute(
             "UPDATE users SET passwd = ?1, updated_at = ?2 WHERE uuid = ?3",
-            params![hash_password(password), LocalTime::now(), uuid],
+            params![hash_secure_password(password), LocalTime::now(), uuid],
         )?)
     }
 
@@ -137,7 +137,7 @@ impl Accounts<'_> {
         let conn = self.db.conn();
         Ok(conn.execute(
             "UPDATE users SET passwd = ?1, updated_at = ?2 WHERE username = ?3",
-            params![hash_password(password), LocalTime::now(), username],
+            params![hash_secure_password(password), LocalTime::now(), username],
         )?)
     }
 

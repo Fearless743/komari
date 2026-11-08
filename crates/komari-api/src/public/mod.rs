@@ -9,7 +9,6 @@
 //! * `GET  /api/me`, `POST /api/login`, `GET /api/logout` — session handling.
 //! * `GET  /api/recent/{uuid}` — buffered (in-memory) reports.
 //! * `GET  /api/records/load` — historical metric records.
-//! * `GET  /api/oauth`, `GET /api/oauth_callback` — OAuth login and binding.
 //! * `GET  /api/mjpeg_live` — live MJPEG status stream.
 //! * `ANY  /ping` — health check (`pong`).
 //!
@@ -20,23 +19,21 @@
 mod login;
 mod mjpeg;
 mod nodes;
-mod oauth;
 mod records;
 mod settings;
 mod version;
 
 use std::net::SocketAddr;
 
-use axum::Json;
 use axum::Router;
 use axum::extract::{ConnectInfo, FromRequestParts};
-use axum::http::header::{COOKIE, HOST, USER_AGENT};
+use axum::http::header::{COOKIE, USER_AGENT};
 use axum::http::request::Parts;
 use axum::http::{HeaderMap, HeaderValue, StatusCode, header};
 use axum::response::{IntoResponse, Response};
 use axum::routing::{any, get, post};
 use komari_auth::PrivateSite;
-use serde_json::{Value, json};
+use serde_json::Value;
 
 use crate::response;
 use crate::state::ApiState;
@@ -48,10 +45,6 @@ pub use mjpeg::rendered_frame_count as mjpeg_rendered_frame_count;
 
 /// Cookie carrying the login session (Go `session_token`).
 pub(crate) const SESSION_COOKIE: &str = komari_auth::SESSION_COOKIE_NAME;
-/// Cookie carrying the pending OAuth `state` value.
-pub(crate) const OAUTH_STATE_COOKIE: &str = "oauth_state";
-/// Cookie carrying the account UUID for an OAuth binding flow.
-pub(crate) const BINDING_COOKIE: &str = "binding_external_account";
 
 /// Routes owned by the public/browser API.
 ///
@@ -80,8 +73,6 @@ pub fn public_router() -> Router<ApiState> {
         .route("/api/logout", get(login::logout))
         .route("/api/recent/{uuid}", get(records::get_recent))
         .route("/api/records/load", get(records::get_records))
-        .route("/api/oauth", get(oauth::authorize))
-        .route("/api/oauth_callback", get(oauth::callback))
         .route("/api/mjpeg_live", get(mjpeg::mjpeg_live))
 }
 
@@ -95,17 +86,6 @@ pub fn public_router_with_state(state: ApiState) -> Router {
     public_router()
         .layer(PrivateSite::new(auth))
         .with_state(state)
-}
-
-/// Load the configured OAuth provider and install it on `state`.
-///
-/// Port of Go's `oauth.Initialize` call in `cmd/server.go`: seeds default
-/// provider rows, then loads `o_auth_provider` (falling back to GitHub).
-pub async fn initialize_oauth(state: &ApiState) -> komari_oauth::Result<()> {
-    let manager = komari_oauth::OAuthManager::new();
-    manager.initialize_from_db(&state.db).await?;
-    state.set_oauth_provider(manager.current());
-    Ok(())
 }
 
 async fn ping() -> &'static str {
@@ -122,18 +102,6 @@ pub(crate) fn respond_error(status: StatusCode, message: impl Into<String>) -> R
     (status, response::error(message)).into_response()
 }
 
-/// OAuth handlers use a raw `{"status":"error","error":"..."}` body in Go.
-pub(crate) fn respond_raw_error(status: StatusCode, message: impl Into<String>) -> Response {
-    (
-        status,
-        Json(json!({
-            "status": "error",
-            "error": message.into(),
-        })),
-    )
-        .into_response()
-}
-
 /// Build a `302 Found` response with the supplied `Location`.
 pub(crate) fn redirect(location: &str) -> Response {
     let mut response = StatusCode::FOUND.into_response();
@@ -145,9 +113,10 @@ pub(crate) fn redirect(location: &str) -> Response {
 
 /// Append a Go-compatible `Set-Cookie` header.
 ///
-/// Gin uses `http.SetCookie` with `Secure=false` and `HttpOnly=true`. A
-/// positive `max_age` emits `Max-Age=N`, a negative one emits `Max-Age=0`
+/// A positive `max_age` emits `Max-Age=N`, a negative one emits `Max-Age=0`
 /// (deletion) and zero emits a session cookie without `Max-Age`.
+/// `SameSite=Lax` mitigates CSRF; `Secure` is intentionally omitted so plain
+/// HTTP deployments keep working (use a reverse-proxy with HTTPS in production).
 pub(crate) fn set_cookie(response: &mut Response, name: &str, value: &str, max_age: i64) {
     let mut cookie = format!("{name}={value}; Path=/");
     if max_age > 0 {
@@ -155,7 +124,7 @@ pub(crate) fn set_cookie(response: &mut Response, name: &str, value: &str, max_a
     } else if max_age < 0 {
         cookie.push_str("; Max-Age=0");
     }
-    cookie.push_str("; HttpOnly");
+    cookie.push_str("; HttpOnly; SameSite=Lax");
     if let Ok(value) = HeaderValue::from_str(&cookie) {
         response.headers_mut().append(header::SET_COOKIE, value);
     }
@@ -263,28 +232,4 @@ pub(crate) fn audit(
     if let Err(error) = state.db.logs().log(&ip, uuid, message, msg_type) {
         tracing::warn!(%error, "failed to write audit log");
     }
-}
-
-/// Go `utils.GetCallbackURL`: `<scheme>://<host>/api/oauth_callback`.
-pub(crate) fn callback_url(headers: &HeaderMap) -> String {
-    let scheme = header_value(headers, "x-forwarded-proto")
-        .or_else(|| header_value(headers, "x-forwarded-protocol"))
-        .or_else(|| {
-            header_value(headers, "x-forwarded-ssl")
-                .filter(|value| value.eq_ignore_ascii_case("on"))
-                .map(|_| "https".to_owned())
-        })
-        .or_else(|| header_value(headers, "x-url-scheme"))
-        .unwrap_or_else(|| "http".to_owned());
-    let host = header_value(headers, HOST.as_str()).unwrap_or_default();
-    format!("{scheme}://{host}/api/oauth_callback")
-}
-
-fn header_value(headers: &HeaderMap, name: &str) -> Option<String> {
-    headers
-        .get(name)
-        .and_then(|value| value.to_str().ok())
-        .map(str::trim)
-        .filter(|value| !value.is_empty())
-        .map(str::to_owned)
 }

@@ -5,8 +5,8 @@
 //! without the [`RequireRole`](komari_auth::RequireRole) middleware.
 //!
 //! Responses use the same envelope as the Go backend. Provider configurations
-//! are returned through `komari-ddns::redact_addition`,
-//! `komari-notify::redact_addition` or the local OAuth redactor; the database
+//! are returned through `komari-ddns::redact_addition` or
+//! `komari-notify::redact_addition`; the database
 //! always keeps the complete `addition` JSON so delivery keeps working.
 
 mod backup;

@@ -89,6 +89,10 @@ fn run_chpasswd(global: &GlobalArgs, args: ChpasswdArgs) -> Result<()> {
         print_chpasswd_help();
         return Ok(());
     };
+    if password.len() < 6 {
+        println!("Error: Password must be at least 6 characters long");
+        return Ok(());
+    }
 
     let Some(db) = open_existing_db(global)? else {
         return Ok(());
@@ -120,7 +124,7 @@ fn run_chpasswd(global: &GlobalArgs, args: ChpasswdArgs) -> Result<()> {
         println!("Error: {message}");
         return Ok(());
     }
-    println!("Password changed successfully, new password: {password}");
+    println!("Password changed successfully for user: {username}");
 
     if let Err(error) = db.sessions().delete_all() {
         println!("Unable to force logout of other devices: {error}");

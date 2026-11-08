@@ -47,11 +47,25 @@ pub async fn upload_report(State(state): State<ApiState>, request: Request) -> R
         }
     };
 
-    // Go prefers the body UUID and falls back to the authenticated agent UUID.
-    let uuid = if report.uuid.is_empty() {
-        context.client_uuid.clone().unwrap_or_default()
+    // Agents may only report for themselves; only admins may target another
+    // client explicitly via the body UUID. This prevents any valid agent
+    // token from polluting other nodes' curves or triggering false alerts.
+    let is_admin = context.role == komari_auth::Role::Admin;
+    let uuid = if is_admin {
+        if report.uuid.is_empty() {
+            context.client_uuid.clone().unwrap_or_default()
+        } else {
+            report.uuid.clone()
+        }
     } else {
-        report.uuid.clone()
+        // Non-admin callers (agents) always use their authenticated identity,
+        // ignoring any body-supplied UUID.
+        match context.client_uuid.clone() {
+            Some(id) if !id.is_empty() => id,
+            _ => {
+                return (StatusCode::UNAUTHORIZED, error_json("Invalid token")).into_response();
+            }
+        }
     };
     if uuid.is_empty() {
         return (StatusCode::BAD_REQUEST, error_json("UUID is required")).into_response();

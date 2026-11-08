@@ -17,7 +17,6 @@ use crate::state::ApiState;
 use super::{cookie_value, respond_error, respond_success};
 
 const DEFAULT_THEME: &str = "default";
-const DEFAULT_OAUTH_PROVIDER: &str = "github";
 const DEFAULT_RECORD_PRESERVE_TIME: i64 = 720;
 
 const TEMP_SHARE_TOKEN_KEY: &str = "tempory_share_token";
@@ -59,8 +58,6 @@ fn public_info(state: &ApiState, headers: &HeaderMap) -> Result<Value, String> {
     let description = read_string(keys::DESCRIPTION_KEY, DEFAULT_DESCRIPTION)?;
     let custom_head = read_string(keys::CUSTOM_HEAD_KEY, "")?;
     let custom_body = read_string(keys::CUSTOM_BODY_KEY, "")?;
-    let oauth_enable = read_bool(keys::OAUTH_ENABLED_KEY, false)?;
-    let oauth_provider = read_string(keys::OAUTH_PROVIDER_KEY, DEFAULT_OAUTH_PROVIDER)?;
     let disable_password_login = read_bool(keys::DISABLE_PASSWORD_LOGIN_KEY, false)?;
     let allow_cors = read_bool(keys::ALLOW_CORS_KEY, false)?;
     let record_enabled = read_bool(keys::RECORD_ENABLED_KEY, true)?;
@@ -85,8 +82,6 @@ fn public_info(state: &ApiState, headers: &HeaderMap) -> Result<Value, String> {
         "description": description,
         "custom_head": custom_head,
         "custom_body": custom_body,
-        "oauth_enable": oauth_enable,
-        "oauth_provider": oauth_provider,
         "disable_password_login": disable_password_login,
         "allow_cors": allow_cors,
         "record_enabled": record_enabled,

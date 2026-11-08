@@ -9,7 +9,6 @@ members = [
     "crates/komari-jobs",
     "crates/komari-ddns",
     "crates/komari-geoip",
-    "crates/komari-oauth",
     "crates/komari-web",
 ]
 resolver = "3"
@@ -33,7 +32,6 @@ komari-notify = { path = "crates/komari-notify" }
 komari-jobs = { path = "crates/komari-jobs" }
 komari-ddns = { path = "crates/komari-ddns" }
 komari-geoip = { path = "crates/komari-geoip" }
-komari-oauth = { path = "crates/komari-oauth" }
 komari-web = { path = "crates/komari-web" }
 
 # Async runtime and web stack.

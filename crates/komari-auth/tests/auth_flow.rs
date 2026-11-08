@@ -31,13 +31,8 @@ fn password_changes_are_readable_by_the_go_backend() {
     change_password(&db, "admin", "new-password").unwrap();
 
     let stored = db.accounts().require_by_uuid(&user.uuid).unwrap();
-    // Independent Go algorithm: base64(SHA-256(password + "06Wm4Jv1Hkxx")).
-    assert_eq!(
-        stored.passwd,
-        "yqyhBswdm4vh/vRYv8vY9m3+t+ZQPxLQLv0FlN6FArI="
-    );
-    assert_eq!(stored.passwd, legacy_hash_password("new-password"));
-    assert!(!is_bcrypt_hash(&stored.passwd));
+    // New writes use bcrypt with a random salt; legacy Go SHA-256 rows still verify.
+    assert!(is_bcrypt_hash(&stored.passwd));
     assert!(verify_password("new-password", &stored.passwd));
     assert!(
         authenticate(&db, "admin", "old-password")
@@ -59,30 +54,28 @@ fn password_change_by_uuid_reports_unknown_users() {
 
     change_password_by_uuid(&db, &user.uuid, "another").unwrap();
     let stored = db.accounts().require_by_uuid(&user.uuid).unwrap();
-    assert_eq!(stored.passwd, legacy_hash_password("another"));
+    assert!(is_bcrypt_hash(&stored.passwd));
+    assert!(verify_password("another", &stored.passwd));
 
     assert!(change_password(&db, "nobody", "pw").is_err());
     assert!(change_password_by_uuid(&db, "missing-uuid", "pw").is_err());
-    assert_eq!(
-        hash_password("admin").unwrap(),
-        legacy_hash_password("admin")
-    );
+    assert!(is_bcrypt_hash(&hash_password("admin").unwrap()));
 }
 
 #[test]
-fn bcrypt_rows_are_readable_and_upgraded_to_go_hashes() {
+fn legacy_go_rows_are_readable_and_upgraded_to_bcrypt() {
     let db = Db::open_in_memory().unwrap();
     db.migrate().unwrap();
     let mut user = User::new("legacy", "ignored");
-    // Bcrypt hash for "secret", as written by an earlier Rust build.
-    user.passwd = "$2a$10$C4Gwv0BDoZO0LFJLCMwD/OcQy61qVqTGBbvcnPh0FiTT408C69pv.".to_owned();
+    // Legacy Go row: base64(SHA-256("secret" + static salt)).
+    user.passwd = legacy_hash_password("secret");
     db.accounts().insert(&user).unwrap();
 
     let logged_in = authenticate(&db, "legacy", "secret").unwrap().unwrap();
-    assert_eq!(logged_in.passwd, legacy_hash_password("secret"));
+    assert!(is_bcrypt_hash(&logged_in.passwd));
     let stored = db.accounts().require_by_uuid(&user.uuid).unwrap();
-    assert_eq!(stored.passwd, legacy_hash_password("secret"));
-    assert!(!is_bcrypt_hash(&stored.passwd));
+    assert!(is_bcrypt_hash(&stored.passwd));
+    assert!(verify_password("secret", &stored.passwd));
 }
 
 #[test]

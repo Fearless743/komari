@@ -81,7 +81,7 @@ fn run(args: &[&str], db: &TempDb) -> Output {
 }
 
 #[test]
-fn chpasswd_writes_the_go_sha256_hash_and_revokes_sessions() {
+fn chpasswd_writes_bcrypt_hash_and_revokes_sessions() {
     let temp = TempDb::new("chpasswd");
     let uuid = {
         let db = temp.open();
@@ -104,15 +104,16 @@ fn chpasswd_writes_the_go_sha256_hash_and_revokes_sessions() {
         "{stdout}"
     );
     assert!(
-        stdout.contains("Password changed successfully, new password: new-password"),
+        stdout.contains("Password changed successfully for user: admin"),
         "{stdout}"
     );
+    assert!(!stdout.contains("new-password"), "{stdout}");
     assert!(stdout.contains("Please restart the server"), "{stdout}");
 
     let db = temp.open();
     let user = db.accounts().require_by_uuid(&uuid).unwrap();
-    // Independent Go algorithm: base64(SHA-256(password + "06Wm4Jv1Hkxx")).
-    assert_eq!(user.passwd, "yqyhBswdm4vh/vRYv8vY9m3+t+ZQPxLQLv0FlN6FArI=");
+    assert!(komari_auth::is_bcrypt_hash(&user.passwd));
+    assert!(komari_auth::verify_password("new-password", &user.passwd));
     assert_eq!(db.sessions().count().unwrap(), 0);
 }
 
@@ -139,8 +140,9 @@ fn chpasswd_accepts_an_explicit_username() {
     let db = temp.open();
     let admin = db.accounts().require_by_username("admin").unwrap();
     let bob = db.accounts().require_by_uuid(&bob.uuid).unwrap();
-    assert_eq!(admin.passwd, "l0isLy2rszAhXvhh8d9+ndAgUxCApxhUS7Arq4HRgPU=");
-    assert_eq!(bob.passwd, "qr2DzO238DNJ8XTChn94XrVKnQcoy4x6NYzY2pNE+gQ=");
+    assert!(komari_auth::is_bcrypt_hash(&admin.passwd));
+    assert!(komari_auth::is_bcrypt_hash(&bob.passwd));
+    assert!(komari_auth::verify_password("bob-new", &bob.passwd));
 }
 
 #[test]
@@ -168,11 +170,12 @@ fn chpasswd_defaults_to_the_lowest_uuid_not_insertion_order() {
     let db = temp.open();
     let first = db.accounts().require_by_username("first").unwrap();
     let second = db.accounts().require_by_username("second").unwrap();
-    assert_eq!(
-        first.passwd,
-        komari_auth::legacy_hash_password("first-password")
-    );
-    assert_eq!(second.passwd, komari_auth::legacy_hash_password("changed"));
+    assert!(komari_auth::verify_password(
+        "first-password",
+        &first.passwd
+    ));
+    assert!(komari_auth::verify_password("changed", &second.passwd));
+    assert!(komari_auth::is_bcrypt_hash(&second.passwd));
 }
 
 #[test]
@@ -376,7 +379,8 @@ fn chpasswd_migrates_a_database_missing_the_sessions_table() {
     let db = Db::open(&path).unwrap();
     assert!(db.table_exists("sessions").unwrap());
     let user = db.accounts().require_by_username("admin").unwrap();
-    assert_eq!(user.passwd, "yqyhBswdm4vh/vRYv8vY9m3+t+ZQPxLQLv0FlN6FArI=");
+    assert!(komari_auth::is_bcrypt_hash(&user.passwd));
+    assert!(komari_auth::verify_password("new-password", &user.passwd));
 }
 
 #[test]

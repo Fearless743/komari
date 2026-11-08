@@ -4,7 +4,6 @@ use std::net::SocketAddr;
 use std::sync::Arc;
 use std::time::Duration;
 
-use async_trait::async_trait;
 use axum::Router;
 use axum::body::{Body, to_bytes};
 use axum::extract::ConnectInfo;
@@ -16,10 +15,6 @@ use komari_api::{
 };
 use komari_db::models::{GPURecord, Record};
 use komari_db::{ClientPatch, Db};
-use komari_oauth::{
-    AuthorizationRequest, CallbackRequest, ExchangeRequest, OAuthError, OAuthProvider, OAuthUser,
-    StateStore, TokenSet, UserInfo,
-};
 use serde_json::{Value, json};
 use tower::ServiceExt;
 
@@ -99,18 +94,6 @@ async fn call(app: &Router, request: Request<Body>) -> (StatusCode, HeaderMap, V
     (status, headers, value)
 }
 
-fn cookie_value(headers: &HeaderMap, name: &str) -> Option<String> {
-    headers
-        .get_all(SET_COOKIE)
-        .iter()
-        .filter_map(|value| value.to_str().ok())
-        .find_map(|cookie| {
-            let first = cookie.split(';').next()?;
-            let (key, value) = first.split_once('=')?;
-            (key == name).then(|| value.to_owned())
-        })
-}
-
 fn set_cookie_header(headers: &HeaderMap, name: &str) -> Option<String> {
     headers
         .get_all(SET_COOKIE)
@@ -157,93 +140,6 @@ fn set_config_i64(state: &ApiState, key: &str, value: i64) {
 }
 
 // ---------------------------------------------------------------------------
-// Mock OAuth provider
-// ---------------------------------------------------------------------------
-
-struct MockProvider {
-    states: StateStore,
-    subject: String,
-    fail: bool,
-    skip_state: bool,
-}
-
-impl MockProvider {
-    fn new(subject: &str) -> Self {
-        Self {
-            states: StateStore::default(),
-            subject: subject.to_owned(),
-            fail: false,
-            skip_state: false,
-        }
-    }
-}
-
-#[async_trait]
-impl OAuthProvider for MockProvider {
-    fn name(&self) -> &'static str {
-        "mock"
-    }
-
-    fn configuration(&self) -> Value {
-        json!({})
-    }
-
-    fn state_store(&self) -> &StateStore {
-        &self.states
-    }
-
-    fn skip_query_state_check(&self) -> bool {
-        self.skip_state
-    }
-
-    async fn init(&self) -> komari_oauth::Result<()> {
-        Ok(())
-    }
-
-    async fn authorization_url(
-        &self,
-        redirect_uri: &str,
-    ) -> komari_oauth::Result<AuthorizationRequest> {
-        let state = self.states.issue(redirect_uri, None, None);
-        Ok(AuthorizationRequest {
-            url: format!("https://mock.example/authorize?state={state}"),
-            state,
-            pkce_verifier: None,
-        })
-    }
-
-    async fn exchange_code(&self, _request: ExchangeRequest<'_>) -> komari_oauth::Result<TokenSet> {
-        Ok(TokenSet::default())
-    }
-
-    async fn fetch_user_info(&self, _tokens: &TokenSet) -> komari_oauth::Result<UserInfo> {
-        Ok(UserInfo::default())
-    }
-
-    async fn callback(&self, request: CallbackRequest<'_>) -> komari_oauth::Result<OAuthUser> {
-        if self.fail {
-            return Err(OAuthError::UserInfo("mock failure".to_owned()));
-        }
-        self.states.consume(request.state, request.redirect_uri)?;
-        if !self.skip_query_state_check()
-            && request.query_state.unwrap_or_default() != request.state
-        {
-            return Err(OAuthError::InvalidState);
-        }
-        Ok(OAuthUser {
-            provider: "mock".to_owned(),
-            subject: self.subject.clone(),
-            ..OAuthUser::default()
-        })
-    }
-}
-
-fn install_mock_provider(state: &ApiState, subject: &str) {
-    let provider: Arc<dyn OAuthProvider> = Arc::new(MockProvider::new(subject));
-    state.set_oauth_provider(Some(provider));
-}
-
-// ---------------------------------------------------------------------------
 // Nodes
 // ---------------------------------------------------------------------------
 
@@ -270,6 +166,43 @@ fn create_client(state: &ApiState, name: &str, hidden: bool) -> String {
         )
         .expect("patch client");
     client.uuid
+}
+
+#[tokio::test]
+async fn public_settings_use_go_defaults_when_config_is_empty() {
+    let state = state();
+    let (status, _, body) = call(&app(&state), get("/api/public")).await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(body["status"], "success");
+    let data = &body["data"];
+    assert_eq!(data["sitename"], "Komari");
+    assert_eq!(data["description"], "A simple server monitor tool.");
+    assert_eq!(data["disable_password_login"], false);
+    assert_eq!(data["allow_cors"], false);
+    assert_eq!(data["record_enabled"], true);
+    assert_eq!(data["record_preserve_time"], 720);
+    assert_eq!(data["private_site"], false);
+    assert_eq!(data["theme"], "default");
+    assert_eq!(data["theme_settings"], json!({}));
+
+    // Go `GetManyAs` writes defaults back to `configs` on the first call.
+    for key in [
+        "sitename",
+        "description",
+        "custom_head",
+        "custom_body",
+        "disable_password_login",
+        "allow_cors",
+        "record_enabled",
+        "record_preserve_time",
+        "private_site",
+        "theme",
+    ] {
+        assert!(
+            state.db.config().contains(key).expect("config lookup"),
+            "missing persisted default for {key}"
+        );
+    }
 }
 
 #[tokio::test]
@@ -341,47 +274,6 @@ async fn nodes_prefer_the_session_cookie_over_an_api_key() {
     let nodes = body["data"].as_array().expect("node array");
     assert_eq!(nodes.len(), 1);
     assert_eq!(nodes[0]["uuid"], hidden);
-}
-
-#[tokio::test]
-async fn public_settings_use_go_defaults_when_config_is_empty() {
-    let state = state();
-    let (status, _, body) = call(&app(&state), get("/api/public")).await;
-    assert_eq!(status, StatusCode::OK);
-    assert_eq!(body["status"], "success");
-    let data = &body["data"];
-    assert_eq!(data["sitename"], "Komari");
-    assert_eq!(data["description"], "A simple server monitor tool.");
-    assert_eq!(data["oauth_enable"], false);
-    assert_eq!(data["oauth_provider"], "github");
-    assert_eq!(data["disable_password_login"], false);
-    assert_eq!(data["allow_cors"], false);
-    assert_eq!(data["record_enabled"], true);
-    assert_eq!(data["record_preserve_time"], 720);
-    assert_eq!(data["private_site"], false);
-    assert_eq!(data["theme"], "default");
-    assert_eq!(data["theme_settings"], json!({}));
-
-    // Go `GetManyAs` writes defaults back to `configs` on the first call.
-    for key in [
-        "sitename",
-        "description",
-        "custom_head",
-        "custom_body",
-        "o_auth_enabled",
-        "o_auth_provider",
-        "disable_password_login",
-        "allow_cors",
-        "record_enabled",
-        "record_preserve_time",
-        "private_site",
-        "theme",
-    ] {
-        assert!(
-            state.db.config().contains(key).expect("config lookup"),
-            "missing persisted default for {key}"
-        );
-    }
 }
 
 #[tokio::test]
@@ -888,199 +780,6 @@ async fn records_load_rejects_extreme_hours_and_wraps_connections() {
 
 // ---------------------------------------------------------------------------
 // OAuth
-// ---------------------------------------------------------------------------
-
-#[tokio::test]
-async fn oauth_requires_the_enable_switch_and_a_provider() {
-    let state = state();
-    let (status, _, body) = call(&app(&state), get("/api/oauth")).await;
-    assert_eq!(status, StatusCode::FORBIDDEN);
-    assert_eq!(body["error"], "OAuth is not enabled");
-    assert!(body.get("message").is_none());
-
-    set_config_bool(&state, "o_auth_enabled", true);
-    let (status, _, body) = call(&app(&state), get("/api/oauth")).await;
-    assert_eq!(status, StatusCode::INTERNAL_SERVER_ERROR);
-    assert_eq!(body["error"], "OAuth provider is not initialized");
-}
-
-#[tokio::test]
-async fn oauth_authorize_redirects_and_stores_the_state_cookie() {
-    let state = state();
-    set_config_bool(&state, "o_auth_enabled", true);
-    install_mock_provider(&state, "user-1");
-
-    let (status, headers, _) = call(&app(&state), get("/api/oauth")).await;
-    assert_eq!(status, StatusCode::FOUND);
-    let location = headers.get(LOCATION).expect("location");
-    assert!(
-        location
-            .to_str()
-            .expect("location text")
-            .starts_with("https://mock.example/authorize")
-    );
-    let state_cookie = set_cookie_header(&headers, "oauth_state").expect("state cookie");
-    assert!(state_cookie.contains("Max-Age=3600"));
-    assert!(cookie_value(&headers, "oauth_state").is_some());
-}
-
-#[tokio::test]
-async fn oauth_callback_rejects_an_invalid_state() {
-    let state = state();
-    set_config_bool(&state, "o_auth_enabled", true);
-    install_mock_provider(&state, "user-1");
-
-    let (status, _, body) = call(&app(&state), get("/api/oauth_callback?state=x")).await;
-    assert_eq!(status, StatusCode::BAD_REQUEST);
-    assert_eq!(body["error"], "Invalid state");
-
-    let request = with_cookie(
-        get("/api/oauth_callback?state=different"),
-        "oauth_state=expected",
-    );
-    let (status, _, body) = call(&app(&state), request).await;
-    assert_eq!(status, StatusCode::BAD_REQUEST);
-    assert_eq!(body["error"], "Invalid state");
-}
-
-#[tokio::test]
-async fn oauth_callback_skips_query_state_for_qq_providers() {
-    let state = state();
-    set_config_bool(&state, "o_auth_enabled", true);
-    let provider: Arc<dyn OAuthProvider> = Arc::new(MockProvider {
-        states: StateStore::default(),
-        subject: "qq-user".to_owned(),
-        fail: false,
-        skip_state: true,
-    });
-    state.set_oauth_provider(Some(provider));
-    let user = state
-        .db
-        .accounts()
-        .create("qq-admin", "unused")
-        .expect("user");
-    state
-        .db
-        .accounts()
-        .bind_sso(&user.uuid, "mock_qq-user")
-        .expect("bind sso");
-
-    let (_, headers, _) = call(&app(&state), get("/api/oauth")).await;
-    let oauth_state = cookie_value(&headers, "oauth_state").expect("state cookie");
-    let request = with_cookie(
-        get("/api/oauth_callback?state=different&code=abc"),
-        &format!("oauth_state={oauth_state}"),
-    );
-    let (status, headers, _) = call(&app(&state), request).await;
-    assert_eq!(status, StatusCode::FOUND);
-    assert_eq!(headers.get(LOCATION).expect("location"), "/admin");
-    assert_eq!(state.db.sessions().count().expect("session count"), 1);
-}
-
-#[tokio::test]
-async fn oauth_callback_logs_in_a_bound_account() {
-    let state = state();
-    set_config_bool(&state, "o_auth_enabled", true);
-    install_mock_provider(&state, "user-1");
-    let user = state
-        .db
-        .accounts()
-        .create("oauth-admin", "unused")
-        .expect("user");
-    state
-        .db
-        .accounts()
-        .bind_sso(&user.uuid, "mock_user-1")
-        .expect("bind sso");
-
-    let (_, headers, _) = call(&app(&state), get("/api/oauth")).await;
-    let oauth_state = cookie_value(&headers, "oauth_state").expect("state cookie");
-    let request = with_cookie(
-        get(&format!("/api/oauth_callback?state={oauth_state}&code=abc")),
-        &format!("oauth_state={oauth_state}"),
-    );
-    let (status, headers, _) = call(&app(&state), request).await;
-    assert_eq!(status, StatusCode::FOUND);
-    assert_eq!(headers.get(LOCATION).expect("location"), "/admin");
-    assert!(set_cookie_header(&headers, "session_token").is_some());
-    assert_eq!(state.db.sessions().count().expect("session count"), 1);
-}
-
-#[tokio::test]
-async fn oauth_callback_requires_a_bound_account() {
-    let state = state();
-    set_config_bool(&state, "o_auth_enabled", true);
-    install_mock_provider(&state, "unknown-user");
-
-    let (_, headers, _) = call(&app(&state), get("/api/oauth")).await;
-    let oauth_state = cookie_value(&headers, "oauth_state").expect("state cookie");
-    let request = with_cookie(
-        get(&format!("/api/oauth_callback?state={oauth_state}&code=abc")),
-        &format!("oauth_state={oauth_state}"),
-    );
-    let (status, _, body) = call(&app(&state), request).await;
-    assert_eq!(status, StatusCode::UNAUTHORIZED);
-    assert_eq!(
-        body["message"],
-        "please log in and bind your external account first."
-    );
-}
-
-#[tokio::test]
-async fn oauth_callback_binds_the_external_account() {
-    let state = state();
-    set_config_bool(&state, "o_auth_enabled", true);
-    install_mock_provider(&state, "user-42");
-    let (uuid, session) = create_session(&state, "admin");
-
-    let (_, headers, _) = call(&app(&state), get("/api/oauth")).await;
-    let oauth_state = cookie_value(&headers, "oauth_state").expect("state cookie");
-    let request = with_cookie(
-        get(&format!("/api/oauth_callback?state={oauth_state}&code=abc")),
-        &format!(
-            "oauth_state={oauth_state}; binding_external_account={uuid}; session_token={session}"
-        ),
-    );
-    let (status, headers, _) = call(&app(&state), request).await;
-    assert_eq!(status, StatusCode::FOUND);
-    assert_eq!(headers.get(LOCATION).expect("location"), "/admin");
-    let user = state
-        .db
-        .accounts()
-        .require_by_uuid(&uuid)
-        .expect("user row");
-    assert_eq!(user.sso_id, "mock_user-42");
-}
-
-#[tokio::test]
-async fn oauth_callback_reports_provider_failures_with_the_error_key() {
-    let state = state();
-    set_config_bool(&state, "o_auth_enabled", true);
-    let provider: Arc<dyn OAuthProvider> = Arc::new(MockProvider {
-        states: StateStore::default(),
-        subject: "user-1".to_owned(),
-        fail: true,
-        skip_state: false,
-    });
-    provider
-        .state_store()
-        .issue_with_state("http:///api/oauth_callback", "known-state");
-    state.set_oauth_provider(Some(provider));
-
-    let request = with_cookie(
-        get("/api/oauth_callback?state=known-state&code=abc"),
-        "oauth_state=known-state",
-    );
-    let (status, _, body) = call(&app(&state), request).await;
-    assert_eq!(status, StatusCode::INTERNAL_SERVER_ERROR);
-    let error = body["error"].as_str().expect("error string");
-    assert!(error.starts_with("Failed to get user info: "), "{error}");
-    assert!(error.contains("mock failure"), "{error}");
-    assert!(body.get("message").is_none());
-}
-
-// ---------------------------------------------------------------------------
-// Routing and private-site composition
 // ---------------------------------------------------------------------------
 
 #[tokio::test]

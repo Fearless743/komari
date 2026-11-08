@@ -116,8 +116,6 @@ struct UpdateUserBody {
     username: Option<String>,
     #[serde(default)]
     password: Option<String>,
-    #[serde(default)]
-    sso_type: Option<String>,
 }
 
 /// `POST /api/admin/update/user` — Go `update.UpdateUser`.
@@ -153,11 +151,12 @@ pub(crate) async fn update_user(
         Err(error) => return internal(format!("Failed to update user: {error}")),
     }
 
-    if let Err(error) = state.db.accounts().update_profile(
-        &request.uuid,
-        request.username.as_deref(),
-        request.sso_type.as_deref(),
-    ) {
+    if let Err(error) =
+        state
+            .db
+            .accounts()
+            .update_profile(&request.uuid, request.username.as_deref(), None)
+    {
         return internal(format!("Failed to update user: {error}"));
     }
     if let Some(password) = request.password.as_deref() {

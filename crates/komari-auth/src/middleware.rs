@@ -59,8 +59,6 @@ pub const PUBLIC_PATH_PREFIXES: &[&str] = &[
     "/api/public",
     "/api/login",
     "/api/me",
-    "/api/oauth",
-    "/api/oauth_callback",
     "/api/version",
     "/api/recent",
     "/api/admin",

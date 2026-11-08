@@ -168,28 +168,6 @@ async fn apply_side_effects(state: &ApiState, values: &HashMap<String, Value>) {
         }
     }
 
-    if let Some(provider) = values.get(keys::OAUTH_PROVIDER_KEY).and_then(Value::as_str) {
-        let name = if provider.is_empty() || provider == "none" {
-            "github"
-        } else {
-            provider
-        };
-        match state.db.oauth().get(name) {
-            Ok(Some(row)) => match komari_oauth::load_provider_global(name, &row.addition).await {
-                Ok(provider) => state.set_oauth_provider(Some(provider)),
-                Err(error) => {
-                    tracing::warn!(%error, "failed to reload OAuth provider after settings update");
-                }
-            },
-            Ok(None) => {
-                tracing::warn!(provider = name, "OAuth provider row not found");
-            }
-            Err(error) => {
-                tracing::warn!(%error, "failed to read OAuth provider after settings update");
-            }
-        }
-    }
-
     if values.contains_key(keys::GEO_IP_PROVIDER_KEY) {
         if let Some(service) = state.geoip.as_ref() {
             if let Err(error) = service.initialize().await {

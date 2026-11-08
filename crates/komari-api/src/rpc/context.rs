@@ -150,8 +150,9 @@ pub async fn detect(
 
 fn configured_api_key(db: &Db) -> Option<String> {
     let key = db.config().get_as::<String>("api_key").ok().flatten()?;
-    // Go only treats keys longer than eight characters as configured.
-    (key.len() > 8).then_some(key)
+    // Must match the main middleware (`MIN_API_KEY_LENGTH = 12`): short keys
+    // are treated as unconfigured everywhere, including `/api/rpc2`.
+    (key.len() >= 12).then_some(key)
 }
 
 pub(crate) fn cookie(headers: &HeaderMap, name: &str) -> Option<String> {

@@ -2,7 +2,7 @@
 //!
 //! This module ports the wiring in `cmd/server.go`: it opens and migrates the
 //! database, restores a pending `data/backup.zip`, initializes GeoIP, DDNS,
-//! notifications and OAuth, mounts the agent/browser routes, the OAuth routes
+//! notifications, mounts the agent/browser routes
 //! and the static web assets, then starts the background loops.
 //!
 //! # B04/B06 integration
@@ -28,7 +28,6 @@
 mod assets;
 mod background;
 pub mod cloudflared;
-pub mod oauth;
 
 pub use assets::{
     TEMP_SHARE_EXPIRE_KEY, TEMP_SHARE_TOKEN_KEY, build_web_assets, data_dir_for_database,
@@ -39,7 +38,6 @@ pub use cloudflared::{
     ArchiveFormat, Cloudflared, CloudflaredConfig, CloudflaredError, CloudflaredExit,
     CloudflaredTarget, Downloader, HttpDownloader, current_target, install_binary, target_for,
 };
-pub use oauth::{BINDING_COOKIE, OAUTH_STATE_COOKIE, OAuthRuntime, SESSION_COOKIE};
 
 use std::future::{Future, IntoFuture};
 use std::net::SocketAddr;
@@ -184,7 +182,6 @@ pub struct ServerBuilder {
     db: Option<Db>,
     state: Option<ApiState>,
     assets: Option<Arc<WebAssets>>,
-    oauth: Option<OAuthRuntime>,
     cloudflared: Option<CloudflaredConfig>,
     public_router: Option<Router>,
     admin_router: Option<Router>,
@@ -201,7 +198,6 @@ impl ServerBuilder {
             db: None,
             state: None,
             assets: None,
-            oauth: None,
             cloudflared: None,
             public_router: None,
             admin_router: None,
@@ -229,11 +225,6 @@ impl ServerBuilder {
         self
     }
 
-    pub fn with_oauth(mut self, oauth: OAuthRuntime) -> Self {
-        self.oauth = Some(oauth);
-        self
-    }
-
     /// Start an explicit cloudflared tunnel. Takes precedence over
     /// [`ServerConfig::cloudflared_token`] and allows tests to inject a target
     /// and downloader.
@@ -242,7 +233,7 @@ impl ServerBuilder {
         self
     }
 
-    /// Skip GeoIP/DDNS/notification/OAuth initialization. Tests and custom
+    /// Skip GeoIP/DDNS/notification initialization. Tests and custom
     /// assemblies use this when those services are not needed.
     pub fn skip_services(mut self) -> Self {
         self.initialize_services = false;
@@ -252,8 +243,7 @@ impl ServerBuilder {
     /// Attach the B04 public API router.
     ///
     /// Use [`crate::public_router_with_state`] (or any router with its state
-    /// already applied). The public router owns `/ping`, `/api/oauth` and
-    /// `/api/oauth_callback`; B09's built-in copies are not mounted.
+    /// already applied). The public router owns `/ping`.
     pub fn merge_public(mut self, router: Router) -> Self {
         self.public_router = Some(router);
         self
@@ -281,8 +271,8 @@ impl ServerBuilder {
         self
     }
 
-    /// Customize the shared state after the server services (web assets, DDNS,
-    /// OAuth provider) have been attached and before the router is built.
+    /// Customize the shared state after the server services (web assets, DDNS)
+    /// have been attached and before the router is built.
     ///
     /// B04/B06 can use this to install their own service handles or middleware
     /// state without changing the assembly.
@@ -318,18 +308,10 @@ impl ServerBuilder {
         state = state.with_geoip_service(geoip);
 
         let db = state.db.clone();
-        let oauth = self.oauth.unwrap_or_default();
         if self.initialize_services {
-            if oauth.has_override() {
-                state.set_oauth_provider(oauth.current());
-            } else if let Err(error) = crate::initialize_oauth(&state).await {
-                warn!(%error, "failed to initialize the OAuth provider");
-            }
             if let Err(error) = komari_notify::initialize_defaults(&db) {
                 warn!(%error, "failed to initialize notification providers");
             }
-        } else {
-            state.set_oauth_provider(oauth.current());
         }
 
         let ddns = Arc::new(DdnsService::new(db.clone()));
@@ -454,7 +436,6 @@ impl ServerBuilder {
             config,
             state,
             assets,
-            oauth,
             ddns,
             cloudflared,
             background,
@@ -469,7 +450,6 @@ pub struct Server {
     config: ServerConfig,
     state: ApiState,
     assets: Arc<WebAssets>,
-    oauth: OAuthRuntime,
     ddns: Arc<DdnsService>,
     cloudflared: Option<Cloudflared>,
     background: BackgroundTasks,
@@ -493,10 +473,6 @@ impl Server {
 
     pub fn assets(&self) -> &Arc<WebAssets> {
         &self.assets
-    }
-
-    pub fn oauth(&self) -> &OAuthRuntime {
-        &self.oauth
     }
 
     /// Shared DDNS service for B06's admin "sync now" endpoint.
@@ -534,7 +510,7 @@ impl Server {
         refresh_web_assets(&self.assets, &self.state.db)
     }
 
-    /// Reload GeoIP, notification, DDNS, OAuth and web-asset configuration.
+    /// Reload GeoIP, notification, DDNS and web-asset configuration.
     ///
     /// Go subscribes to `config` changes and reloads these services. B06 can
     /// call this after a settings update; failures are logged and do not abort
@@ -550,11 +526,6 @@ impl Server {
         }
         if let Err(error) = self.ddns.initialize().await {
             warn!(%error, "failed to reload DDNS");
-        }
-        if self.oauth.has_override() {
-            self.state.set_oauth_provider(self.oauth.current());
-        } else if let Err(error) = crate::initialize_oauth(&self.state).await {
-            warn!(%error, "failed to reload the OAuth provider");
         }
         if let Err(error) = self.refresh_assets() {
             warn!(%error, "failed to reload web assets");
@@ -780,7 +751,20 @@ pub fn prepare_database(config: &ServerConfig) -> Result<Db> {
             .accounts()
             .create_default_admin()
             .context("failed to create the default administrator")?;
-        info!(username = %username, password = %password, "default admin account created");
+        // Do not log the generated password: logs are often collected
+        // centrally. Print it once to stdout so the operator can capture it
+        // from the console on first boot.
+        println!("Default admin account created. Username: {username}");
+        let from_env = std::env::var("ADMIN_PASSWORD")
+            .map(|v| !v.is_empty())
+            .unwrap_or(false);
+        if from_env {
+            println!("Using ADMIN_PASSWORD from environment; change it after first login.");
+        } else {
+            println!("Generated random password: {password}");
+            println!("Save it now and change it after first login; it will not be shown again.");
+        }
+        tracing::warn!(username = %username, "default admin account created; password printed to stdout once");
     }
 
     Ok(db)
@@ -985,16 +969,24 @@ impl<B> MakeSpan<B> for RequestSpan {
 async fn cors_and_cache(State(state): State<ApiState>, request: Request, next: Next) -> Response {
     let path = request.uri().path().to_owned();
     let cors = state.allow_cors();
+    // Echo the request Origin instead of `*`: `*` combined with
+    // `Allow-Credentials: true` is rejected by browsers and over-exposes
+    // `Set-Cookie`/`Authorization`.
+    let origin = request
+        .headers()
+        .get(header::ORIGIN)
+        .and_then(|v| v.to_str().ok())
+        .map(str::to_owned);
 
     if cors && request.method() == Method::OPTIONS {
         let mut response = StatusCode::NO_CONTENT.into_response();
-        apply_cors_headers(response.headers_mut());
+        apply_cors_headers(response.headers_mut(), origin.as_deref());
         return response;
     }
 
     let mut response = next.run(request).await;
     if cors {
-        apply_cors_headers(response.headers_mut());
+        apply_cors_headers(response.headers_mut(), origin.as_deref());
     }
     // Gin's RedirectTrailingSlash runs before the global middleware stack, so
     // its 301/307 responses do not get `Cache-Control: no-store`. Keep the
@@ -1019,22 +1011,33 @@ async fn cors_and_cache(State(state): State<ApiState>, request: Request, next: N
     response
 }
 
-fn apply_cors_headers(headers: &mut axum::http::HeaderMap) {
+fn apply_cors_headers(headers: &mut axum::http::HeaderMap, origin: Option<&str>) {
+    // Reflect a validated Origin; fall back to no CORS headers when absent.
+    if let Some(origin) = origin.filter(|o| {
+        o.starts_with("http://") || o.starts_with("https://") || o.starts_with("tauri://")
+    }) {
+        if let Ok(value) = HeaderValue::from_str(origin) {
+            headers.insert(header::ACCESS_CONTROL_ALLOW_ORIGIN, value);
+        }
+        headers.insert(
+            header::ACCESS_CONTROL_ALLOW_CREDENTIALS,
+            HeaderValue::from_static("true"),
+        );
+        headers.insert(header::VARY, HeaderValue::from_static("Origin"));
+    }
     for (name, value) in [
-        (header::ACCESS_CONTROL_ALLOW_ORIGIN, "*"),
         (
             header::ACCESS_CONTROL_ALLOW_METHODS,
             "GET, POST, PUT, PATCH, DELETE, HEAD, OPTIONS",
         ),
         (
             header::ACCESS_CONTROL_ALLOW_HEADERS,
-            "Origin, Content-Length, Content-Type, Authorization, Accept, X-CSRF-Token, X-Requested-With, Set-Cookie",
+            "Origin, Content-Length, Content-Type, Authorization, Accept, X-CSRF-Token, X-Requested-With",
         ),
         (
             header::ACCESS_CONTROL_EXPOSE_HEADERS,
-            "Content-Length, Authorization, Set-Cookie",
+            "Content-Length, Authorization",
         ),
-        (header::ACCESS_CONTROL_ALLOW_CREDENTIALS, "true"),
         (header::ACCESS_CONTROL_MAX_AGE, "43200"),
     ] {
         if let Ok(value) = HeaderValue::from_str(value) {

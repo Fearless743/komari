@@ -1,7 +1,7 @@
 //! Shared application state for the API routers.
 
 use std::path::PathBuf;
-use std::sync::{Arc, RwLock};
+use std::sync::Arc;
 use std::time::Duration;
 
 use axum::extract::FromRef;
@@ -11,7 +11,6 @@ use komari_db::Db;
 use komari_ddns::DdnsService;
 use komari_geoip::GeoIpService;
 use komari_jobs::CancelToken;
-use komari_oauth::OAuthProvider;
 use komari_web::{WebAssets, WebConfig};
 
 use crate::cache::ReportCache;
@@ -95,9 +94,6 @@ pub struct ApiState {
     /// HTTP client used by the admin theme import/update endpoints. Tests
     /// replace it with [`ApiState::with_theme_fetcher`].
     pub theme_fetcher: Arc<dyn ThemeFetcher>,
-    /// Active OAuth provider. It is `None` until the server assembly loads the
-    /// configured provider (see `komari_api::public::initialize_oauth`).
-    oauth_provider: Arc<RwLock<Option<Arc<dyn OAuthProvider>>>>,
     config: Arc<ApiConfig>,
     /// Cancels the presence sweeper and report flusher started by
     /// [`ApiState::with_clock`].
@@ -150,7 +146,6 @@ impl ApiState {
             web,
             ddns,
             theme_fetcher: Arc::new(HttpThemeFetcher::new()),
-            oauth_provider: Arc::new(RwLock::new(None)),
             config: Arc::new(config),
             background_cancel: CancelToken::new(),
         };
@@ -206,27 +201,6 @@ impl ApiState {
         self.web.config().data_dir.clone()
     }
 
-    /// The active OAuth provider, if the server assembly installed one.
-    pub fn oauth_provider(&self) -> Option<Arc<dyn OAuthProvider>> {
-        self.oauth_provider
-            .read()
-            .unwrap_or_else(|poisoned| poisoned.into_inner())
-            .clone()
-    }
-
-    /// Install or replace the active OAuth provider.
-    pub fn set_oauth_provider(&self, provider: Option<Arc<dyn OAuthProvider>>) {
-        *self
-            .oauth_provider
-            .write()
-            .unwrap_or_else(|poisoned| poisoned.into_inner()) = provider;
-    }
-
-    /// Builder variant of [`ApiState::set_oauth_provider`].
-    pub fn with_oauth_provider(self, provider: Arc<dyn OAuthProvider>) -> Self {
-        self.set_oauth_provider(Some(provider));
-        self
-    }
     fn spawn_presence_sweeper(&self) {
         let interval = self.config.presence_sweep_interval;
         if interval.is_zero() {

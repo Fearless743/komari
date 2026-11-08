@@ -1,7 +1,7 @@
-//! Provider configuration: DDNS, notification senders and OAuth/OIDC.
+//! Provider configuration: DDNS and notification senders.
 //!
 //! GET responses never echo secrets: DDNS and notification additions go
-//! through the crates' `redact_addition`, OAuth uses [`redact_oauth_addition`].
+//! through the crates' `redact_addition`.
 //! The database keeps the complete configuration.
 
 use std::time::Duration;
@@ -9,8 +9,6 @@ use std::time::Duration;
 use axum::Router;
 use axum::body::Bytes;
 use axum::extract::{Query, State};
-use axum::http::StatusCode;
-use axum::http::header::{HeaderValue, LOCATION, SET_COOKIE};
 use axum::response::{IntoResponse, Response};
 use axum::routing::{get, post};
 use komari_auth::RequireAdmin;
@@ -20,9 +18,9 @@ use komari_ddns::factory as ddns_factory;
 use komari_ddns::redact_addition as redact_ddns;
 use komari_notify::redact_addition as redact_notify;
 use komari_notify::registry as notify_registry;
-use serde_json::{Map, Value, json};
+use serde_json::{Value, json};
 
-use super::{audit, bad_request, internal, not_found, ok, parse_json, set_cookie};
+use super::{audit, bad_request, internal, not_found, parse_json};
 use crate::response;
 use crate::state::ApiState;
 
@@ -33,7 +31,6 @@ pub(crate) fn routes() -> Router<ApiState> {
             "/api/admin/settings/message-sender",
             get(get_message_sender).post(set_message_sender),
         )
-        .route("/api/admin/settings/oidc", get(get_oidc).post(set_oidc))
         .route(
             "/api/admin/settings/ddns/cloudflare/zones",
             post(cloudflare_zones),
@@ -43,34 +40,6 @@ pub(crate) fn routes() -> Router<ApiState> {
             get(get_ddns_history).delete(delete_ddns_history),
         )
         .route("/api/admin/update/ddns", post(sync_ddns))
-        .route("/api/admin/oauth2/bind", get(bind_oauth))
-        .route("/api/admin/oauth2/unbind", post(unbind_oauth))
-}
-
-/// `GET /api/admin/oauth2/bind` — set the binding cookie and redirect.
-pub(crate) async fn bind_oauth(admin: RequireAdmin) -> Response {
-    let Some(uuid) = admin.0.user_uuid.as_deref() else {
-        return bad_request("No user found");
-    };
-    let mut response = (StatusCode::FOUND, [(LOCATION, "/api/oauth")]).into_response();
-    if let Ok(value) = HeaderValue::from_str(&set_cookie("binding_external_account", uuid, 3600)) {
-        response.headers_mut().insert(SET_COOKIE, value);
-    }
-    response
-}
-
-/// `POST /api/admin/oauth2/unbind`.
-pub(crate) async fn unbind_oauth(State(state): State<ApiState>, admin: RequireAdmin) -> Response {
-    let Some(uuid) = admin.0.user_uuid.as_deref() else {
-        return bad_request("No user found");
-    };
-    match state.db.accounts().unbind_sso(uuid) {
-        Ok(_) => {
-            audit(&state, &admin, "unbind external account", "info");
-            ok()
-        }
-        Err(error) => internal(format!("Failed to unbind external account: {error}")),
-    }
 }
 
 #[derive(Default, serde::Deserialize)]
@@ -295,120 +264,6 @@ pub(crate) async fn set_message_sender(
     );
     response::success(json!({"message": "Message sender provider set successfully"}))
         .into_response()
-}
-
-// ---------------------------------------------------------------------------
-// OAuth / OIDC
-// ---------------------------------------------------------------------------
-
-/// `GET /api/admin/settings/oidc` — redacted config or field templates.
-pub(crate) async fn get_oidc(
-    State(state): State<ApiState>,
-    _admin: RequireAdmin,
-    Query(query): Query<ProviderQuery>,
-) -> Response {
-    if !query.provider.is_empty() {
-        let provider = match state.db.oauth().get(&query.provider) {
-            Ok(Some(provider)) => provider,
-            Ok(None) => {
-                return not_found(format!("Provider not found: {}", query.provider));
-            }
-            Err(error) => return internal(error.to_string()),
-        };
-        let safe = redact_oauth_addition(&provider.addition);
-        return response::success(json!({
-            "name": provider.name,
-            "addition": safe.to_string(),
-        }))
-        .into_response();
-    }
-
-    let mut providers = Map::new();
-    for meta in komari_oauth::BUILTIN_METADATA {
-        let fields = meta
-            .fields
-            .iter()
-            .map(|field| {
-                json!({
-                    "name": field.name,
-                    "required": field.required,
-                    "type": "string",
-                    "options": "",
-                    "default": field.default.unwrap_or(""),
-                    "help": field.description,
-                })
-            })
-            .collect::<Vec<_>>();
-        providers.insert(meta.name.to_owned(), Value::Array(fields));
-    }
-    if providers.is_empty() {
-        return not_found("No OIDC providers found");
-    }
-    response::success(Value::Object(providers)).into_response()
-}
-
-/// `POST /api/admin/settings/oidc`.
-pub(crate) async fn set_oidc(
-    State(state): State<ApiState>,
-    admin: RequireAdmin,
-    body: Bytes,
-) -> Response {
-    let config: ProviderBody = match parse_json(&body, "Invalid configuration: ") {
-        Ok(config) => config,
-        Err(response) => return response,
-    };
-    if config.name.is_empty() {
-        return bad_request("Provider name is required");
-    }
-    if komari_oauth::builtin_registry()
-        .constructor(&config.name)
-        .is_none()
-    {
-        return not_found(format!("Provider not found: {}", config.name));
-    }
-
-    let row = Provider::new(config.name.clone(), config.addition.clone());
-    if let Err(error) = state.db.oauth().save(&row) {
-        return internal(format!(
-            "Failed to save OIDC provider configuration: {error}"
-        ));
-    }
-
-    let current = state
-        .db
-        .config()
-        .get_as::<String>(komari_config::keys::OAUTH_PROVIDER_KEY)
-        .ok()
-        .flatten()
-        .unwrap_or_else(|| "github".to_owned());
-    if current == config.name {
-        match komari_oauth::load_provider_global(&config.name, &config.addition).await {
-            Ok(provider) => state.set_oauth_provider(Some(provider)),
-            Err(error) => {
-                return internal(format!("Failed to load OIDC provider: {error}"));
-            }
-        }
-    }
-
-    audit(
-        &state,
-        &admin,
-        &format!("set oidc provider:{}", config.name),
-        "info",
-    );
-    response::success(json!({"message": "OIDC provider set successfully"})).into_response()
-}
-
-/// Remove secret fields from an OAuth `addition` JSON blob.
-///
-/// Keys are compared ignoring case, underscores and dashes, so `client_secret`,
-/// `clientSecret` and `client-secret` are all removed.
-pub(crate) fn redact_oauth_addition(addition: &str) -> Value {
-    let Ok(Value::Object(mut object)) = serde_json::from_str::<Value>(addition) else {
-        return Value::Object(Map::new());
-    };
-    object.retain(|key, _| !komari_oauth::is_sensitive_key(key));
-    Value::Object(object)
 }
 
 // ---------------------------------------------------------------------------

@@ -210,8 +210,6 @@ pub(crate) fn get_me(context: &RpcContext, _request: &RpcRequest) -> Result<Valu
             Ok(json!({
                 "2fa_enabled": user.is_some_and(|user| !user.two_factor.is_empty()),
                 "logged_in": true,
-                "sso_id": user.map(|user| user.sso_id.as_str()).unwrap_or(""),
-                "sso_type": user.map(|user| user.sso_type.as_str()).unwrap_or(""),
                 "username": user.map(|user| user.username.as_str()).unwrap_or(""),
                 "uuid": user
                     .map(|user| user.uuid.as_str())
@@ -221,8 +219,6 @@ pub(crate) fn get_me(context: &RpcContext, _request: &RpcRequest) -> Result<Valu
         Permission::Client => Ok(json!({
             "2fa_enabled": false,
             "logged_in": true,
-            "sso_id": "client",
-            "sso_type": "client",
             "username": "client",
             // Go assigns `meta.ClientToken` and only overwrites it on a lookup
             // error, so the observable value is the token.
@@ -231,8 +227,6 @@ pub(crate) fn get_me(context: &RpcContext, _request: &RpcRequest) -> Result<Valu
         Permission::Guest => Ok(json!({
             "2fa_enabled": false,
             "logged_in": false,
-            "sso_id": "",
-            "sso_type": "",
             "username": "",
             "uuid": "",
         })),
@@ -263,12 +257,6 @@ pub(crate) fn get_public_info(
         ),
         "custom_head": config_string(db, komari_config::keys::CUSTOM_HEAD_KEY, ""),
         "custom_body": config_string(db, komari_config::keys::CUSTOM_BODY_KEY, ""),
-        "oauth_enable": config_bool(db, komari_config::keys::OAUTH_ENABLED_KEY, false),
-        "oauth_provider": config_string(
-            db,
-            komari_config::keys::OAUTH_PROVIDER_KEY,
-            "github",
-        ),
         "disable_password_login": config_bool(
             db,
             komari_config::keys::DISABLE_PASSWORD_LOGIN_KEY,

@@ -5,20 +5,15 @@ use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::Duration;
 
-use async_trait::async_trait;
 use axum::Router;
 use axum::routing::get;
 use futures_util::{SinkExt, StreamExt};
 use komari_api::Report;
 use komari_api::server::{
-    BackgroundConfig, OAuthRuntime, Server, ServerBuilder, ServerConfig, TEMP_SHARE_EXPIRE_KEY,
+    BackgroundConfig, Server, ServerBuilder, ServerConfig, TEMP_SHARE_EXPIRE_KEY,
     TEMP_SHARE_TOKEN_KEY, refresh_web_assets,
 };
 use komari_db::{BackupOptions, ClientPatch, Db};
-use komari_oauth::{
-    AuthorizationRequest, CallbackRequest, ExchangeRequest, OAuthError, OAuthProvider, OAuthUser,
-    StateStore, TokenSet, UserInfo,
-};
 use komari_web::WebAssets;
 use serde_json::Value;
 use tempfile::TempDir;
@@ -637,6 +632,7 @@ async fn request_body_limit_is_enforced_before_auth() {
 
     let response = client
         .post(format!("{}/api/clients/register", running.base))
+        .header("Origin", "https://dashboard.example")
         .body("x".repeat(1024))
         .send()
         .await
@@ -647,7 +643,7 @@ async fn request_body_limit_is_enforced_before_auth() {
             .headers()
             .get("access-control-allow-origin")
             .and_then(|value| value.to_str().ok()),
-        Some("*")
+        Some("https://dashboard.example")
     );
 
     running.stop().await;
@@ -691,7 +687,7 @@ async fn chunked_oversized_body_returns_413_with_cors() {
     assert!(
         response
             .to_ascii_lowercase()
-            .contains("access-control-allow-origin: *"),
+            .contains("access-control-allow-origin: https://dashboard.example"),
         "{response}"
     );
 
@@ -864,11 +860,12 @@ async fn cors_headers_and_options_are_dynamic() {
             .headers()
             .get("access-control-allow-origin")
             .and_then(|value| value.to_str().ok()),
-        Some("*")
+        Some("https://dashboard.example")
     );
 
     let response = client
         .request(reqwest::Method::OPTIONS, format!("{}/ping", running.base))
+        .header("Origin", "https://dashboard.example")
         .send()
         .await
         .expect("preflight");
@@ -921,74 +918,6 @@ async fn b04_b06_routers_can_be_merged() {
     }
 
     running.stop().await;
-}
-
-#[tokio::test]
-async fn public_router_can_own_ping_and_oauth_without_duplicate_routes() {
-    let dir = TempDir::new().expect("temp dir");
-    let public = Router::new()
-        .route("/ping", get(|| async { "public-ping" }))
-        .route("/api/oauth", get(|| async { "public-oauth" }))
-        .route("/api/oauth_callback", get(|| async { "public-callback" }));
-    let oauth = OAuthRuntime::with_provider(Arc::new(FakeProvider::new("public")));
-    let server = ServerBuilder::new(server_config(&dir))
-        .with_db(memory_db())
-        .skip_services()
-        .with_oauth(oauth)
-        .merge_public(public)
-        .build()
-        .await
-        .expect("build");
-    assert_eq!(
-        server
-            .state()
-            .oauth_provider()
-            .expect("oauth provider")
-            .name(),
-        "fake"
-    );
-    let running = start(server).await;
-    let client = http_client();
-
-    for (path, expected) in [
-        ("/ping", "public-ping"),
-        ("/api/oauth", "public-oauth"),
-        ("/api/oauth_callback", "public-callback"),
-    ] {
-        let response = client
-            .get(format!("{}{path}", running.base))
-            .send()
-            .await
-            .expect("public route");
-        assert_eq!(response.status(), reqwest::StatusCode::OK, "{path}");
-        assert_eq!(response.text().await.expect("body"), expected, "{path}");
-    }
-
-    running.stop().await;
-}
-
-#[tokio::test]
-async fn reload_services_refreshes_the_oauth_provider_snapshot() {
-    let dir = TempDir::new().expect("temp dir");
-    let oauth = OAuthRuntime::with_provider(Arc::new(FakeProvider::named("fake-a", "a")));
-    let server = ServerBuilder::new(server_config(&dir))
-        .with_db(memory_db())
-        .skip_services()
-        .with_oauth(oauth.clone())
-        .build()
-        .await
-        .expect("build");
-    assert_eq!(
-        server.state().oauth_provider().expect("provider").name(),
-        "fake-a"
-    );
-
-    oauth.set_provider(Some(Arc::new(FakeProvider::named("fake-b", "b"))));
-    server.reload_services().await;
-    assert_eq!(
-        server.state().oauth_provider().expect("provider").name(),
-        "fake-b"
-    );
 }
 
 #[tokio::test]
@@ -1291,463 +1220,4 @@ async fn graceful_shutdown_times_out_half_open_connections() {
         .expect("shutdown timeout")
         .expect("server task");
     assert!(result.is_ok(), "{result:?}");
-}
-
-#[tokio::test]
-async fn setting_oidc_updates_the_public_oauth_provider() {
-    let dir = TempDir::new().expect("temp dir");
-    let db = memory_db();
-    db.config()
-        .set("o_auth_enabled", &true)
-        .expect("enable oauth");
-    db.config()
-        .set("o_auth_provider", &"generic")
-        .expect("select generic");
-    let server = build(server_config(&dir), db).await;
-    let state = server.state().clone();
-    let session = create_admin_session(&state.db);
-    let running = start(server).await;
-    let client = http_client();
-
-    let addition = serde_json::json!({
-        "client_id": "client-id",
-        "client_secret": "client-secret",
-        "auth_url": "https://idp.example/authorize",
-        "token_url": "https://idp.example/token",
-        "user_info_url": "https://idp.example/userinfo",
-        "scope": "openid",
-        "user_id_field": "sub",
-    })
-    .to_string();
-    let response = client
-        .post(format!("{}/api/admin/settings/oidc", running.base))
-        .header(COOKIE, format!("session_token={session}"))
-        .json(&serde_json::json!({"name": "generic", "addition": addition}))
-        .send()
-        .await
-        .expect("set oidc");
-    assert_eq!(response.status(), reqwest::StatusCode::OK);
-
-    let response = client
-        .get(format!("{}/api/oauth", running.base))
-        .send()
-        .await
-        .expect("oauth start");
-    assert_eq!(response.status(), reqwest::StatusCode::FOUND);
-    let location = response
-        .headers()
-        .get("location")
-        .and_then(|value| value.to_str().ok())
-        .unwrap_or_default();
-    assert!(
-        location.starts_with("https://idp.example/authorize?"),
-        "{location}"
-    );
-
-    running.stop().await;
-}
-
-#[tokio::test]
-async fn oauth_is_disabled_by_default() {
-    let dir = TempDir::new().expect("temp dir");
-    let server = build(server_config(&dir), memory_db()).await;
-    let running = start(server).await;
-    let client = http_client();
-
-    let (status, body) = get_json(&client, &format!("{}/api/oauth", running.base)).await;
-    assert_eq!(status, reqwest::StatusCode::FORBIDDEN);
-    assert_eq!(body["error"], "OAuth is not enabled");
-
-    running.stop().await;
-}
-
-struct FakeProvider {
-    states: StateStore,
-    subject: String,
-    provider_name: &'static str,
-    skip_query_state: bool,
-}
-
-impl FakeProvider {
-    fn new(subject: &str) -> Self {
-        Self::named("fake", subject)
-    }
-
-    fn named(name: &'static str, subject: &str) -> Self {
-        Self {
-            states: StateStore::default(),
-            subject: subject.to_owned(),
-            provider_name: name,
-            skip_query_state: false,
-        }
-    }
-
-    fn skip_query_state(mut self) -> Self {
-        self.skip_query_state = true;
-        self
-    }
-}
-
-#[async_trait]
-impl OAuthProvider for FakeProvider {
-    fn name(&self) -> &'static str {
-        self.provider_name
-    }
-
-    fn configuration(&self) -> Value {
-        serde_json::json!({})
-    }
-
-    fn state_store(&self) -> &StateStore {
-        &self.states
-    }
-
-    fn skip_query_state_check(&self) -> bool {
-        self.skip_query_state
-    }
-
-    async fn init(&self) -> komari_oauth::Result<()> {
-        Ok(())
-    }
-
-    async fn authorization_url(
-        &self,
-        redirect_uri: &str,
-    ) -> komari_oauth::Result<AuthorizationRequest> {
-        let state = self.states.issue(redirect_uri, None, None);
-        Ok(AuthorizationRequest {
-            url: format!("https://idp.example/authorize?state={state}"),
-            state,
-            pkce_verifier: None,
-        })
-    }
-
-    async fn exchange_code(&self, _request: ExchangeRequest<'_>) -> komari_oauth::Result<TokenSet> {
-        Err(OAuthError::Unsupported("fake provider".to_owned()))
-    }
-
-    async fn fetch_user_info(&self, _tokens: &TokenSet) -> komari_oauth::Result<UserInfo> {
-        Err(OAuthError::Unsupported("fake provider".to_owned()))
-    }
-
-    async fn callback(&self, request: CallbackRequest<'_>) -> komari_oauth::Result<OAuthUser> {
-        self.states.consume(request.state, request.redirect_uri)?;
-        if !self.skip_query_state && request.query_state != Some(request.state) {
-            return Err(OAuthError::InvalidState);
-        }
-        Ok(OAuthUser {
-            provider: self.provider_name.to_owned(),
-            subject: self.subject.clone(),
-            username: Some("fake-user".to_owned()),
-            ..OAuthUser::default()
-        })
-    }
-}
-
-async fn oauth_server(dir: &TempDir, db: Db, subject: &str) -> Running {
-    db.config()
-        .set("o_auth_enabled", &true)
-        .expect("enable oauth");
-    let oauth = OAuthRuntime::with_provider(Arc::new(FakeProvider::new(subject)));
-    let server = ServerBuilder::new(server_config(dir))
-        .with_db(db)
-        .skip_services()
-        .with_oauth(oauth)
-        .build()
-        .await
-        .expect("build oauth server");
-    start(server).await
-}
-
-fn oauth_state(location: &str, cookie: &str) -> String {
-    let from_location = location
-        .split("state=")
-        .nth(1)
-        .and_then(|value| value.split('&').next());
-    from_location
-        .map(str::to_owned)
-        .or_else(|| {
-            cookie
-                .split(';')
-                .find_map(|part| part.trim().strip_prefix("oauth_state="))
-                .map(str::to_owned)
-        })
-        .expect("oauth state")
-}
-
-async fn oauth_start(running: &Running, client: &reqwest::Client) -> (String, String) {
-    let response = client
-        .get(format!("{}/api/oauth", running.base))
-        .send()
-        .await
-        .expect("oauth start");
-    assert_eq!(response.status(), reqwest::StatusCode::FOUND);
-    let location = response
-        .headers()
-        .get("location")
-        .and_then(|value| value.to_str().ok())
-        .expect("location")
-        .to_owned();
-    let cookie = response
-        .headers()
-        .get("set-cookie")
-        .and_then(|value| value.to_str().ok())
-        .expect("state cookie")
-        .to_owned();
-    (location, cookie)
-}
-
-#[tokio::test]
-async fn oauth_start_redirects_and_sets_the_state_cookie() {
-    let dir = TempDir::new().expect("temp dir");
-    let running = oauth_server(&dir, memory_db(), "subject-1").await;
-    let client = http_client();
-
-    let (location, cookie) = oauth_start(&running, &client).await;
-    assert!(location.starts_with("https://idp.example/authorize?state="));
-    assert!(cookie.contains("oauth_state="), "{cookie}");
-    assert!(cookie.contains("HttpOnly"), "{cookie}");
-    assert!(cookie.contains("Max-Age=3600"), "{cookie}");
-
-    running.stop().await;
-}
-
-#[tokio::test]
-async fn oauth_callback_returns_401_for_an_unbound_identity() {
-    let dir = TempDir::new().expect("temp dir");
-    let running = oauth_server(&dir, memory_db(), "unbound").await;
-    let client = http_client();
-
-    let (location, cookie) = oauth_start(&running, &client).await;
-    let state = oauth_state(&location, &cookie);
-    let response = client
-        .get(format!(
-            "{}/api/oauth_callback?state={state}&code=the-code",
-            running.base
-        ))
-        .header(COOKIE, format!("oauth_state={state}"))
-        .send()
-        .await
-        .expect("callback");
-    assert_eq!(response.status(), reqwest::StatusCode::UNAUTHORIZED);
-    let body: Value = response.json().await.expect("json");
-    assert_eq!(
-        body["message"],
-        "please log in and bind your external account first."
-    );
-
-    running.stop().await;
-}
-
-#[tokio::test]
-async fn oauth_callback_logs_in_a_bound_account() {
-    let dir = TempDir::new().expect("temp dir");
-    let db = memory_db();
-    let user = db.accounts().create("bound", "password").expect("user");
-    komari_oauth::AccountLinker::new(&db)
-        .bind(
-            &user.uuid,
-            &komari_oauth::SsoIdentity::new("fake", "bound-subject"),
-        )
-        .expect("bind");
-    let running = oauth_server(&dir, db, "bound-subject").await;
-    let client = http_client();
-
-    let (location, cookie) = oauth_start(&running, &client).await;
-    let state = oauth_state(&location, &cookie);
-    let response = client
-        .get(format!(
-            "{}/api/oauth_callback?state={state}&code=the-code",
-            running.base
-        ))
-        .header(COOKIE, format!("oauth_state={state}"))
-        .send()
-        .await
-        .expect("callback");
-    assert_eq!(response.status(), reqwest::StatusCode::FOUND);
-    assert_eq!(
-        response
-            .headers()
-            .get("location")
-            .and_then(|value| value.to_str().ok()),
-        Some("/admin")
-    );
-    let cookies: Vec<String> = response
-        .headers()
-        .get_all("set-cookie")
-        .iter()
-        .filter_map(|value| value.to_str().ok().map(str::to_owned))
-        .collect();
-    assert!(
-        cookies
-            .iter()
-            .any(|cookie| cookie.contains("session_token="))
-    );
-    assert!(
-        cookies
-            .iter()
-            .any(|cookie| cookie.contains("Max-Age=2592000"))
-    );
-    assert_eq!(running.db.sessions().count().expect("sessions"), 1);
-
-    running.stop().await;
-}
-
-#[tokio::test]
-async fn oauth_callback_binds_an_external_account_to_the_session_user() {
-    let dir = TempDir::new().expect("temp dir");
-    let db = memory_db();
-    let user = db.accounts().create("binding", "password").expect("user");
-    let session = komari_auth::create_session(&db, &user.uuid, "test", "127.0.0.1", "password")
-        .expect("session");
-    let running = oauth_server(&dir, db, "binding-subject").await;
-    let client = http_client();
-
-    let (location, cookie) = oauth_start(&running, &client).await;
-    let state = oauth_state(&location, &cookie);
-    let response = client
-        .get(format!(
-            "{}/api/oauth_callback?state={state}&code=the-code",
-            running.base
-        ))
-        .header(
-            COOKIE,
-            format!(
-                "oauth_state={state}; binding_external_account={}; session_token={session}",
-                user.uuid
-            ),
-        )
-        .send()
-        .await
-        .expect("callback");
-    assert_eq!(response.status(), reqwest::StatusCode::FOUND);
-
-    let stored = running
-        .db
-        .accounts()
-        .require_by_uuid(&user.uuid)
-        .expect("stored user");
-    assert_eq!(stored.sso_id, "fake_binding-subject");
-    assert_eq!(stored.sso_type, "fake");
-
-    running.stop().await;
-}
-
-#[tokio::test]
-async fn qq_style_provider_skips_query_state_but_requires_the_cookie() {
-    let dir = TempDir::new().expect("temp dir");
-    let db = memory_db();
-    let user = db.accounts().create("qq", "password").expect("user");
-    komari_oauth::AccountLinker::new(&db)
-        .bind(
-            &user.uuid,
-            &komari_oauth::SsoIdentity::new("fake", "qq-subject"),
-        )
-        .expect("bind");
-    db.config()
-        .set("o_auth_enabled", &true)
-        .expect("enable oauth");
-    let oauth = OAuthRuntime::with_provider(Arc::new(
-        FakeProvider::named("fake", "qq-subject").skip_query_state(),
-    ));
-    let server = ServerBuilder::new(server_config(&dir))
-        .with_db(db)
-        .skip_services()
-        .with_oauth(oauth)
-        .build()
-        .await
-        .expect("build");
-    let running = start(server).await;
-    let client = http_client();
-
-    let (location, cookie) = oauth_start(&running, &client).await;
-    let state = oauth_state(&location, &cookie);
-    let response = client
-        .get(format!(
-            "{}/api/oauth_callback?state=wrong&code=the-code",
-            running.base
-        ))
-        .header(COOKIE, format!("oauth_state={state}"))
-        .send()
-        .await
-        .expect("callback");
-    assert_eq!(response.status(), reqwest::StatusCode::FOUND);
-
-    let response = client
-        .get(format!(
-            "{}/api/oauth_callback?state=wrong&code=the-code",
-            running.base
-        ))
-        .send()
-        .await
-        .expect("missing cookie");
-    assert_eq!(response.status(), reqwest::StatusCode::BAD_REQUEST);
-
-    running.stop().await;
-}
-
-#[tokio::test]
-async fn oauth_callback_rebinds_an_account_with_an_existing_sso() {
-    let dir = TempDir::new().expect("temp dir");
-    let db = memory_db();
-    let user = db.accounts().create("rebind", "password").expect("user");
-    komari_oauth::AccountLinker::new(&db)
-        .bind(
-            &user.uuid,
-            &komari_oauth::SsoIdentity::new("fake", "old-subject"),
-        )
-        .expect("initial bind");
-    let session = komari_auth::create_session(&db, &user.uuid, "test", "127.0.0.1", "password")
-        .expect("session");
-    let running = oauth_server(&dir, db, "new-subject").await;
-    let client = http_client();
-
-    let (location, cookie) = oauth_start(&running, &client).await;
-    let state = oauth_state(&location, &cookie);
-    let response = client
-        .get(format!(
-            "{}/api/oauth_callback?state={state}&code=the-code",
-            running.base
-        ))
-        .header(
-            COOKIE,
-            format!(
-                "oauth_state={state}; binding_external_account={}; session_token={session}",
-                user.uuid
-            ),
-        )
-        .send()
-        .await
-        .expect("callback");
-    assert_eq!(response.status(), reqwest::StatusCode::FOUND);
-    let stored = running
-        .db
-        .accounts()
-        .require_by_uuid(&user.uuid)
-        .expect("stored");
-    assert_eq!(stored.sso_id, "fake_new-subject");
-
-    running.stop().await;
-}
-
-#[tokio::test]
-async fn oauth_callback_rejects_a_mismatched_state() {
-    let dir = TempDir::new().expect("temp dir");
-    let running = oauth_server(&dir, memory_db(), "subject-1").await;
-    let client = http_client();
-
-    let response = client
-        .get(format!(
-            "{}/api/oauth_callback?state=wrong&code=the-code",
-            running.base
-        ))
-        .header(COOKIE, "oauth_state=different")
-        .send()
-        .await
-        .expect("callback");
-    assert_eq!(response.status(), reqwest::StatusCode::BAD_REQUEST);
-    let body: Value = response.json().await.expect("json");
-    assert_eq!(body["error"], "Invalid state");
-
-    running.stop().await;
 }

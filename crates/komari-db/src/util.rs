@@ -31,6 +31,18 @@ pub fn generate_password() -> String {
     generate_random_string(12)
 }
 
+/// Bcrypt cost for newly written password hashes. 12 is the bcrypt default
+/// and resists GPU brute force while keeping login latency acceptable.
+pub const SECURE_PASSWORD_COST: u32 = 12;
+
+/// Hash a password with bcrypt and a random per-password salt.
+///
+/// New code must use this instead of [`hash_password`]. The legacy
+/// SHA-256 helper remains for verifying old rows only.
+pub fn hash_secure_password(password: &str) -> String {
+    bcrypt::hash(password, SECURE_PASSWORD_COST).expect("bcrypt hashing failed")
+}
+
 /// Port of `accounts.hashPasswd`: base64(SHA-256(password + constantSalt)).
 pub fn hash_password(password: &str) -> String {
     let mut hasher = Sha256::new();
@@ -61,9 +73,10 @@ pub fn verify_sha256_password(password: &str, hash: &str) -> bool {
 
 /// Verify a stored password hash.
 ///
-/// Writes always use [`hash_password`] (SHA-256); bcrypt rows are accepted for
-/// read compatibility so `Accounts::check_password` and `User::check_password`
-/// do not reject credentials written by an older Rust version.
+/// Bcrypt rows are the normal path; legacy Go SHA-256 rows are accepted for
+/// compatibility with databases created by the Go backend, so
+/// `Accounts::check_password` and `User::check_password` keep working after
+/// migration. New writes must use [`hash_secure_password`].
 pub fn verify_password(password: &str, hash: &str) -> bool {
     if is_bcrypt_hash(hash) {
         return bcrypt::verify(password, hash).unwrap_or(false);
@@ -86,14 +99,15 @@ mod tests {
 
     #[test]
     fn bcrypt_hashes_are_read_only_compatible() {
-        // Bcrypt hash of "secret", as written by an older Rust build.
+        // Bcrypt hash of "secret", as written by current builds.
         let hash = "$2a$10$C4Gwv0BDoZO0LFJLCMwD/OcQy61qVqTGBbvcnPh0FiTT408C69pv.";
         assert!(verify_password("secret", hash));
         assert!(!verify_password("wrong", hash));
         assert!(!verify_sha256_password("secret", hash));
         assert!(is_bcrypt_hash(hash));
-        assert!(!is_bcrypt_hash(&hash_password("secret")));
-        // Writing still produces the Go SHA-256 format.
+        // New writes use bcrypt with a random salt.
+        assert!(is_bcrypt_hash(&hash_secure_password("secret")));
+        // Legacy Go SHA-256 rows still verify.
         assert_eq!(
             hash_password("secret"),
             "LKWZkh0XkW+IwPl4Zv7eHJmKmv2WvTk34iBzq0oefQM="

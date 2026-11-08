@@ -266,12 +266,14 @@ async fn body_uuid_wins_over_client_token_and_admin_may_target_a_client() {
     let token_client = create_client(&state, "agent");
     let target = create_client(&state, "target");
 
+    // Agents may only report for themselves: a body UUID pointing at another
+    // client is ignored and the report lands on the authenticated agent.
     let body = report_body(&target.uuid);
     let (status, _) = call(&app, post_report(&report_uri(&token_client.token), &body)).await;
     assert_eq!(status, StatusCode::OK);
     flush(&state);
-    assert!(records_for(&state, &token_client.uuid).is_empty());
-    assert_eq!(records_for(&state, &target.uuid).len(), 1);
+    assert_eq!(records_for(&state, &token_client.uuid).len(), 1);
+    assert!(records_for(&state, &target.uuid).is_empty());
 
     // Admin session with a body UUID (no agent token at all).
     let session = create_admin_session(&state);
@@ -284,7 +286,7 @@ async fn body_uuid_wins_over_client_token_and_admin_may_target_a_client() {
     let (status, _) = call(&app, admin_request).await;
     assert_eq!(status, StatusCode::OK);
     flush(&state);
-    assert_eq!(records_for(&state, &target.uuid).len(), 2);
+    assert_eq!(records_for(&state, &target.uuid).len(), 1);
 
     // Admin API key works too.
     set_api_key(&state, "0123456789abcdef");

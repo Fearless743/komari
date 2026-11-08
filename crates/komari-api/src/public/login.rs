@@ -11,6 +11,9 @@ use komari_auth::DEFAULT_SESSION_TTL_SECONDS;
 use komari_config::keys;
 use serde::Deserialize;
 use serde_json::json;
+use std::collections::HashMap;
+use std::sync::{Mutex, OnceLock};
+use std::time::{Duration, Instant};
 
 use crate::state::ApiState;
 
@@ -18,6 +21,48 @@ use super::{
     PeerAddress, SESSION_COOKIE, audit, client_ip, cookie_value, redirect, respond_error,
     respond_success, set_cookie, user_agent,
 };
+
+/// Failed login attempts per client IP: `(failures, window_start)`.
+/// Blocks brute force after 5 failures in 5 minutes with `429`.
+fn login_attempts() -> &'static Mutex<HashMap<String, (u32, Instant)>> {
+    static ATTEMPTS: OnceLock<Mutex<HashMap<String, (u32, Instant)>>> = OnceLock::new();
+    ATTEMPTS.get_or_init(|| Mutex::new(HashMap::new()))
+}
+
+fn login_key(headers: &HeaderMap, peer: Option<std::net::SocketAddr>) -> String {
+    client_ip(headers, peer)
+}
+
+fn check_login_rate_limit(key: &str) -> bool {
+    let mut attempts = login_attempts().lock().unwrap_or_else(|e| e.into_inner());
+    if let Some((count, start)) = attempts.get(key) {
+        if start.elapsed() < Duration::from_secs(300) && *count >= 5 {
+            return false;
+        }
+        if start.elapsed() >= Duration::from_secs(300) {
+            attempts.remove(key);
+        }
+    }
+    true
+}
+
+fn record_login_failure(key: &str) {
+    let mut attempts = login_attempts().lock().unwrap_or_else(|e| e.into_inner());
+    let entry = attempts
+        .entry(key.to_owned())
+        .or_insert((0, Instant::now()));
+    if entry.1.elapsed() >= Duration::from_secs(300) {
+        *entry = (1, Instant::now());
+    } else {
+        entry.0 += 1;
+    }
+}
+
+fn clear_login_failures(key: &str) {
+    if let Ok(mut attempts) = login_attempts().lock() {
+        attempts.remove(key);
+    }
+}
 
 #[derive(Debug, Default, Deserialize)]
 struct LoginRequest {
@@ -62,6 +107,14 @@ pub(crate) async fn login(
         );
     }
 
+    let rate_key = login_key(&headers, peer);
+    if !check_login_rate_limit(&rate_key) {
+        return respond_error(
+            StatusCode::TOO_MANY_REQUESTS,
+            "Too many failed login attempts; try again later",
+        );
+    }
+
     // Go's `accounts.CheckPassword` swallows lookup errors and reports bad
     // credentials, so a database failure must not leak a distinct 500.
     let Ok(Some(uuid)) = state
@@ -69,8 +122,16 @@ pub(crate) async fn login(
         .accounts()
         .check_password(&data.username, &data.password)
     else {
+        record_login_failure(&rate_key);
         return respond_error(StatusCode::UNAUTHORIZED, "Invalid credentials");
     };
+
+    // Transparently upgrade legacy SHA-256 rows to bcrypt on first login.
+    if let Ok(Some(user)) = state.db.accounts().get_by_uuid(&uuid) {
+        if !komari_auth::is_bcrypt_hash(&user.passwd) {
+            let _ = state.db.accounts().set_password(&uuid, &data.password);
+        }
+    }
 
     let two_factor = state
         .db
@@ -82,10 +143,12 @@ pub(crate) async fn login(
         .unwrap_or_default();
     if !two_factor.is_empty() {
         if data.two_fa.is_empty() {
+            record_login_failure(&rate_key);
             return respond_error(StatusCode::UNAUTHORIZED, "2FA code is required");
         }
         let valid = komari_auth::verify_2fa(&state.db, &uuid, &data.two_fa).unwrap_or(false);
         if !valid {
+            record_login_failure(&rate_key);
             return respond_error(StatusCode::UNAUTHORIZED, "Invalid 2FA code");
         }
     }
@@ -96,12 +159,15 @@ pub(crate) async fn login(
         {
             Ok(session) => session,
             Err(error) => {
+                tracing::warn!(%error, "failed to create session");
                 return respond_error(
                     StatusCode::INTERNAL_SERVER_ERROR,
-                    format!("Failed to create session: {error}"),
+                    "Failed to create session",
                 );
             }
         };
+
+    clear_login_failures(&rate_key);
 
     audit(
         &state,
@@ -171,8 +237,6 @@ pub(crate) async fn get_me(State(state): State<ApiState>, headers: HeaderMap) ->
             "username": user.username,
             "logged_in": true,
             "uuid": user.uuid,
-            "sso_type": user.sso_type,
-            "sso_id": user.sso_id,
             "2fa_enabled": !user.two_factor.is_empty(),
         })),
     )

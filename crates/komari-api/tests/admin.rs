@@ -73,6 +73,49 @@ fn json_body(value: Value) -> Body {
 }
 
 #[tokio::test]
+async fn admin_notification_get_redacts_secrets() {
+    let directory = tempfile::tempdir().unwrap();
+    let (state, app) = admin_app(directory.path());
+    admin_key(&state);
+
+    state
+        .db
+        .message_senders()
+        .save(&Provider::new(
+            "telegram",
+            r#"{"bot_token":"bot-secret","chat_id":"42"}"#,
+        ))
+        .unwrap();
+    let (status, body) = call(
+        &app,
+        bearer(
+            Method::GET,
+            "/api/admin/settings/message-sender?provider=telegram",
+            Body::empty(),
+        ),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    let addition: Value = serde_json::from_str(body["data"]["addition"].as_str().unwrap()).unwrap();
+    assert!(addition.get("bot_token").is_none());
+    assert_eq!(addition["chat_id"], "42");
+    let stored = state.db.message_senders().get("telegram").unwrap().unwrap();
+    assert!(stored.addition.contains("bot-secret"));
+
+    let (status, body) = call(
+        &app,
+        bearer(
+            Method::GET,
+            "/api/admin/settings/message-sender",
+            Body::empty(),
+        ),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    assert!(body["data"]["telegram"].is_array());
+}
+
+#[tokio::test]
 async fn admin_settings_requires_admin() {
     let directory = tempfile::tempdir().unwrap();
     let (state, app) = admin_app(directory.path());
@@ -505,75 +548,6 @@ async fn admin_ddns_get_redacts_sensitive_fields() {
     )
     .await;
     assert_eq!(status, StatusCode::OK);
-}
-
-#[tokio::test]
-async fn admin_notification_and_oauth_get_redact_secrets() {
-    let directory = tempfile::tempdir().unwrap();
-    let (state, app) = admin_app(directory.path());
-    admin_key(&state);
-
-    state
-        .db
-        .message_senders()
-        .save(&Provider::new(
-            "telegram",
-            r#"{"bot_token":"bot-secret","chat_id":"42"}"#,
-        ))
-        .unwrap();
-    let (status, body) = call(
-        &app,
-        bearer(
-            Method::GET,
-            "/api/admin/settings/message-sender?provider=telegram",
-            Body::empty(),
-        ),
-    )
-    .await;
-    assert_eq!(status, StatusCode::OK);
-    let addition: Value = serde_json::from_str(body["data"]["addition"].as_str().unwrap()).unwrap();
-    assert!(addition.get("bot_token").is_none());
-    assert_eq!(addition["chat_id"], "42");
-    let stored = state.db.message_senders().get("telegram").unwrap().unwrap();
-    assert!(stored.addition.contains("bot-secret"));
-
-    state
-        .db
-        .oauth()
-        .save(&Provider::new(
-            "github",
-            r#"{"client_id":"id","client_secret":"oauth-secret","app_secret":"app-secret","id_token":"jwt","code":"auth-code","state":"csrf"}"#,
-        ))
-        .unwrap();
-    let (status, body) = call(
-        &app,
-        bearer(
-            Method::GET,
-            "/api/admin/settings/oidc?provider=github",
-            Body::empty(),
-        ),
-    )
-    .await;
-    assert_eq!(status, StatusCode::OK);
-    let addition: Value = serde_json::from_str(body["data"]["addition"].as_str().unwrap()).unwrap();
-    assert!(addition.get("client_secret").is_none());
-    assert!(addition.get("app_secret").is_none());
-    assert!(addition.get("id_token").is_none());
-    assert!(addition.get("code").is_none());
-    assert!(addition.get("state").is_none());
-    assert_eq!(addition["client_id"], "id");
-
-    let (status, body) = call(
-        &app,
-        bearer(
-            Method::GET,
-            "/api/admin/settings/message-sender",
-            Body::empty(),
-        ),
-    )
-    .await;
-    assert_eq!(status, StatusCode::OK);
-    assert!(body["data"]["telegram"].is_array());
 }
 
 #[tokio::test]

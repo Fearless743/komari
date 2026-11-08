@@ -31,7 +31,7 @@ impl User {
         Self {
             uuid: uuid::Uuid::new_v4().to_string(),
             username: username.into(),
-            passwd: crate::util::hash_password(password),
+            passwd: crate::util::hash_secure_password(password),
             created_at: now,
             updated_at: now,
             ..Self::default()
